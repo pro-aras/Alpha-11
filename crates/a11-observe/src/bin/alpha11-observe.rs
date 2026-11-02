@@ -218,6 +218,12 @@ fn clamp_nonneg(v: f32) -> f32 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct RoleBoutAccum {
+    sum: [f64; 6],
+    count: u64,
+}
+
 #[derive(Clone)]
 struct DevOpenHabitat {
     terrarium: MultiGenTerrarium,
@@ -235,6 +241,19 @@ struct DevOpenHabitat {
     window_influx_sum: f64,
     window_net_sum: f64,
     window_ticks: u64,
+    prev_in_distress: bool,
+    distress_from_ticks: u64,
+    distress_recoveries: u64,
+    drought_net_sum: f64,
+    drought_ticks: u64,
+    flood_net_sum: f64,
+    flood_ticks: u64,
+    occluded_pair_ticks: u64,
+    occluded_closing_sum: f64,
+    prev_elder_pos: Option<(f32, f32)>,
+    last_role_tick: [[u64; 2]; 2],
+    role_bout_idx: [[u64; 2]; 2],
+    role_acc: [[[RoleBoutAccum; 2]; 2]; 2],
 }
 
 impl DevOpenHabitat {
@@ -345,6 +364,9 @@ impl DevOpenHabitat {
         let focal_body = EmbodiedBodyOrgans::new_infant(seed ^ 0xF0CA_1B0D_2026_0003);
         let init_coop = terrarium.ecology_metrics().coop_grove_pods_cracked;
         let init_occ = terrarium.ecology_metrics().occluded_vocal_approaches;
+        let init_e_pos = with_elder
+            .then(|| terrarium.metrics().agent_positions.first().copied())
+            .flatten();
         let mut hab = Self {
             terrarium,
             earth_mode,
@@ -361,6 +383,19 @@ impl DevOpenHabitat {
             window_influx_sum: 0.0,
             window_net_sum: 0.0,
             window_ticks: 0,
+            prev_in_distress: false,
+            distress_from_ticks: 0,
+            distress_recoveries: 0,
+            drought_net_sum: 0.0,
+            drought_ticks: 0,
+            flood_net_sum: 0.0,
+            flood_ticks: 0,
+            occluded_pair_ticks: 0,
+            occluded_closing_sum: 0.0,
+            prev_elder_pos: init_e_pos,
+            last_role_tick: [[0; 2]; 2],
+            role_bout_idx: [[0; 2]; 2],
+            role_acc: [[[RoleBoutAccum::default(); 2]; 2]; 2],
         };
         hab.refresh_views();
         hab
@@ -370,11 +405,51 @@ impl DevOpenHabitat {
         self.window_influx_sum = 0.0;
         self.window_net_sum = 0.0;
         self.window_ticks = 0;
+        self.prev_in_distress = false;
+        self.distress_from_ticks = 0;
+        self.distress_recoveries = 0;
+        self.drought_net_sum = 0.0;
+        self.drought_ticks = 0;
+        self.flood_net_sum = 0.0;
+        self.flood_ticks = 0;
+        self.occluded_pair_ticks = 0;
+        self.occluded_closing_sum = 0.0;
+        self.last_role_tick = [[0; 2]; 2];
+        self.role_bout_idx = [[0; 2]; 2];
+        self.role_acc = [[[RoleBoutAccum::default(); 2]; 2]; 2];
         self.prev_coop_grove_pods = self.terrarium.ecology_metrics().coop_grove_pods_cracked;
         self.prev_occluded_approaches = self.terrarium.ecology_metrics().occluded_vocal_approaches;
         self.focal_body.vocal_mut().reset_window_observations();
         if let Some((_, ref mut e_body, _, _, _)) = self.elder {
             e_body.vocal_mut().reset_window_observations();
+        }
+    }
+
+    fn role_swap_cv_separation(&self) -> f64 {
+        let mut sum_sep = 0.0_f64;
+        let mut valid_bins = 0_usize;
+        for bin in 0..2 {
+            let a_ev = &self.role_acc[bin][0][0];
+            let a_od = &self.role_acc[bin][0][1];
+            let b_ev = &self.role_acc[bin][1][0];
+            let b_od = &self.role_acc[bin][1][1];
+            if a_ev.count >= 2 && a_od.count >= 2 && b_ev.count >= 2 && b_od.count >= 2 {
+                let mut dot = 0.0_f64;
+                for k in 0..6 {
+                    let d_ev = (a_ev.sum[k] / (a_ev.count as f64))
+                        - (b_ev.sum[k] / (b_ev.count as f64));
+                    let d_od = (a_od.sum[k] / (a_od.count as f64))
+                        - (b_od.sum[k] / (b_od.count as f64));
+                    dot += d_ev * d_od;
+                }
+                sum_sep += dot;
+                valid_bins += 1;
+            }
+        }
+        if valid_bins > 0 {
+            sum_sep / (valid_bins as f64)
+        } else {
+            0.0
         }
     }
 
@@ -438,6 +513,75 @@ impl WorldMedium for DevOpenHabitat {
                     .copied()
                     .unwrap_or(0.0),
             );
+        }
+
+        let pre_positions = self.terrarium.metrics().agent_positions.clone();
+        let e_prev_opt = (self.elder.is_some()).then(|| pre_positions.first().copied()).flatten();
+        let f_prev_opt = pre_positions.get(self.focal_slot).copied();
+
+        // Read-only bout-split trajectory/role-swap observation before stepping physics.
+        if let (Some(e_prev), Some(f_prev), Some(e_old)) =
+            (e_prev_opt, f_prev_opt, self.prev_elder_pos)
+            && self.terrarium.has_line_of_sight(f_prev, e_prev)
+        {
+            let dx = e_prev.0 - f_prev.0;
+            let dy = e_prev.1 - f_prev.1;
+            let dist = dx.hypot(dy);
+            if (1.4..=10.5).contains(&dist) {
+                let ux = dx / dist;
+                let uy = dy / dist;
+                let e_vx = e_prev.0 - e_old.0;
+                let e_vy = e_prev.1 - e_old.1;
+                let v_peer_to_self = -(e_vx * ux + e_vy * uy);
+                let class_opt = if v_peer_to_self > 0.025 {
+                    Some(0_usize)
+                } else if v_peer_to_self < -0.025 {
+                    Some(1_usize)
+                } else {
+                    None
+                };
+                if let Some(cls) = class_opt {
+                    let bin = usize::from(dist >= 5.0);
+                    if self.window_ticks > self.last_role_tick[bin][cls].saturating_add(8) {
+                        self.role_bout_idx[bin][cls] =
+                            self.role_bout_idx[bin][cls].saturating_add(1);
+                    }
+                    self.last_role_tick[bin][cls] = self.window_ticks;
+                    let parity = (self.role_bout_idx[bin][cls] & 1) as usize;
+                    let fx = focal_world.actuator_out.first().copied().unwrap_or(0.0);
+                    let fy = focal_world.actuator_out.get(1).copied().unwrap_or(0.0);
+                    let gx = focal_world.actuator_out.get(2).copied().unwrap_or(0.0);
+                    let gy = focal_world.actuator_out.get(3).copied().unwrap_or(0.0);
+                    let ping = focal_world.actuator_out.get(4).copied().unwrap_or(0.0).abs();
+                    let hand_e = 0.25
+                        * (focal_body_act[0].abs()
+                            + focal_body_act[1].abs()
+                            + focal_body_act[2].abs()
+                            + focal_body_act[3].abs());
+                    let voc_e = 0.20
+                        * (ping
+                            + focal_body_act[6].abs()
+                            + focal_body_act[7].abs()
+                            + focal_body_act[8].abs()
+                            + focal_body_act[9].abs());
+                    let y = [
+                        f64::from(fx * ux + fy * uy),
+                        f64::from(-fx * uy + fy * ux),
+                        f64::from(gx * ux + gy * uy),
+                        f64::from(-gx * uy + gy * ux),
+                        f64::from(hand_e),
+                        f64::from(voc_e),
+                    ];
+                    let acc = &mut self.role_acc[bin][cls][parity];
+                    for k in 0..6 {
+                        acc.sum[k] += y[k];
+                    }
+                    acc.count = acc.count.saturating_add(1);
+                }
+            }
+        }
+        if let Some(e_prev) = e_prev_opt {
+            self.prev_elder_pos = Some(e_prev);
         }
 
         if let Some((ref mut e_brain, ref mut e_body, ref e_amb, e_in, e_st)) = self.elder {
@@ -582,10 +726,50 @@ impl WorldMedium for DevOpenHabitat {
             }
         }
 
+        if let (Some(e_prev), Some(f_prev)) = (e_prev_opt, f_prev_opt)
+            && !self.terrarium.has_line_of_sight(f_prev, e_prev)
+        {
+            let post_pos = &self.terrarium.metrics().agent_positions;
+            if let (Some(&e_now), Some(&f_now)) = (post_pos.first(), post_pos.get(self.focal_slot))
+            {
+                let d_prev = (e_prev.0 - f_prev.0).hypot(e_prev.1 - f_prev.1);
+                let d_now = (e_now.0 - f_now.0).hypot(e_now.1 - f_now.1);
+                if d_prev > 1.0 {
+                    self.occluded_pair_ticks = self.occluded_pair_ticks.saturating_add(1);
+                    self.occluded_closing_sum += f64::from(d_prev - d_now);
+                }
+            }
+        }
+
         self.refresh_views();
+        let net_tick = self.focal_influx - self.focal_stress;
         self.window_influx_sum += f64::from(self.focal_influx);
-        self.window_net_sum += f64::from(self.focal_influx - self.focal_stress);
+        self.window_net_sum += f64::from(net_tick);
         self.window_ticks = self.window_ticks.saturating_add(1);
+
+        let in_distress = net_tick < -0.012;
+        let recovered = net_tick >= -0.003;
+        if self.prev_in_distress {
+            self.distress_from_ticks = self.distress_from_ticks.saturating_add(1);
+            if recovered {
+                self.distress_recoveries = self.distress_recoveries.saturating_add(1);
+            }
+        }
+        self.prev_in_distress = if self.prev_in_distress {
+            !recovered
+        } else {
+            in_distress
+        };
+
+        let season_cos =
+            (std::f32::consts::TAU * self.terrarium.ecology_metrics().season_phase).cos();
+        if season_cos < 0.0 {
+            self.drought_net_sum += f64::from(net_tick);
+            self.drought_ticks = self.drought_ticks.saturating_add(1);
+        } else {
+            self.flood_net_sum += f64::from(net_tick);
+            self.flood_ticks = self.flood_ticks.saturating_add(1);
+        }
     }
 }
 
@@ -620,6 +804,9 @@ struct StageSnapshot {
 
     atp: f64,
     net_per_tick: f64,
+    drought_net_per_tick: f64,
+    flood_net_per_tick: f64,
+    markov_error_recovery: f64,
     agency: f64,
     pred_err: f64,
 
@@ -645,6 +832,9 @@ struct StageSnapshot {
     pods_cracked: f64,
     coop_grove_pods: f64,
     occluded_vocal_approaches: f64,
+    occluded_closing_rate: f64,
+    referential_coord_score: f64,
+    role_swap_separation: f64,
     coop_boulder_ticks: f64,
     huddling_ticks: f64,
     shared_slab_ticks: f64,
@@ -719,6 +909,21 @@ fn capture_stage(org: &Alpha11Organism, hab: &DevOpenHabitat) -> StageSnapshot {
 
         atp: f64::from(s.atp),
         net_per_tick: hab.window_net_sum / wt,
+        drought_net_per_tick: if hab.drought_ticks > 0 {
+            hab.drought_net_sum / (hab.drought_ticks as f64)
+        } else {
+            hab.window_net_sum / wt
+        },
+        flood_net_per_tick: if hab.flood_ticks > 0 {
+            hab.flood_net_sum / (hab.flood_ticks as f64)
+        } else {
+            hab.window_net_sum / wt
+        },
+        markov_error_recovery: if hab.distress_from_ticks > 0 {
+            (hab.distress_recoveries as f64) / (hab.distress_from_ticks as f64)
+        } else {
+            1.0
+        },
         agency: f64::from(s.mean_interventional_agency),
         pred_err: f64::from(s.mean_prediction_error),
 
@@ -759,6 +964,22 @@ fn capture_stage(org: &Alpha11Organism, hab: &DevOpenHabitat) -> StageSnapshot {
             .ecology_metrics()
             .occluded_vocal_approaches
             .saturating_sub(hab.prev_occluded_approaches) as f64,
+        occluded_closing_rate: if hab.occluded_pair_ticks > 0 {
+            hab.occluded_closing_sum / (hab.occluded_pair_ticks as f64)
+        } else {
+            0.0
+        },
+        referential_coord_score: (if hab.occluded_pair_ticks > 0 {
+            hab.occluded_closing_sum / (hab.occluded_pair_ticks as f64)
+        } else {
+            0.0
+        }) + 0.015
+            * (hab
+                .terrarium
+                .ecology_metrics()
+                .coop_grove_pods_cracked
+                .saturating_sub(hab.prev_coop_grove_pods) as f64),
+        role_swap_separation: hab.role_swap_cv_separation(),
         coop_boulder_ticks: hab.terrarium.ecology_metrics().cooperative_boulder_ticks as f64,
         huddling_ticks: hab.terrarium.ecology_metrics().huddling_ticks as f64,
         shared_slab_ticks: hab.shared_slab_ticks as f64,
@@ -982,6 +1203,9 @@ fn mean_stage(records: &[SeedDevelopmentRecord], pick: fn(&SeedDevelopmentRecord
         acc.vocal_mastery += s.vocal_mastery;
         acc.atp += s.atp;
         acc.net_per_tick += s.net_per_tick;
+        acc.drought_net_per_tick += s.drought_net_per_tick;
+        acc.flood_net_per_tick += s.flood_net_per_tick;
+        acc.markov_error_recovery += s.markov_error_recovery;
         acc.agency += s.agency;
         acc.pred_err += s.pred_err;
         acc.hand_strokes += s.hand_strokes;
@@ -1004,6 +1228,9 @@ fn mean_stage(records: &[SeedDevelopmentRecord], pick: fn(&SeedDevelopmentRecord
         acc.pods_cracked += s.pods_cracked;
         acc.coop_grove_pods += s.coop_grove_pods;
         acc.occluded_vocal_approaches += s.occluded_vocal_approaches;
+        acc.occluded_closing_rate += s.occluded_closing_rate;
+        acc.referential_coord_score += s.referential_coord_score;
+        acc.role_swap_separation += s.role_swap_separation;
         acc.coop_boulder_ticks += s.coop_boulder_ticks;
         acc.huddling_ticks += s.huddling_ticks;
         acc.shared_slab_ticks += s.shared_slab_ticks;
@@ -1035,6 +1262,9 @@ fn mean_stage(records: &[SeedDevelopmentRecord], pick: fn(&SeedDevelopmentRecord
     acc.vocal_mastery /= n;
     acc.atp /= n;
     acc.net_per_tick /= n;
+    acc.drought_net_per_tick /= n;
+    acc.flood_net_per_tick /= n;
+    acc.markov_error_recovery /= n;
     acc.agency /= n;
     acc.pred_err /= n;
     acc.hand_strokes /= n;
@@ -1057,6 +1287,9 @@ fn mean_stage(records: &[SeedDevelopmentRecord], pick: fn(&SeedDevelopmentRecord
     acc.pods_cracked /= n;
     acc.coop_grove_pods /= n;
     acc.occluded_vocal_approaches /= n;
+    acc.occluded_closing_rate /= n;
+    acc.referential_coord_score /= n;
+    acc.role_swap_separation /= n;
     acc.coop_boulder_ticks /= n;
     acc.huddling_ticks /= n;
     acc.shared_slab_ticks /= n;
@@ -1066,10 +1299,10 @@ fn mean_stage(records: &[SeedDevelopmentRecord], pick: fn(&SeedDevelopmentRecord
 }
 
 fn format_stage_json(label: &str, s: &StageSnapshot) -> String {
-    let mut out = String::with_capacity(1024);
+    let mut out = String::with_capacity(1280);
     let _ = write!(
         out,
-        "{{\"stage\":\"{label}\",\"tick\":{},\"cells\":{:.2},\"tubes\":{:.2},\"stiff_tubes\":{:.2},\"echo_tubes\":{:.2},\"mean_tau\":{:.3},\"max_tau\":{:.3},\"tau_octaves\":{:.2},\"mitosis_births\":{:.2},\"contradiction_splits\":{:.2},\"sleep_ticks\":{:.2},\"pores\":{{\"retina\":{:.2},\"echo\":{:.2},\"hands\":{:.2},\"vestibular\":{:.2},\"cochlea\":{:.2},\"distractors\":{:.2},\"distractor_share\":{:.4}}},\"muscles\":{{\"mastery\":{:.4},\"jerk\":{:.4},\"loco_mastery\":{:.4},\"hand_mastery\":{:.4},\"vest_mastery\":{:.4},\"vocal_mastery\":{:.4}}},\"homeostasis\":{{\"atp\":{:.3},\"net_per_tick\":{:.5},\"agency\":{:.5},\"pred_err\":{:.4}}},\"ecology\":{{\"pods_cracked\":{:.2},\"coop_grove_pods\":{:.2},\"occluded_vocal_approaches\":{:.1},\"coop_boulder_ticks\":{:.1},\"huddling_ticks\":{:.1},\"shared_slab_ticks\":{:.1},\"shelter_echo_ticks\":{:.1},\"elder_cells\":{:.2},\"elder_atp\":{:.3}}},\"embodied\":{{\"hand_strokes\":{:.1},\"canvas_coverage\":{:.4},\"canvas_morans_i\":{:.4},\"balance_mean_upright\":{:.2},\"balance_max_streak\":{:.1},\"tract_length_cm\":{:.2},\"voiced_rate\":{:.4},\"syllable_onsets\":{:.1},\"syllable_transitions\":{:.1},\"plosive_bursts\":{:.1},\"alternating_responses\":{:.1},\"mean_f0_hz\":{:.1},\"mean_f1_hz\":{:.1},\"mean_f2_hz\":{:.1},\"f1_spread_hz\":{:.1},\"f2_spread_hz\":{:.1}}}}}",
+        "{{\"stage\":\"{label}\",\"tick\":{},\"cells\":{:.2},\"tubes\":{:.2},\"stiff_tubes\":{:.2},\"echo_tubes\":{:.2},\"mean_tau\":{:.3},\"max_tau\":{:.3},\"tau_octaves\":{:.2},\"mitosis_births\":{:.2},\"contradiction_splits\":{:.2},\"sleep_ticks\":{:.2},\"pores\":{{\"retina\":{:.2},\"echo\":{:.2},\"hands\":{:.2},\"vestibular\":{:.2},\"cochlea\":{:.2},\"distractors\":{:.2},\"distractor_share\":{:.4}}},\"muscles\":{{\"mastery\":{:.4},\"jerk\":{:.4},\"loco_mastery\":{:.4},\"hand_mastery\":{:.4},\"vest_mastery\":{:.4},\"vocal_mastery\":{:.4}}},\"homeostasis\":{{\"atp\":{:.3},\"net_per_tick\":{:.5},\"drought_net_per_tick\":{:.5},\"flood_net_per_tick\":{:.5},\"markov_error_recovery\":{:.5},\"agency\":{:.5},\"pred_err\":{:.4}}},\"ecology\":{{\"pods_cracked\":{:.2},\"coop_grove_pods\":{:.2},\"occluded_vocal_approaches\":{:.1},\"occluded_closing_rate\":{:.5},\"referential_coord_score\":{:.5},\"role_swap_separation\":{:.5},\"coop_boulder_ticks\":{:.1},\"huddling_ticks\":{:.1},\"shared_slab_ticks\":{:.1},\"shelter_echo_ticks\":{:.1},\"elder_cells\":{:.2},\"elder_atp\":{:.3}}},\"embodied\":{{\"hand_strokes\":{:.1},\"canvas_coverage\":{:.4},\"canvas_morans_i\":{:.4},\"balance_mean_upright\":{:.2},\"balance_max_streak\":{:.1},\"tract_length_cm\":{:.2},\"voiced_rate\":{:.4},\"syllable_onsets\":{:.1},\"syllable_transitions\":{:.1},\"plosive_bursts\":{:.1},\"alternating_responses\":{:.1},\"mean_f0_hz\":{:.1},\"mean_f1_hz\":{:.1},\"mean_f2_hz\":{:.1},\"f1_spread_hz\":{:.1},\"f2_spread_hz\":{:.1}}}}}",
         s.tick,
         s.cells,
         s.tubes,
@@ -1096,11 +1329,17 @@ fn format_stage_json(label: &str, s: &StageSnapshot) -> String {
         s.vocal_mastery,
         s.atp,
         s.net_per_tick,
+        s.drought_net_per_tick,
+        s.flood_net_per_tick,
+        s.markov_error_recovery,
         s.agency,
         s.pred_err,
         s.pods_cracked,
         s.coop_grove_pods,
         s.occluded_vocal_approaches,
+        s.occluded_closing_rate,
+        s.referential_coord_score,
+        s.role_swap_separation,
         s.coop_boulder_ticks,
         s.huddling_ticks,
         s.shared_slab_ticks,
@@ -1276,31 +1515,30 @@ fn run_observe_development() -> Result<(), CampaignError> {
         ("FrozenTwin(@160s)", &st_frz),
     ] {
         println!(
-            "  {name}: ATP={:5.2} net/t={:+.4} pods={:4.1} grove_coop={:4.2} occ_app={:5.1} huddle={:5.1} | upright={:5.1} | tract={:5.2}cm voiced={:.3} onsets={:4.1} syl_tr={:5.1} plos={:4.1} alt={:4.1} F0={:4.0}Hz F1={:4.0}Hz F2={:5.0}Hz (spr={:4.0}Hz)",
+            "  {name}: ATP={:5.2} net/t={:+.4} (dr={:+.4} fl={:+.4}) p_rec={:.4} pods={:4.1} grove_coop={:4.2} occ_cls={:+.4} role_sep={:+.5} huddle={:5.1} | upright={:5.1} | tract={:5.2}cm voiced={:.3} syl_tr={:5.1} plos={:4.1} alt={:4.1}",
             s.atp,
             s.net_per_tick,
+            s.drought_net_per_tick,
+            s.flood_net_per_tick,
+            s.markov_error_recovery,
             s.pods_cracked,
             s.coop_grove_pods,
-            s.occluded_vocal_approaches,
+            s.occluded_closing_rate,
+            s.role_swap_separation,
             s.huddling_ticks,
             s.balance_mean_upright,
             s.tract_length_cm,
             s.voiced_rate,
-            s.syllable_onsets,
             s.syllable_transitions,
             s.plosive_bursts,
             s.alternating_responses,
-            s.mean_f0_hz,
-            s.mean_f1_hz,
-            s.mean_f2_hz,
-            s.f2_spread_hz,
         );
     }
 
     // Paired causal, developmental & Earth-ecology comparisons (with Holm-Bonferroni p-values)
     let vec_of =
         |f: fn(&SeedDevelopmentRecord) -> f64| -> Vec<f64> { records.iter().map(f).collect() };
-    let comparisons: [(&str, Vec<f64>, Vec<f64>); 7] = [
+    let comparisons: [(&str, Vec<f64>, Vec<f64>); 10] = [
         (
             "Homeostatic Survival (Mature Natural vs Frozen)",
             vec_of(|r| r.stages_nat[3].net_per_tick),
@@ -1335,6 +1573,21 @@ fn run_observe_development() -> Result<(), CampaignError> {
             "Earth Ecology Vitality Scaffolding (Earth vs Barren)",
             vec_of(|r| r.stages_nat[3].net_per_tick),
             vec_of(|r| r.mature_barren.net_per_tick),
+        ),
+        (
+            "Markov Error-Recovery p(bad->good) (Natural vs Frozen)",
+            vec_of(|r| r.stages_nat[3].markov_error_recovery),
+            vec_of(|r| r.mature_frz.markov_error_recovery),
+        ),
+        (
+            "Occluded Acoustic Coordination (Natural vs VocalMuted)",
+            vec_of(|r| r.stages_nat[3].referential_coord_score),
+            vec_of(|r| r.mature_muted.referential_coord_score),
+        ),
+        (
+            "Trajectory/Role-Swap Separation (Natural vs Frozen)",
+            vec_of(|r| r.stages_nat[3].role_swap_separation),
+            vec_of(|r| r.mature_frz.role_swap_separation),
         ),
     ];
 
