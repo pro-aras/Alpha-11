@@ -1,0 +1,19 @@
+[package]
+name = "a11-observe"
+description = "External read-only scientific microscope, 6-control twin evaluator, source-hygiene forensics, and Holm-Bonferroni longitudinal gates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+a11-medium = { path = "../a11-medium" }
+a11-core = { path = "../a11-core" }
+a11-worlds = { path = "../a11-worlds" }
+a11-portals = { path = "../a11-portals" }
+
+[lints]
+workspace = true

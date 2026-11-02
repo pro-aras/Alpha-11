@@ -1,0 +1,19 @@
+[package]
+name = "a11-live"
+description = "Crash-safe continuous live embodied habitat daemon (a11-live) for cohabiting Alpha 11 organisms"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+a11-medium = { path = "../a11-medium" }
+a11-core = { path = "../a11-core" }
+a11-worlds = { path = "../a11-worlds" }
+a11-portals = { path = "../a11-portals" }
+
+[lints]
+workspace = true

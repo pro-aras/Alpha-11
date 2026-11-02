@@ -1,0 +1,16 @@
+[package]
+name = "a11-core"
+description = "Zero-string biophysical organism core: self-wired O(1) sensory pores, polychronous predictive delay tubes, somatic ATP & sleep, and CRC32C persistence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+a11-medium = { path = "../a11-medium" }
+
+[lints]
+workspace = true

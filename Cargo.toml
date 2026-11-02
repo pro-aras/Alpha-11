@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/a11-medium",
+    "crates/a11-core",
+    "crates/a11-worlds",
+    "crates/a11-portals",
+    "crates/a11-observe",
+    "crates/a11-live",
+]
+
+[workspace.package]
+version = "11.0.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["pro-aras"]
+license = "MIT"
+repository = "https://github.com/pro-aras/Alpha-11"
+homepage = "https://github.com/pro-aras/Alpha-11"
+readme = "README.md"
+keywords = ["biocomputation", "neuromorphic", "artificial-life", "predictive-coding", "rust"]
+categories = ["science::neuroscience", "simulation", "algorithms"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

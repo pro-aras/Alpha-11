@@ -1,0 +1,99 @@
+{
+  "core_and_dense_4096_audit": {
+  "hygiene": {
+    "files_scanned": 9,
+    "is_clean": true,
+    "string_literal_count": 0,
+    "forbidden_identifier_count": 0,
+    "unsafe_block_count": 0,
+    "unwrap_call_count": 0
+  },
+  "persistence": {
+    "all_passed": true,
+    "checkpoint_bytes_at_100": 54418,
+    "restore_at_100_snapshot_equal": true,
+    "restore_at_100_hash_equal": true,
+    "continuation_200_pulses_bit_identical": true,
+    "continuation_200_snapshot_bit_identical": true,
+    "continuation_200_hash_identical": true,
+    "payload_bitflip_case": {"label": "payload_single_bitflip", "passed": true, "poisoned_after_reject": true, "live_hash_preserved": true, "step_blocked_with_poison": true, "encode_blocked_with_poison": true},
+    "oversized_case": {"label": "oversized_input", "passed": true, "poisoned_after_reject": true, "live_hash_preserved": true, "step_blocked_with_poison": true, "encode_blocked_with_poison": true}
+  },
+  "plasticity_and_lesion": {
+    "all_passed": true,
+    "frozen_steps_tested": 500,
+    "max_frozen_hash_changed_bits": 0,
+    "frozen_topology_invariant": true,
+    "post_growth_frozen_hash_changed_bits": 0,
+    "lesion_preserved_natural_mode": true,
+    "lesion_zeroed_all_pore_conductances": true
+  },
+  "latency": {
+    "steps_profiled": 2000,
+    "num_ambient_channels": 4096,
+    "num_actuators": 6,
+    "step_latency_us": {"count": 2000, "min": 10.540000, "p10": 41.117900, "p25": 51.571500, "p50": 65.646000, "p75": 67.411500, "p90": 69.666000, "p95": 72.411450, "p99": 75.566000, "max": 165.787000, "iqr": 15.840000, "mean": 59.849691, "std_dev": 12.180616, "cv": 0.203520},
+    "full_tick_latency_us": {"count": 2000, "min": 289.904000, "p10": 329.528000, "p25": 346.503000, "p50": 355.730000, "p75": 362.325500, "p90": 367.804100, "p95": 370.860500, "p99": 377.684400, "max": 461.262000, "iqr": 15.822500, "mean": 352.633157, "std_dev": 14.640802, "cv": 0.041519},
+    "peak_used_state_bytes": 243046,
+    "final_used_state_bytes": 243026,
+    "checkpoint_bytes": 243359,
+    "vm_rss_bytes": 4812800,
+    "vm_hwm_bytes": 5341184
+  }
+}
+,
+  "radiant_128_latency_audit": {
+  "hygiene": null,
+  "persistence": null,
+  "plasticity_and_lesion": null,
+  "latency": {
+    "steps_profiled": 2000,
+    "num_ambient_channels": 128,
+    "num_actuators": 6,
+    "step_latency_us": {"count": 2000, "min": 8.646000, "p10": 46.003000, "p25": 51.729000, "p50": 71.436500, "p75": 75.023000, "p90": 77.529900, "p95": 79.358000, "p99": 87.319710, "max": 231.803000, "iqr": 23.294000, "mean": 65.046018, "std_dev": 16.539908, "cv": 0.254280},
+    "full_tick_latency_us": {"count": 2000, "min": 17.934000, "p10": 55.663100, "p25": 61.678000, "p50": 81.475500, "p75": 85.023000, "p90": 87.698000, "p95": 89.621050, "p99": 97.953820, "max": 257.833000, "iqr": 23.345000, "mean": 75.105723, "std_dev": 17.214379, "cv": 0.229202},
+    "peak_used_state_bytes": 88953,
+    "final_used_state_bytes": 88873,
+    "checkpoint_bytes": 89206,
+    "vm_rss_bytes": 4558848,
+    "vm_hwm_bytes": 4558848
+  }
+}
+,
+  "channel_32x_step_p50_ratio": 0.918942,
+  "channel_32x_step_p99_ratio": 0.865395,
+  "crate_hygiene": [
+    {
+      "crate_name": "a11-medium",
+      "files_scanned": 1,
+      "string_literal_count": 0,
+      "forbidden_identifier_count": 0,
+      "unsafe_block_count": 0,
+      "unwrap_call_count": 0
+    },
+    {
+      "crate_name": "a11-core",
+      "files_scanned": 9,
+      "string_literal_count": 0,
+      "forbidden_identifier_count": 0,
+      "unsafe_block_count": 0,
+      "unwrap_call_count": 0
+    },
+    {
+      "crate_name": "a11-worlds",
+      "files_scanned": 7,
+      "string_literal_count": 0,
+      "forbidden_identifier_count": 0,
+      "unsafe_block_count": 0,
+      "unwrap_call_count": 0
+    },
+    {
+      "crate_name": "a11-portals",
+      "files_scanned": 7,
+      "string_literal_count": 13,
+      "forbidden_identifier_count": 0,
+      "unsafe_block_count": 0,
+      "unwrap_call_count": 0
+    }
+  ]
+}

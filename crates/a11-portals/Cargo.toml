@@ -1,0 +1,16 @@
+[package]
+name = "a11-portals"
+description = "Embodied physical body organs (16 kHz vocal tract, 32-band ERB cochlea, tactile hands, vestibular balance) and transactional LiveHostRunner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+a11-medium = { path = "../a11-medium" }
+
+[lints]
+workspace = true

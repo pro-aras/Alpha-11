@@ -1,0 +1,15 @@
+/target/
+/target-*/
+/live/state/
+*.ckpt
+*.ckpt.prev
+*.chk
+*.prev
+*.tmp
+*.wav
+.env
+.env.*
+/.purged_staged_exams
+/.judge_locked
+/.vault_authorized
+.DS_Store

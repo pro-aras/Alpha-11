@@ -1,0 +1,27 @@
+name: Alpha-11 Rust CI & Scientific Integrity Gates
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release workspace and binaries
+        run: cargo build --release --workspace --bins
+
+      - name: Run all 47 release unit & invariant tests
+        run: cargo test --release --workspace
+
+      - name: Run Study 0..6 forensic hygiene, persistence, plasticity & O(1) latency self-check
+        run: ./target/release/alpha11-observe self-check
