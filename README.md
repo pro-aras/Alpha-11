@@ -67,7 +67,7 @@ Alpha-11/
 └── observations/
     ├── METHODOLOGY.md          # Non-parametric twin controls, causal isolation & persistence audits
     ├── 00..06_*.{md,json}      # Deterministically reproducible Studies 0..6 reports & datasets
-    └── open_world_development.json # 12-seed 8,000-tick whole-body maturation & 7/7 Holm gate dataset
+    └── open_world_development.json # 12-seed 8,000-tick whole-body maturation & 10-gate Holm dataset
 ```
 
 ---
@@ -114,7 +114,7 @@ Launch the focal `Alpha11Organism` and its cohabiting Companion `Elder` continuo
   ```
 - Additional habitat modes (`--habitat composite` and `--habitat terrarium`) are documented in [`live/README.md`](./live/README.md).
 
-### B. 12-Seed Whole-Body Developmental & `7/7` Holm-Bonferroni Gate Campaign
+### B. 12-Seed Whole-Body Developmental & 10-Gate Holm-Bonferroni Campaign
 Run the full `8,000`-tick (`160 s` simulated life across `Newborn -> Infant -> Juvenile -> Mature`) 12-seed developmental study comparing `Natural` against `FrozenPlasticity`, `ActionShuffled`, `Intact vs Flagless Lesioned`, `BarrenTwin`, `SoloOrphan`, and `VocalMuted` (`~45 s` on modern multi-core CPUs):
 
 ```bash
@@ -131,10 +131,56 @@ Regenerate all forensic and multi-world twin-control reports (`observations/00_f
 ```
 
 ### D. Locked `DEV-30` Causal Benchmark & Structural Ablations (`alpha11-gates`)
-Run the `30`-seed (`seeds 0..29`) `12`-gate causal benchmark (`G1..G9` + invariants `I1..I3`) and `25`-test Holm-Bonferroni paired ablation suite on `CausalCore` or `Alpha11Organism`:
+Run the `12`-gate causal benchmark (`G1..G9` + invariants `I1..I3`) on `CausalCore` (`causal`) or `Alpha11Organism` (`alpha11`); `dev` = seeds `0..9`, `dev30` = seeds `0..29`:
 
 ```bash
 ./target/release/alpha11-gates causal dev30
+./target/release/alpha11-gates alpha11 dev
+./target/release/alpha11-gates causal ablate
+```
+
+---
+
+## 5. Verified Empirical Results (`n = 12` Seeds, Holm-Bonferroni Adjusted)
+
+### A. Longitudinal Brain, Sense & Body Development (`observe-development`, 12-seed means)
+| Stage / Control | Cells | Tubes (`Stiff LTM`) | Distractor Pores | Mastery (`Jerk`) | Pods Cracked | Tract | `net/tick` |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **Newborn (`0..10s`)** | `51.0` | `1,010.4` (`103.9`) | `11.0%` | `0.036` (`0.340`) | `0.2` | `8.87 cm` | `-0.0001` |
+| **Mature (`100..160s`)** | **`217.4`** | **`4,871.8` (`1,232.7`)** | **`3.0%`** | **`0.425` (`0.211`)** | **`9.4`** | **`12.87 cm`** | **`+0.0012`** |
+| **BarrenTwin (`@160s`)** | `126.1` | `2,857.5` (`768.9`) | `3.5%` | `0.424` (`0.198`) | `0.0` | `12.75 cm` | `-0.0131` |
+| **FrozenTwin (`@160s`)** | `32.0` | `319.6` (`0.0`) | — | `0.000` (`0.576`) | `0.8` | `8.80 cm` | `-0.0123` |
+
+### B. Pre-Registered 10-Gate Longitudinal Campaign (`n = 12` seeds, Holm-adjusted) — `8/10` PASS
+| Gate | Arm `A` | Arm `B` | `t` | `p_holm` | Result |
+| :--- | ---: | ---: | ---: | ---: | :---: |
+| 1. Homeostatic Survival (Natural vs Frozen) | `+0.0012` | `-0.0123` | `+13.82` | `0.00000` | **PASS (12/12)** |
+| 2. Causal Motor Control (Natural vs ActionShuffled) | `+0.0012` | `-0.0147` | `+9.72` | `0.00001` | **PASS (12/12)** |
+| 3. Foraging Necessity (Intact vs Flagless Lesion) | `+0.0030` | `-0.0083` | `+2.95` | `0.03967` | **PASS (10/12)** |
+| 4. Counterfactual Agency (Natural vs ActionShuffled) | `+0.0283` | `+0.0000` | `+5.97` | `0.00037` | **PASS (12/12)** |
+| 5. Neuromuscular Mastery Growth (Mature vs Newborn) | `+0.4248` | `+0.0357` | `+58.74` | `0.00000` | **PASS (12/12)** |
+| 6. Kinematic Jerk Reduction | `0.3398` | `0.2109` | `+9.12` | `0.00001` | **PASS (12/12)** |
+| 7. Earth Ecology Scaffolding (Earth vs Barren) | `+0.0012` | `-0.0131` | `+12.24` | `0.00000` | **PASS (12/12)** |
+| 8. Markov Error-Recovery (Natural vs Frozen) | `+0.0344` | `+0.0127` | `+7.05` | `0.00011` | **PASS (11/12)** |
+| 9. Occluded Acoustic Coordination (Natural vs VocalMuted) | `+0.0402` | `-0.0038` | `+1.88` | `0.08672` | **FAIL** |
+| 10. Trajectory/Role-Swap Separation (Natural vs Frozen) | `-0.0450` | `-0.0015` | `-2.40` | `0.06996` | **FAIL** |
+
+### B2. Causal Benchmark on `Alpha11Organism` (`alpha11-gates alpha11 dev`, 10 seeds) — `4/12` PASS
+`G1` (Natural > Frozen), `G2` (Natural > Yoked), `G9` (torture robustness) and `I2` (bounded `O(1)` latency, `4096ch p99 ~ 119 us`) pass. `G3..G8`, `I1` and `I3` fail. **Known open problem (`I3`):** over long horizons the learning organism runs its energy reserve down (`atp_nat = 0.12` vs `atp_frz = 6.45`); the continuously running live organism shows the same chronic low-`ATP` state.
+
+### C. Forensic Hygiene, Persistence, Plasticity & Twin Studies `0..6` (`self-check`)
+Regenerate all forensic and multi-world twin-control reports (`observations/00_forensics_and_latency.*` through `06_human_activity_portals.*`, `~27 s`):
+
+```bash
+./target/release/alpha11-observe self-check
+```
+
+### D. Locked `DEV-30` Causal Benchmark & Structural Ablations (`alpha11-gates`)
+Run the `12`-gate causal benchmark (`G1..G9` + invariants `I1..I3`) on `CausalCore` (`causal`) or `Alpha11Organism` (`alpha11`); `dev` = seeds `0..9`, `dev30` = seeds `0..29`:
+
+```bash
+./target/release/alpha11-gates causal dev30
+./target/release/alpha11-gates alpha11 dev
 ./target/release/alpha11-gates causal ablate
 ```
 
@@ -175,7 +221,7 @@ Run the `30`-seed (`seeds 0..29`) `12`-gate causal benchmark (`G1..G9` + invaria
 
 ## 6. Scientific Scope & Honesty Statement
 
-Passing `Study 0..6`, `12/12` `DEV-30` causal gates, and `7/7` Holm-Bonferroni longitudinal whole-body gates demonstrates **closed-loop self-wired sensory organogenesis, bounded `O(1)` perceptual scaling, counterfactual motor agency, polychronous multi-syllable acoustic contour growth, blind sound-guided approach around visual occlusions, obligate two-organism physical foraging, and crash-safe continual persistence**—not human-level symbolic language, consciousness, or general intelligence.
+The current evidence (`Study 0..6`, `8/10` longitudinal gates, `4/12` causal-benchmark gates) supports **closed-loop self-wired sensory organogenesis, bounded `O(1)` perceptual scaling, counterfactual motor agency, motor maturation, ecology-dependent survival over an `8,000`-tick life, and crash-safe continual persistence**. It does **not** yet show acoustic social coordination (Gate 9), role separation (Gate 10), long-horizon energy homeostasis (`I3`), transfer, or reversal learning on the causal benchmark — and nothing here is human-level language, consciousness, or general intelligence. Falsified mechanisms are kept out of the code and recorded by the authors.
 
 ---
 
