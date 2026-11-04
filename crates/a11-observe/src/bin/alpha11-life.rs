@@ -828,6 +828,44 @@ fn run_aged(cli: &Cli) -> Result<String, String> {
     Ok(out)
 }
 
+/// Offline repair: restore `--ckpt`, apply the flagless `zero_learned_conductances` lesion
+/// (structure, tick and body state preserved), verify the result shadow-decodes, write `--out`.
+fn run_relearn(cli: &Cli) -> Result<String, String> {
+    let src = cli.ckpt.as_ref().ok_or("relearn requires --ckpt <input>")?;
+    let dst = cli.out.as_ref().ok_or("relearn requires --out <output>")?;
+    let bytes = fs::read(src).map_err(|e| format!("read checkpoint: {e}"))?;
+    let mut org = Alpha11Organism::new(0, OrganismConfig::default());
+    org.restore_checkpoint(&bytes)
+        .map_err(|e| format!("restore failed: {e:?}"))?;
+    let before = org.snapshot();
+    let h_before = org.learned_parameter_hash();
+    org.zero_learned_conductances();
+    let after = org.snapshot();
+    let out = org
+        .encode_checkpoint()
+        .map_err(|e| format!("encode failed: {e:?}"))?;
+    let mut check = Alpha11Organism::new(0, OrganismConfig::default());
+    check
+        .restore_checkpoint(&out)
+        .map_err(|e| format!("re-decode failed: {e:?}"))?;
+    if check.learned_parameter_hash() != org.learned_parameter_hash() {
+        return Err("re-decoded learned hash mismatch".to_string());
+    }
+    fs::write(dst, &out).map_err(|e| format!("write output: {e}"))?;
+    Ok(format!(
+        "relearn: tick={} cells={}->{} tubes={}->{} atp={:.3} learned_hash {:016x}->{:016x} bytes={}\n",
+        before.tick,
+        before.cell_count,
+        after.cell_count,
+        before.tube_count,
+        after.tube_count,
+        after.atp,
+        h_before,
+        org.learned_parameter_hash(),
+        out.len()
+    ))
+}
+
 // =============================================================================
 // CLI
 // =============================================================================
@@ -840,6 +878,7 @@ struct Cli {
     threads: usize,
     tag: String,
     ckpt: Option<PathBuf>,
+    out: Option<PathBuf>,
 }
 
 fn resolve_workspace_root() -> PathBuf {
@@ -861,7 +900,7 @@ fn write_report(cli: &Cli, study: &str, js: &str) -> Result<(), String> {
 fn parse_cli() -> Result<Cli, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().cloned().ok_or("missing subcommand (energy | teach | teach2)")?;
-    if !matches!(cmd.as_str(), "energy" | "teach" | "teach2" | "aged") {
+    if !matches!(cmd.as_str(), "energy" | "teach" | "teach2" | "aged" | "relearn") {
         return Err(format!("unknown subcommand {cmd}"));
     }
     let mut cli = Cli {
@@ -872,6 +911,7 @@ fn parse_cli() -> Result<Cli, String> {
         threads: 12,
         tag: "run".to_string(),
         ckpt: None,
+        out: None,
     };
     let mut i = 1;
     while i < args.len() {
@@ -884,6 +924,7 @@ fn parse_cli() -> Result<Cli, String> {
             "--threads" => cli.threads = val.parse().map_err(|e| format!("{key}: {e}"))?,
             "--tag" => cli.tag.clone_from(val),
             "--ckpt" => cli.ckpt = Some(PathBuf::from(val)),
+            "--out" => cli.out = Some(PathBuf::from(val)),
             other => return Err(format!("unknown argument {other}")),
         }
         i += 2;
@@ -917,6 +958,7 @@ fn main() -> ExitCode {
         "energy" => run_energy(&cli),
         "teach2" => run_teach(&cli, &TEACH_V2),
         "aged" => run_aged(&cli),
+        "relearn" => run_relearn(&cli),
         _ => run_teach(&cli, &TEACH_V1),
     };
     match res {
@@ -930,7 +972,7 @@ fn main() -> ExitCode {
                 t0.elapsed().as_secs_f64()
             );
             print!("{text}");
-            if cli.cmd != "aged" {
+            if cli.cmd != "aged" && cli.cmd != "relearn" {
                 println!("report: observations/life/{}_{}.json", cli.cmd, cli.tag);
             }
             ExitCode::SUCCESS
