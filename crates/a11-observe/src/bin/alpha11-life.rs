@@ -738,6 +738,97 @@ fn run_teach(cli: &Cli, tp: &TeachParams) -> Result<String, String> {
 }
 
 // =============================================================================
+// aged (diagnostic only, n = 1 individual, no gates)
+// =============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AArm {
+    AgedNatural,
+    AgedFrozen,
+    AgedLesion,
+    YoungNatural,
+}
+
+fn aged_arm(bytes: &[u8], seed: u64, arm: AArm, ticks: usize) -> Result<[f64; 6], String> {
+    let mut org = Alpha11Organism::new(seed, OrganismConfig::default());
+    if arm != AArm::YoungNatural {
+        org.restore_checkpoint(bytes)
+            .map_err(|e| format!("restore failed: {e:?}"))?;
+    }
+    if arm == AArm::AgedFrozen {
+        org.set_control_mode(ControlMode::FrozenPlasticity);
+    }
+    if arm == AArm::AgedLesion {
+        org.zero_learned_conductances();
+    }
+    let births0 = org.snapshot().mitosis_births;
+    let mut hab = OpenHabitat::new(seed ^ ENERGY_SALT);
+    let (mut influx, mut net, mut starve, mut n) = (0.0_f64, 0.0_f64, 0_u64, 0_u64);
+    for t in 1..=ticks {
+        let p = org
+            .step(hab.current_view())
+            .unwrap_or_else(|_| FieldPulse::silent(OPEN_ACT));
+        hab.apply_pulse(&p);
+        if (t & 15) == 0 {
+            hab.sync_vocal_ontogeny(&org);
+        }
+        let v = hab.current_view();
+        influx += f64::from(v.metabolic_influx);
+        net += f64::from(v.metabolic_influx) - f64::from(v.tissue_stress);
+        if t % 10 == 0 {
+            n += 1;
+            if org.snapshot().atp < STARVE_ATP {
+                starve += 1;
+            }
+        }
+    }
+    let s = org.snapshot();
+    let tf = ticks as f64;
+    Ok([
+        influx / tf,
+        net / tf,
+        (starve as f64) / (n.max(1) as f64),
+        f64::from(s.atp),
+        s.cell_count as f64,
+        s.mitosis_births.saturating_sub(births0) as f64,
+    ])
+}
+
+fn run_aged(cli: &Cli) -> Result<String, String> {
+    let path = cli.ckpt.as_ref().ok_or("aged requires --ckpt <copy of an organism checkpoint>")?;
+    let bytes = fs::read(path).map_err(|e| format!("read checkpoint: {e}"))?;
+    let ticks = cli.ticks.unwrap_or(30_000);
+    let arms = [AArm::AgedNatural, AArm::AgedFrozen, AArm::AgedLesion, AArm::YoungNatural];
+    let jobs: Vec<(u64, AArm)> = (0..cli.seeds as u64)
+        .flat_map(|k| arms.iter().map(move |&a| (cli.seed_offset + k, a)))
+        .collect();
+    let res = run_jobs(jobs.len(), cli.threads, |j| aged_arm(&bytes, jobs[j].0, jobs[j].1, ticks));
+    let mut out = String::new();
+    let _ = writeln!(out, "DIAGNOSTIC ONLY: one aged individual across {} habitat seeds, {ticks} ticks each", cli.seeds);
+    for (ai, a) in arms.iter().enumerate() {
+        let mut acc = [0.0_f64; 6];
+        let mut cnt = 0.0_f64;
+        for (j, r) in res.iter().enumerate() {
+            if jobs[j].1 != *a {
+                continue;
+            }
+            let r = r.as_ref().ok_or("aged job missing")?.as_ref().map_err(Clone::clone)?;
+            for k in 0..6 {
+                acc[k] += r[k];
+            }
+            cnt += 1.0;
+        }
+        let _ = ai;
+        let _ = writeln!(
+            out,
+            "[{a:?}] influx/tick={:.5} net/tick={:+.5} starve={:.3} atp_end={:.2} cells_end={:.1} births={:.0}",
+            acc[0] / cnt, acc[1] / cnt, acc[2] / cnt, acc[3] / cnt, acc[4] / cnt, acc[5] / cnt
+        );
+    }
+    Ok(out)
+}
+
+// =============================================================================
 // CLI
 // =============================================================================
 
@@ -748,6 +839,7 @@ struct Cli {
     ticks: Option<usize>,
     threads: usize,
     tag: String,
+    ckpt: Option<PathBuf>,
 }
 
 fn resolve_workspace_root() -> PathBuf {
@@ -769,7 +861,7 @@ fn write_report(cli: &Cli, study: &str, js: &str) -> Result<(), String> {
 fn parse_cli() -> Result<Cli, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().cloned().ok_or("missing subcommand (energy | teach | teach2)")?;
-    if cmd != "energy" && cmd != "teach" && cmd != "teach2" {
+    if !matches!(cmd.as_str(), "energy" | "teach" | "teach2" | "aged") {
         return Err(format!("unknown subcommand {cmd}"));
     }
     let mut cli = Cli {
@@ -779,6 +871,7 @@ fn parse_cli() -> Result<Cli, String> {
         ticks: None,
         threads: 12,
         tag: "run".to_string(),
+        ckpt: None,
     };
     let mut i = 1;
     while i < args.len() {
@@ -790,6 +883,7 @@ fn parse_cli() -> Result<Cli, String> {
             "--ticks" => cli.ticks = Some(val.parse().map_err(|e| format!("{key}: {e}"))?),
             "--threads" => cli.threads = val.parse().map_err(|e| format!("{key}: {e}"))?,
             "--tag" => cli.tag.clone_from(val),
+            "--ckpt" => cli.ckpt = Some(PathBuf::from(val)),
             other => return Err(format!("unknown argument {other}")),
         }
         i += 2;
@@ -822,6 +916,7 @@ fn main() -> ExitCode {
     let res = match cli.cmd.as_str() {
         "energy" => run_energy(&cli),
         "teach2" => run_teach(&cli, &TEACH_V2),
+        "aged" => run_aged(&cli),
         _ => run_teach(&cli, &TEACH_V1),
     };
     match res {
@@ -835,7 +930,9 @@ fn main() -> ExitCode {
                 t0.elapsed().as_secs_f64()
             );
             print!("{text}");
-            println!("report: observations/life/{}_{}.json", cli.cmd, cli.tag);
+            if cli.cmd != "aged" {
+                println!("report: observations/life/{}_{}.json", cli.cmd, cli.tag);
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
