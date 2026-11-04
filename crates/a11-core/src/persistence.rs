@@ -19,7 +19,8 @@ use crate::tubes::{
 };
 
 pub const FILE_MAGIC: u64 = 0x4131_3143_484B_5031;
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
+pub const MIN_COMPAT_FORMAT_VERSION: u32 = 3;
 pub const SLAB_COUNT: u32 = 6;
 
 pub const TAG_BODY: u32 = 0x424F_4459;
@@ -72,7 +73,8 @@ impl ByteWriter {
         if !v.is_finite() {
             return Err(PersistError::NonFiniteState);
         }
-        self.buf.extend_from_slice(&sanitize(v).to_bits().to_le_bytes());
+        self.buf
+            .extend_from_slice(&sanitize(v).to_bits().to_le_bytes());
         Ok(())
     }
 }
@@ -93,7 +95,10 @@ impl<'a> ByteReader<'a> {
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], PersistError> {
-        let end = self.pos.checked_add(n).ok_or(PersistError::TruncatedInput)?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or(PersistError::TruncatedInput)?;
         if end > self.data.len() {
             return Err(PersistError::TruncatedInput);
         }
@@ -210,6 +215,9 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     body_w.write_f32(org.body.baseline_valence_ema)?;
     body_w.write_f32(org.body.prev_raw_valence)?;
     body_w.write_f32(org.body.valence_scale_ema)?;
+    body_w.write_f32(org.body.valence_min_ema)?;
+    body_w.write_f32(org.body.valence_max_ema)?;
+    body_w.write_f32(org.body.ers_scarcity)?;
     body_w.write_f32(org.body.fast_valence)?;
     body_w.write_u16(org.body.rest_ticks_remaining);
     body_w.write_u64(org.body.rest_consolidation_ticks);
@@ -257,8 +265,10 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     for &idx in &org.cells.active_indices {
         cell_w.write_u32(idx);
     }
+    cell_w.write_f32(org.cells.theta_phase)?;
+    cell_w.write_f32(org.cells.error_reversal_gate)?;
 
-    let mut tube_w = ByteWriter::with_capacity(org.tubes.slots.len() * 60 + 9000);
+    let mut tube_w = ByteWriter::with_capacity(org.tubes.slots.len() * 64 + 9600);
     tube_w.write_u32(org.tubes.slots.len() as u32);
     tube_w.write_u32(org.tubes.alive_count as u32);
     for t in &org.tubes.slots {
@@ -284,6 +294,7 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
         tube_w.write_bool(t.gate_invert);
         tube_w.write_f32(t.contradiction_accum)?;
         tube_w.write_f32(t.chain_score)?;
+        tube_w.write_f32(t.myelin_plasticity_accum)?;
         tube_w.write_u32(t.last_upstream_cell);
         tube_w.write_f32(t.usage_ema)?;
         tube_w.write_u32(t.age_ticks);
@@ -297,8 +308,65 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
             tube_w.write_f32(w)?;
         }
     }
+    for row in &org.tubes.pore_action_w {
+        for &w in row {
+            tube_w.write_f32(w)?;
+        }
+    }
+    for row in &org.tubes.tectal_map_w {
+        for &w in row {
+            tube_w.write_f32(w)?;
+        }
+    }
     for &w in &org.tubes.sensory_self_w {
         tube_w.write_f32(w)?;
+    }
+    for &w in &org.tubes.pore_self_w {
+        tube_w.write_f32(w)?;
+    }
+    for &mv in &org.tubes.pore_mean_v {
+        tube_w.write_f32(mv)?;
+    }
+    for &sv in &org.tubes.pore_scale_v {
+        tube_w.write_f32(sv)?;
+    }
+    for &pa in &org.tubes.pore_agency {
+        tube_w.write_f32(pa)?;
+    }
+    for &dsq in &org.tubes.pore_dsq_ema {
+        tube_w.write_f32(dsq)?;
+    }
+    for &pvr in &org.tubes.pore_var_ema {
+        tube_w.write_f32(pvr)?;
+    }
+    for &pbg in &org.tubes.pore_bg_ild {
+        tube_w.write_f32(pbg)?;
+    }
+    tube_w.write_f32(org.tubes.social_loom_ema)?;
+    for &spv in &org.tubes.spatial_prox_ring {
+        tube_w.write_f32(spv)?;
+    }
+    tube_w.write_u8(org.tubes.spatial_prox_cursor);
+    for &ew in &org.tubes.echo_emit_w {
+        tube_w.write_f32(ew)?;
+    }
+    for &vw in &org.tubes.vocal_artic_w {
+        tube_w.write_f32(vw)?;
+    }
+    for &sw in &org.tubes.somatic_limb_w {
+        tube_w.write_f32(sw)?;
+    }
+    tube_w.write_f32(org.tubes.peer_coch_fast)?;
+    tube_w.write_f32(org.tubes.peer_coch_slow)?;
+    tube_w.write_f32(org.tubes.peer_echo_fast)?;
+    tube_w.write_f32(org.tubes.peer_echo_slow)?;
+    tube_w.write_f32(org.tubes.peer_disp_coch)?;
+    tube_w.write_f32(org.tubes.peer_disp_echo)?;
+    tube_w.write_f32(org.tubes.peer_vocal_hold)?;
+    tube_w.write_u8(org.tubes.peer_coch_age);
+    tube_w.write_u8(org.tubes.peer_echo_age);
+    for &pb in &org.tubes.peer_bearing_ema {
+        tube_w.write_f32(pb)?;
     }
     for &am in &org.tubes.act_mean {
         tube_w.write_f32(am)?;
@@ -358,10 +426,11 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
         ring_w.write_f32(e.somatic_value_est)?;
         ring_w.write_f32(e.raw_valence_at_commit)?;
         ring_w.write_u32(e.active_cells.len() as u32);
-        for &(ci, vr, dv) in &e.active_cells {
+        for &(ci, vr, dv, pa) in &e.active_cells {
             ring_w.write_u32(ci);
             ring_w.write_f32(vr)?;
             ring_w.write_f32(dv)?;
+            ring_w.write_f32(pa)?;
         }
         ring_w.write_u32(e.pred_with_action.len() as u32);
         for &(ci, pv) in &e.pred_with_action {
@@ -447,7 +516,7 @@ pub fn shadow_decode_organism(
     let mut hdr = ByteReader::new(&bytes[..24]);
     let magic = hdr.read_u64()?;
     let version = hdr.read_u32()?;
-    if magic != FILE_MAGIC || version != FORMAT_VERSION {
+    if magic != FILE_MAGIC || !(MIN_COMPAT_FORMAT_VERSION..=FORMAT_VERSION).contains(&version) {
         return Err(PersistError::BadMagicOrVersion);
     }
     let slab_count = hdr.read_u32()?;
@@ -534,7 +603,8 @@ pub fn shadow_decode_organism(
 
     let mut br = ByteReader::new(payloads[0]);
     let seed = br.read_u64()?;
-    let initial_cells = usize::try_from(br.read_u64()?).map_err(|_| PersistError::InvalidTopology)?;
+    let initial_cells =
+        usize::try_from(br.read_u64()?).map_err(|_| PersistError::InvalidTopology)?;
     let max_cells = usize::try_from(br.read_u64()?).map_err(|_| PersistError::InvalidTopology)?;
     let max_tubes = usize::try_from(br.read_u64()?).map_err(|_| PersistError::InvalidTopology)?;
     let max_pores = usize::try_from(br.read_u64()?).map_err(|_| PersistError::InvalidTopology)?;
@@ -596,6 +666,21 @@ pub fn shadow_decode_organism(
     let baseline_valence_ema = br.read_f32()?;
     let prev_raw_valence = br.read_f32()?;
     let valence_scale_ema = br.read_f32()?;
+    let (valence_min_ema, valence_max_ema, ers_scarcity) = if version >= 4 {
+        let vmin = br.read_f32()?;
+        let vmax = br.read_f32()?;
+        let ers = br.read_f32()?;
+        if !(0.0..=1.0001).contains(&ers) || vmax < vmin {
+            return Err(PersistError::InvalidTopology);
+        }
+        (vmin, vmax, ers.clamp(0.0, 1.0))
+    } else {
+        (
+            (baseline_valence_ema - 0.04).min(-0.02),
+            (baseline_valence_ema + 0.04).max(0.02),
+            0.0,
+        )
+    };
     let fast_valence = br.read_f32()?;
     let rest_ticks_remaining = br.read_u16()?;
     let rest_consolidation_ticks = br.read_u64()?;
@@ -638,6 +723,9 @@ pub fn shadow_decode_organism(
         baseline_valence_ema,
         prev_raw_valence,
         valence_scale_ema,
+        valence_min_ema,
+        valence_max_ema,
+        ers_scarcity,
         fast_valence,
         rest_ticks_remaining,
         rest_consolidation_ticks,
@@ -651,7 +739,8 @@ pub fn shadow_decode_organism(
     let cell_slots_len = cr.read_u32()? as usize;
     let cell_alive_count = cr.read_u32()? as usize;
     let min_cells_floor = cr.read_u32()? as usize;
-    if cell_slots_len == 0 || cell_slots_len > config.max_cells || cell_alive_count > cell_slots_len {
+    if cell_slots_len == 0 || cell_slots_len > config.max_cells || cell_alive_count > cell_slots_len
+    {
         return Err(PersistError::InvalidTopology);
     }
     let mut cell_slots = Vec::with_capacity(cell_slots_len);
@@ -734,6 +823,19 @@ pub fn shadow_decode_organism(
         }
         active_indices.push(idx);
     }
+    let (theta_phase, error_reversal_gate) = if version >= 4 {
+        let tp = cr.read_f32()?;
+        let erg = cr.read_f32()?;
+        if !(0.0..=std::f32::consts::TAU + 1.0e-3).contains(&tp) || !(0.0..=1.0001).contains(&erg) {
+            return Err(PersistError::InvalidTopology);
+        }
+        (
+            tp.clamp(0.0, std::f32::consts::TAU - 1.0e-5),
+            erg.clamp(0.0, 1.0),
+        )
+    } else {
+        (0.0, 0.0)
+    };
     if cr.remaining() != 0 {
         return Err(PersistError::InvalidTopology);
     }
@@ -744,6 +846,8 @@ pub fn shadow_decode_organism(
         alive_count: cell_alive_count,
         active_indices,
         min_cells_floor,
+        theta_phase,
+        error_reversal_gate,
     };
 
     let mut pr = ByteReader::new(payloads[3]);
@@ -897,6 +1001,7 @@ pub fn shadow_decode_organism(
         let gate_invert = tr.read_bool()?;
         let contradiction_accum = tr.read_f32()?;
         let chain_score = tr.read_f32()?;
+        let myelin_plasticity_accum = if version >= 4 { tr.read_f32()? } else { 0.0 };
         let last_upstream_cell = tr.read_u32()?;
         let usage_ema = tr.read_f32()?;
         let age_ticks = tr.read_u32()?;
@@ -939,6 +1044,7 @@ pub fn shadow_decode_organism(
             gate_invert,
             contradiction_accum,
             chain_score,
+            myelin_plasticity_accum,
             last_upstream_cell,
             usage_ema,
             age_ticks,
@@ -970,9 +1076,98 @@ pub fn shadow_decode_organism(
             *dst = tr.read_f32()?;
         }
     }
+    let mut pore_action_w = [[0.0_f32; PRED_BUCKETS]; TRACKED_ACTUATORS];
+    let mut tectal_map_w = [[0.0_f32; PRED_BUCKETS]; TRACKED_ACTUATORS];
+    if version >= 4 {
+        for row in &mut pore_action_w {
+            for dst in row {
+                *dst = tr.read_f32()?;
+            }
+        }
+        for row in &mut tectal_map_w {
+            for dst in row {
+                *dst = tr.read_f32()?;
+            }
+        }
+    }
     let mut sensory_self_w = [0.0_f32; PRED_BUCKETS];
     for dst in &mut sensory_self_w {
         *dst = tr.read_f32()?;
+    }
+    let mut pore_self_w = [0.0_f32; PRED_BUCKETS];
+    let mut pore_mean_v = [0.0_f32; PRED_BUCKETS];
+    let mut pore_scale_v = [0.05_f32; PRED_BUCKETS];
+    let mut pore_agency = [0.0_f32; PRED_BUCKETS];
+    let mut pore_dsq_ema = [1.0e-4_f32; PRED_BUCKETS];
+    let mut pore_var_ema = [5.0e-3_f32; PRED_BUCKETS];
+    let mut pore_bg_ild = [0.0_f32; PRED_BUCKETS];
+    let mut social_loom_ema = 0.0_f32;
+    let mut spatial_prox_ring = [0.0_f32; RING_LEN];
+    let mut spatial_prox_cursor = 0u8;
+    let mut echo_emit_w = [0.0_f32; TRACKED_ACTUATORS];
+    let mut vocal_artic_w = [0.0_f32; TRACKED_ACTUATORS];
+    let mut somatic_limb_w = [0.0_f32; TRACKED_ACTUATORS];
+    let mut peer_coch_fast = 0.0_f32;
+    let mut peer_coch_slow = 0.0_f32;
+    let mut peer_echo_fast = 0.0_f32;
+    let mut peer_echo_slow = 0.0_f32;
+    let mut peer_disp_coch = 0.0_f32;
+    let mut peer_disp_echo = 0.0_f32;
+    let mut peer_vocal_hold = 0.0_f32;
+    let mut peer_coch_age = 255u8;
+    let mut peer_echo_age = 255u8;
+    let mut peer_bearing_ema = [0.0_f32; TRACKED_ACTUATORS];
+    if version >= 4 {
+        for dst in &mut pore_self_w {
+            *dst = tr.read_f32()?.clamp(-2.0, 2.0);
+        }
+        for dst in &mut pore_mean_v {
+            *dst = tr.read_f32()?;
+        }
+        for dst in &mut pore_scale_v {
+            *dst = tr.read_f32()?.clamp(0.005, 4.0);
+        }
+        for dst in &mut pore_agency {
+            *dst = tr.read_f32()?.clamp(-1.0, 1.0);
+        }
+        for dst in &mut pore_dsq_ema {
+            *dst = tr.read_f32()?.clamp(1.0e-6, 4.0);
+        }
+        for dst in &mut pore_var_ema {
+            *dst = tr.read_f32()?.clamp(1.0e-5, 4.0);
+        }
+        for dst in &mut pore_bg_ild {
+            *dst = tr.read_f32()?.clamp(-1.0, 1.0);
+        }
+        social_loom_ema = tr.read_f32()?.clamp(-1.0, 1.0);
+        for dst in &mut spatial_prox_ring {
+            *dst = tr.read_f32()?.clamp(0.0, 4.0);
+        }
+        spatial_prox_cursor = tr.read_u8()?;
+        if (spatial_prox_cursor as usize) >= RING_LEN {
+            return Err(PersistError::InvalidTopology);
+        }
+        for dst in &mut echo_emit_w {
+            *dst = tr.read_f32()?.clamp(-1.0, 2.0);
+        }
+        for dst in &mut vocal_artic_w {
+            *dst = tr.read_f32()?.clamp(-1.0, 2.0);
+        }
+        for dst in &mut somatic_limb_w {
+            *dst = tr.read_f32()?.clamp(-1.0, 2.0);
+        }
+        peer_coch_fast = tr.read_f32()?.clamp(-1.0, 2.0);
+        peer_coch_slow = tr.read_f32()?.clamp(-1.0, 2.0);
+        peer_echo_fast = tr.read_f32()?.clamp(0.0, 2.0);
+        peer_echo_slow = tr.read_f32()?.clamp(0.0, 2.0);
+        peer_disp_coch = tr.read_f32()?.clamp(-16.0, 16.0);
+        peer_disp_echo = tr.read_f32()?.clamp(-16.0, 16.0);
+        peer_vocal_hold = tr.read_f32()?.clamp(0.0, 1.0);
+        peer_coch_age = tr.read_u8()?;
+        peer_echo_age = tr.read_u8()?;
+        for dst in &mut peer_bearing_ema {
+            *dst = tr.read_f32()?.clamp(-1.0, 1.0);
+        }
     }
     let mut act_mean = [0.0_f32; TRACKED_ACTUATORS];
     for dst in &mut act_mean {
@@ -989,7 +1184,32 @@ pub fn shadow_decode_organism(
         alive_count: tube_alive_count,
         outgoing_by_cell: Vec::new(),
         action_sensory_w,
+        pore_action_w,
+        tectal_map_w,
         sensory_self_w,
+        pore_self_w,
+        pore_mean_v,
+        pore_scale_v,
+        pore_agency,
+        pore_dsq_ema,
+        pore_var_ema,
+        pore_bg_ild,
+        social_loom_ema,
+        spatial_prox_ring,
+        spatial_prox_cursor,
+        echo_emit_w,
+        vocal_artic_w,
+        somatic_limb_w,
+        peer_coch_fast,
+        peer_coch_slow,
+        peer_echo_fast,
+        peer_echo_slow,
+        peer_disp_coch,
+        peer_disp_echo,
+        peer_vocal_hold,
+        peer_coch_age,
+        peer_echo_age,
+        peer_bearing_ema,
         act_mean,
         mean_interventional_agency,
     };
@@ -1000,7 +1220,8 @@ pub fn shadow_decode_organism(
     if ring_head >= RING_LEN {
         return Err(PersistError::InvalidTopology);
     }
-    let mut entries: [EfferenceEntry; RING_LEN] = std::array::from_fn(|_| EfferenceEntry::default());
+    let mut entries: [EfferenceEntry; RING_LEN] =
+        std::array::from_fn(|_| EfferenceEntry::default());
     for entry in &mut entries {
         let valid = rr.read_bool()?;
         let e_tick = rr.read_u64()?;
@@ -1022,10 +1243,11 @@ pub fn shadow_decode_organism(
             let ci = rr.read_u32()?;
             let vr = rr.read_f32()?;
             let dv = rr.read_f32()?;
+            let pa = if version >= 4 { rr.read_f32()? } else { 1.0 };
             if valid && (ci as usize) >= cells.slots.len() {
                 return Err(PersistError::InvalidTopology);
             }
-            active_cells.push((ci, vr, dv));
+            active_cells.push((ci, vr, dv, pa));
         }
 
         let pw_len = rr.read_u32()? as usize;

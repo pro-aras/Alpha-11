@@ -22,9 +22,7 @@ use crate::persistence::{
 };
 use crate::pores::PoreMembrane;
 use crate::rng::{ParamHasher, Rng64, sanitize, sanitize_clamp};
-use crate::tubes::{
-    EfferenceEntry, EfferenceRing, TRACKED_ACTUATORS, Tube, TubeGraph, TubeKind,
-};
+use crate::tubes::{EfferenceEntry, EfferenceRing, TRACKED_ACTUATORS, Tube, TubeGraph, TubeKind};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OrganismConfig {
@@ -208,7 +206,13 @@ impl Alpha11Organism {
                 }
                 let init_u = 0.012 * self.rng.next_f32_signed();
                 let _ = self.tubes.add_tube(
-                    Tube::newborn(TubeKind::CellToMotor, c_idx as u32, m_slot as u32, 1, init_u),
+                    Tube::newborn(
+                        TubeKind::CellToMotor,
+                        c_idx as u32,
+                        m_slot as u32,
+                        1,
+                        init_u,
+                    ),
                     self.config.max_tubes,
                 );
             }
@@ -221,7 +225,7 @@ impl Alpha11Organism {
         up_tube.w_pred = 0.20;
         let _ = self.tubes.add_tube(up_tube, self.config.max_tubes);
 
-        let conv_delays = [1_u8, 3, 6];
+        let conv_delays = [2_u8, 5, 9];
         let mut co_wired = 0usize;
         for idx_pos in 0..self.cells.active_indices.len() {
             let co_idx = self.cells.active_indices[idx_pos];
@@ -313,7 +317,7 @@ impl OrganismEngine for Alpha11Organism {
             && self.mode == ControlMode::Natural
             && let Some(replay_entry) = self.ring.at_lag(((self.tick as usize) % 8) + 1)
         {
-            for &(c_idx, v_past, _) in &replay_entry.active_cells {
+            for &(c_idx, v_past, _, _) in &replay_entry.active_cells {
                 if let Some(d) = ext_drive.get_mut(c_idx as usize) {
                     *d = sanitize(*d + 0.16 * v_past);
                 }
@@ -361,8 +365,7 @@ impl OrganismEngine for Alpha11Organism {
                     &self.ring,
                     &mut self.cells,
                     &mut self.membrane,
-                    self.body.valence_scale_ema,
-                    self.body.fast_valence,
+                    &self.body,
                     self.config.max_tubes,
                     &mut self.rng,
                 );
@@ -388,11 +391,9 @@ impl OrganismEngine for Alpha11Organism {
                     .filter(|(_, c)| c.alive)
                     .map(|(i, _)| i as u32)
                     .collect();
-                let atrophied_pores = self.membrane.morph_pores(
-                    self.config.max_pores,
-                    &alive_cells,
-                    &mut self.rng,
-                );
+                let atrophied_pores =
+                    self.membrane
+                        .morph_pores(self.config.max_pores, &alive_cells, &mut self.rng);
                 self.atrophied_structures =
                     self.atrophied_structures.saturating_add(atrophied_pores);
             }
@@ -401,11 +402,9 @@ impl OrganismEngine for Alpha11Organism {
                 && state_budget_ok
                 && self.body.atp >= 3.2
                 && let Some(child_idx) = self.cells.find_mitosis_candidate(self.config.max_cells)
-                && let Some(parent_idx) = self.cells.spawn_mitosis_parent(
-                    child_idx,
-                    self.config.max_cells,
-                    &mut self.rng,
-                )
+                && let Some(parent_idx) =
+                    self.cells
+                        .spawn_mitosis_parent(child_idx, self.config.max_cells, &mut self.rng)
             {
                 self.body.atp = sanitize((self.body.atp - 0.40).max(0.0));
                 self.mitosis_births = self.mitosis_births.saturating_add(1);
@@ -477,12 +476,40 @@ impl OrganismEngine for Alpha11Organism {
             norm_sq += v * v;
         }
 
+        let mut raw_attn_sum = 0.0_f32;
+        let mut raw_attn_cnt = 0usize;
+        for &c_idx in &self.cells.active_indices {
+            if let Some(c) = self.cells.slots.get(c_idx as usize)
+                && c.alive
+            {
+                let st_live = sensory_trophic.get(c_idx as usize).copied().unwrap_or(0.0);
+                let raw_a =
+                    sanitize((st_live + 0.35 * c.sensory_trophic_ema) * (0.35 + c.v_real.abs()));
+                raw_attn_sum += raw_a;
+                raw_attn_cnt += 1;
+            }
+        }
+        let mean_raw_attn = if raw_attn_cnt > 0 {
+            raw_attn_sum / (raw_attn_cnt as f32)
+        } else {
+            0.0
+        };
+
         let mut active_snap = Vec::with_capacity(self.cells.active_indices.len());
         for &c_idx in &self.cells.active_indices {
             if let Some(c) = self.cells.slots.get(c_idx as usize)
                 && c.alive
             {
-                active_snap.push((c_idx, c.v_real, c.delta_v));
+                let pre_attn = if mean_raw_attn > 1.0e-5 {
+                    let st_live = sensory_trophic.get(c_idx as usize).copied().unwrap_or(0.0);
+                    let raw_a = sanitize(
+                        (st_live + 0.35 * c.sensory_trophic_ema) * (0.35 + c.v_real.abs()),
+                    );
+                    sanitize_clamp(0.45 + 0.55 * (raw_a / mean_raw_attn), 0.40, 1.75)
+                } else {
+                    1.0
+                };
+                active_snap.push((c_idx, c.v_real, c.delta_v, pre_attn));
             }
         }
 
@@ -514,10 +541,16 @@ impl OrganismEngine for Alpha11Organism {
     fn zero_learned_conductances(&mut self) {
         let prev_motors = self.membrane.motor_pores.len();
         let mut birth_rng = Rng64::from_seed(self.seed);
-        self.cells =
-            CellArena::new(self.config.initial_cells, self.config.max_cells, &mut birth_rng);
-        self.membrane =
-            PoreMembrane::new(self.cells.alive_count, self.config.max_pores, &mut birth_rng);
+        self.cells = CellArena::new(
+            self.config.initial_cells,
+            self.config.max_cells,
+            &mut birth_rng,
+        );
+        self.membrane = PoreMembrane::new(
+            self.cells.alive_count,
+            self.config.max_pores,
+            &mut birth_rng,
+        );
         self.tubes = TubeGraph::new(
             self.cells.alive_count,
             self.membrane.alive_motor_count,
@@ -933,7 +966,11 @@ mod tests {
             .expect("save gen3 with corrupted primary on disk");
         assert_eq!(fs::read(&prev).expect("read prev again"), good_prev);
         let mut after = Alpha11Organism::new(3, cfg);
-        assert!(!after.load_transactional(&primary, &prev).expect("primary valid again"));
+        assert!(
+            !after
+                .load_transactional(&primary, &prev)
+                .expect("primary valid again")
+        );
 
         fs::write(&prev, &bad_disk).expect("corrupt prev too");
         fs::write(&primary, &bad_disk).expect("corrupt primary again");
@@ -941,6 +978,153 @@ mod tests {
         assert!(both_bad.load_transactional(&primary, &prev).is_err());
         assert!(both_bad.is_poisoned());
         let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Re-encodes a v4 checkpoint into the exact v3 byte layout (drops every field the v4
+    /// decoder reads only when `version >= 4`), recomputing slab and file CRC32C.
+    fn downgrade_v4_checkpoint_to_v3(v4: &[u8]) -> Vec<u8> {
+        use crate::persistence::{TAG_BODY, TAG_CELL, TAG_RING, TAG_TUBE};
+        use crate::tubes::{PRED_BUCKETS, RING_LEN};
+        let rd = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        let payload_end = v4.len() - 4;
+        let mut slabs: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut pos = 24usize;
+        while pos < payload_end {
+            let tag = rd(v4, pos);
+            let len = rd(v4, pos + 4) as usize;
+            slabs.push((tag, v4[pos + 8..pos + 8 + len].to_vec()));
+            pos += 8 + len + 4;
+        }
+        assert_eq!(slabs.len(), 6);
+        for (tag, p) in &mut slabs {
+            let src = p.clone();
+            *p = match *tag {
+                TAG_BODY => {
+                    // valence_min_ema, valence_max_ema, ers_scarcity follow valence_scale_ema.
+                    let off = 6 * 8 + 2 * 4 + 1 + 4 * 8 + 7 * 8 + 4 + 9 * 4;
+                    let mut q = src[..off].to_vec();
+                    q.extend_from_slice(&src[off + 12..]);
+                    q
+                }
+                TAG_CELL => src[..src.len() - 8].to_vec(),
+                TAG_TUBE => {
+                    let slot_v4 = 61usize;
+                    let myelin_off = 45usize;
+                    let n_slots = rd(&src, 0) as usize;
+                    let mut q = src[..8].to_vec();
+                    let mut at = 8usize;
+                    for _ in 0..n_slots {
+                        q.extend_from_slice(&src[at..at + myelin_off]);
+                        q.extend_from_slice(&src[at + myelin_off + 4..at + slot_v4]);
+                        at += slot_v4;
+                    }
+                    let tfree = rd(&src, at) as usize;
+                    let w_bytes = TRACKED_ACTUATORS * PRED_BUCKETS * 4;
+                    let keep_end = at + 4 + 4 * tfree + w_bytes;
+                    q.extend_from_slice(&src[at..keep_end]);
+                    let self_w_start = keep_end + 2 * w_bytes;
+                    q.extend_from_slice(&src[self_w_start..self_w_start + PRED_BUCKETS * 4]);
+                    let tail = TRACKED_ACTUATORS * 4 + 4;
+                    q.extend_from_slice(&src[src.len() - tail..]);
+                    q
+                }
+                TAG_RING => {
+                    let fixed = 1 + 8 + 1 + 4 + TRACKED_ACTUATORS * 4 + 4 + 4;
+                    let mut q = src[..4].to_vec();
+                    let mut at = 4usize;
+                    for _ in 0..RING_LEN {
+                        q.extend_from_slice(&src[at..at + fixed + 4]);
+                        let n_act = rd(&src, at + fixed) as usize;
+                        at += fixed + 4;
+                        for _ in 0..n_act {
+                            q.extend_from_slice(&src[at..at + 12]);
+                            at += 16;
+                        }
+                        for _ in 0..2 {
+                            let n = rd(&src, at) as usize;
+                            q.extend_from_slice(&src[at..at + 4 + 8 * n]);
+                            at += 4 + 8 * n;
+                        }
+                    }
+                    assert_eq!(at, src.len());
+                    q
+                }
+                _ => src,
+            };
+        }
+        let mut slabs_buf = Vec::new();
+        for (tag, p) in &slabs {
+            let start = slabs_buf.len();
+            slabs_buf.extend_from_slice(&tag.to_le_bytes());
+            slabs_buf.extend_from_slice(&(p.len() as u32).to_le_bytes());
+            slabs_buf.extend_from_slice(p);
+            let scrc = crc32c(&slabs_buf[start..]);
+            slabs_buf.extend_from_slice(&scrc.to_le_bytes());
+        }
+        let mut full = v4[..8].to_vec();
+        full.extend_from_slice(&3u32.to_le_bytes());
+        full.extend_from_slice(&v4[12..16]);
+        full.extend_from_slice(&(slabs_buf.len() as u64).to_le_bytes());
+        full.extend_from_slice(&slabs_buf);
+        let fcrc = crc32c(&full);
+        full.extend_from_slice(&fcrc.to_le_bytes());
+        full
+    }
+
+    #[test]
+    fn v3_checkpoint_upgrades_to_v4_and_keeps_stepping() {
+        let cfg = OrganismConfig::default();
+        let mut org = Alpha11Organism::new(4242, cfg);
+        let mut ambient = vec![0.0_f32; 64];
+        let mut world_rng = Rng64::from_seed(7);
+        let mut drive = |o: &mut Alpha11Organism, t: u64, amb: &mut Vec<f32>| {
+            for (c, v) in amb.iter_mut().enumerate() {
+                *v = if c < 16 {
+                    ((t as f32) * 0.07 + (c as f32) * 0.2).sin() * 0.6
+                } else {
+                    world_rng.next_f32_signed()
+                };
+            }
+            o.step(FieldView {
+                ambient_in: amb,
+                metabolic_influx: if t % 9 == 0 { 0.05 } else { 0.0 },
+                tissue_stress: if t % 31 == 0 { 0.04 } else { 0.0 },
+                num_actuators: 6,
+            })
+            .expect("step")
+        };
+        for t in 0..150u64 {
+            let _ = drive(&mut org, t, &mut ambient);
+        }
+        let v4 = org.encode_checkpoint().expect("encode v4");
+        let v3 = downgrade_v4_checkpoint_to_v3(&v4);
+        assert_eq!(u32::from_le_bytes([v3[8], v3[9], v3[10], v3[11]]), 3);
+        assert!(v3.len() < v4.len());
+
+        let mut upgraded = Alpha11Organism::new(1, cfg);
+        upgraded.restore_checkpoint(&v3).expect("v3 restore");
+        assert!(!upgraded.is_poisoned());
+        let (a, b) = (org.snapshot(), upgraded.snapshot());
+        assert_eq!(a.tick, b.tick);
+        assert_eq!(a.cell_count, b.cell_count);
+        assert_eq!(a.atp.to_bits(), b.atp.to_bits());
+        assert_eq!(a.tube_count, b.tube_count);
+
+        let re = upgraded.encode_checkpoint().expect("re-encode");
+        assert_eq!(u32::from_le_bytes([re[8], re[9], re[10], re[11]]), 4);
+        let mut corrupt = v3.clone();
+        let mid = corrupt.len() / 2;
+        corrupt[mid] ^= 0x01;
+        assert!(
+            Alpha11Organism::new(2, cfg)
+                .restore_checkpoint(&corrupt)
+                .is_err()
+        );
+
+        for t in 150..230u64 {
+            let _ = drive(&mut upgraded, t, &mut ambient);
+        }
+        assert_eq!(upgraded.snapshot().tick, a.tick + 80);
     }
 
     #[test]

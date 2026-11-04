@@ -6,18 +6,18 @@ All `128` ambient sensory channels and all `6` motor actuator channels were bije
 
 | Habitat | Observable | Permuted `p50` | Unpermuted `p50` | `median(Perm) - median(Unperm)` | Rank-Biserial `r_rb` | `p_perm` |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: |
-| `BrightRadiantWorld` | `achieved_influx_per_tick` | `0.0034` | `0.0037` | `-0.00031` | `-0.1250` | `0.6274` |
-| `BrightRadiantWorld` | `decoded_photonic_conductance_share` | `0.9735` | `0.9803` | `-0.00675` | `-0.0139` | `0.9720` |
-| `BrightRadiantWorld` | `decoded_sonar_conductance_share` | `0.0242` | `0.0197` | `+0.00447` | `-0.0208` | `0.9481` |
-| `BrightRadiantWorld` | `decoded_noisy_tv_conductance_share` | `0.0000` | `0.0000` | `+0.00000` | `-0.0694` | `1.0000` |
-| `BrightRadiantWorld` | `active_pings_emitted` | `1030.5000` | `1111.0000` | `-80.50000` | `-0.3750` | `0.1578` |
-| `BrightRadiantWorld` | `decoded_emit_pulse_motor_conductance` | `0.9498` | `0.9498` | `-0.00004` | `+0.0486` | `0.8521` |
-| `PitchBlackEchoCave` | `achieved_influx_per_tick` | `0.0017` | `0.0018` | `-0.00006` | `-0.2083` | `0.4236` |
+| `BrightRadiantWorld` | `achieved_influx_per_tick` | `0.0038` | `0.0034` | `+0.00040` | `-0.1389` | `0.5974` |
+| `BrightRadiantWorld` | `decoded_photonic_conductance_share` | `0.8135` | `0.8684` | `-0.05496` | `-0.0208` | `0.9441` |
+| `BrightRadiantWorld` | `decoded_sonar_conductance_share` | `0.1865` | `0.1316` | `+0.05496` | `-0.0139` | `0.9730` |
+| `BrightRadiantWorld` | `decoded_noisy_tv_conductance_share` | `0.0000` | `0.0000` | `+0.00000` | `+0.1667` | `0.4935` |
+| `BrightRadiantWorld` | `active_pings_emitted` | `789.0000` | `989.5000` | `-200.50000` | `-0.1667` | `0.5145` |
+| `BrightRadiantWorld` | `decoded_emit_pulse_motor_conductance` | `0.9500` | `0.9499` | `+0.00011` | `+0.1250` | `0.6094` |
+| `PitchBlackEchoCave` | `achieved_influx_per_tick` | `0.0012` | `0.0017` | `-0.00049` | `-0.3889` | `0.1449` |
 | `PitchBlackEchoCave` | `decoded_photonic_conductance_share` | `0.0000` | `0.0000` | `+0.00000` | `+0.0000` | `1.0000` |
-| `PitchBlackEchoCave` | `decoded_sonar_conductance_share` | `0.0000` | `0.0000` | `+0.00000` | `-0.0347` | `1.0000` |
-| `PitchBlackEchoCave` | `decoded_noisy_tv_conductance_share` | `0.0000` | `0.0000` | `+0.00000` | `-0.0972` | `0.4935` |
-| `PitchBlackEchoCave` | `active_pings_emitted` | `1354.0000` | `1366.0000` | `-12.00000` | `-0.1597` | `0.5205` |
-| `PitchBlackEchoCave` | `decoded_emit_pulse_motor_conductance` | `0.9500` | `0.9500` | `-0.00004` | `-0.0625` | `0.7842` |
+| `PitchBlackEchoCave` | `decoded_sonar_conductance_share` | `1.0000` | `0.0000` | `+1.00000` | `+0.2153` | `0.4256` |
+| `PitchBlackEchoCave` | `decoded_noisy_tv_conductance_share` | `0.0000` | `0.0000` | `+0.00000` | `-0.0833` | `1.0000` |
+| `PitchBlackEchoCave` | `active_pings_emitted` | `309.0000` | `213.0000` | `+96.00000` | `+0.1528` | `0.5534` |
+| `PitchBlackEchoCave` | `decoded_emit_pulse_motor_conductance` | `0.9496` | `0.9483` | `+0.00126` | `+0.2361` | `0.3606` |
 
 ---
 
@@ -32,66 +32,66 @@ All `128` ambient sensory channels and all `6` motor actuator channels were bije
 
 | Control Arm | Ticks | Influx / Tick (`p50 [IQR]`, `min..max`) | Stress / Tick (`p50 [IQR]`) | Net Energy / Tick (`p50 [IQR]`) | 1st->2nd Half Influx / Tick (`p50`) | Agency (`p50 [IQR]`) | Pred Error (`p50 [IQR]`) | Final ATP (`p50`) |
 | :--- | ---: | :--- | :--- | :--- | :--- | :--- | :--- | ---: |
-| `Natural` | `2400` | `0.0034 [0.0024]` (`0.0007..0.0068`) | `0.0001 [0.0004]` | `0.0033 [0.0020]` | `0.0045 -> 0.0000` | `0.0000 [0.0025]` | `0.0409 [0.0280]` | `0.226` |
-| `FrozenPlasticity` | `2400` | `0.0006 [0.0004]` (`0.0003..0.0015`) | `0.0005 [0.0019]` | `0.0000 [0.0021]` | `0.0010 -> 0.0001` | `0.0000 [0.0000]` | `0.0345 [0.0070]` | `9.768` |
-| `YokedMetabolism` | `2400` | `0.0012 [0.0013]` (`0.0002..0.0062`) | `0.0012 [0.0016]` | `0.0001 [0.0017]` | `0.0024 -> 0.0000` | `0.0000 [0.0000]` | `0.0435 [0.0514]` | `0.007` |
-| `ActionShuffled` | `2400` | `0.0007 [0.0007]` (`0.0002..0.0026`) | `0.0005 [0.0010]` | `0.0003 [0.0004]` | `0.0012 -> 0.0000` | `0.0000 [0.0000]` | `0.0368 [0.0229]` | `0.000` |
-| `UnlesionedPostLife` | `600` | `0.0039 [0.0074]` (`0.0001..0.0155`) | `0.0012 [0.0037]` | `0.0031 [0.0079]` | `0.0062 -> 0.0000` | `0.0000 [0.0011]` | `0.0365 [0.0107]` | `1.285` |
-| `FlaglessPostLifeLesion` | `600` | `0.0023 [0.0020]` (`0.0006..0.0115`) | `0.0013 [0.0022]` | `0.0016 [0.0022]` | `0.0024 -> 0.0005` | `0.0000 [0.0000]` | `0.0114 [0.0007]` | `1.032` |
+| `Natural` | `2400` | `0.0038 [0.0031]` (`0.0005..0.0136`) | `0.0008 [0.0014]` | `0.0025 [0.0019]` | `0.0048 -> 0.0021` | `0.0009 [0.0090]` | `0.0405 [0.0516]` | `0.824` |
+| `FrozenPlasticity` | `2400` | `0.0009 [0.0009]` (`0.0003..0.0017`) | `0.0004 [0.0007]` | `0.0006 [0.0009]` | `0.0011 -> 0.0001` | `0.0000 [0.0000]` | `0.0364 [0.0092]` | `10.865` |
+| `YokedMetabolism` | `2400` | `0.0031 [0.0039]` (`0.0001..0.0089`) | `0.0072 [0.0082]` | `-0.0032 [0.0087]` | `0.0030 -> 0.0015` | `0.0002 [0.0032]` | `0.0356 [0.0499]` | `0.988` |
+| `ActionShuffled` | `2400` | `0.0006 [0.0009]` (`0.0002..0.0027`) | `0.0002 [0.0007]` | `0.0003 [0.0010]` | `0.0011 -> 0.0000` | `0.0000 [0.0002]` | `0.0423 [0.0333]` | `0.000` |
+| `UnlesionedPostLife` | `600` | `0.0019 [0.0057]` (`0.0002..0.0140`) | `0.0018 [0.0071]` | `-0.0003 [0.0042]` | `0.0019 -> 0.0000` | `0.0000 [0.0003]` | `0.0486 [0.0458]` | `0.770` |
+| `FlaglessPostLifeLesion` | `600` | `0.0018 [0.0019]` (`0.0006..0.0115`) | `0.0006 [0.0019]` | `0.0012 [0.0018]` | `0.0024 -> 0.0003` | `0.0000 [0.0000]` | `0.0121 [0.0007]` | `1.873` |
 
 ## 2. Unbounded Morphogenesis, Time-Constants & Motor Clutch Dynamics
 
 | Control Arm | Cells (`p50 [IQR]`, `p95`) | Tubes (`p50 [IQR]`) | Stiff Highways (`p50`) | Inhibitory (`p50`) | Echo-Delay Tubes (`p50`) | Mean `tau` / Max `tau` / Octaves (`p50`) | Mitosis / Splits / Myelin / Atrophy (`p50`) | Pulses / Rehearsals / Rest (`p50`) |
 | :--- | :--- | :--- | ---: | ---: | ---: | :--- | :--- | :--- |
-| `Natural` | `69.5 [8.0]` (`p95=80.8`) | `763.5 [96.0]` | `166.0` | `64.5` | `39.0` | `5.21 / 15.32 / 4.5` | `37.5 / 0.0 / 2.5 / 157.5` | `2056.5 / 372.0 / 105.0` |
-| `FrozenPlasticity` | `32.0 [0.0]` (`p95=32.0`) | `319.0 [2.0]` | `0.0` | `13.5` | `12.5` | `3.91 / 8.00 / 4.0` | `0.0 / 0.0 / 0.0 / 0.0` | `2270.5 / 129.5 / 105.0` |
-| `YokedMetabolism` | `70.0 [8.0]` (`p95=80.3`) | `766.5 [95.0]` | `150.0` | `41.0` | `39.0` | `5.23 / 15.71 / 4.5` | `38.0 / 0.0 / 2.5 / 178.0` | `2087.5 / 348.5 / 105.0` |
-| `ActionShuffled` | `55.0 [2.2]` (`p95=63.5`) | `589.0 [26.5]` | `109.0` | `34.5` | `24.5` | `4.78 / 13.04 / 4.0` | `23.0 / 0.0 / 1.0 / 145.0` | `2177.5 / 304.0 / 105.0` |
-| `UnlesionedPostLife` | `69.5 [8.0]` (`p95=80.8`) | `763.5 [96.0]` | `166.0` | `64.5` | `39.0` | `5.21 / 15.32 / 4.5` | `37.5 / 0.0 / 2.5 / 157.5` | `2577.5 / 478.0 / 147.0` |
+| `Natural` | `67.0 [10.5]` (`p95=98.6`) | `715.0 [176.0]` | `180.0` | `101.0` | `71.5` | `5.08 / 14.57 / 4.0` | `35.0 / 1.0 / 4.0 / 139.0` | `2210.0 / 484.0 / 105.0` |
+| `FrozenPlasticity` | `32.0 [0.0]` (`p95=32.0`) | `319.0 [2.0]` | `0.0` | `13.5` | `12.5` | `3.91 / 8.00 / 4.0` | `0.0 / 0.0 / 0.0 / 0.0` | `2271.5 / 128.5 / 105.0` |
+| `YokedMetabolism` | `67.0 [11.0]` (`p95=98.6`) | `728.5 [157.2]` | `192.5` | `87.5` | `70.0` | `5.12 / 15.55 / 4.0` | `35.0 / 0.0 / 4.0 / 138.5` | `2209.0 / 392.0 / 105.0` |
+| `ActionShuffled` | `55.0 [1.2]` (`p95=60.5`) | `592.0 [23.2]` | `105.0` | `38.5` | `46.0` | `4.80 / 8.74 / 4.0` | `23.0 / 0.0 / 0.0 / 115.5` | `2138.5 / 313.0 / 105.0` |
+| `UnlesionedPostLife` | `67.0 [10.5]` (`p95=98.6`) | `715.0 [176.0]` | `180.0` | `101.0` | `71.5` | `5.08 / 14.57 / 4.0` | `35.0 / 1.0 / 4.0 / 139.0` | `2744.5 / 530.5 / 147.0` |
 | `FlaglessPostLifeLesion` | `32.0 [0.0]` (`p95=32.0`) | `319.0 [2.0]` | `0.0` | `0.0` | `0.0` | `3.91 / 8.00 / 4.0` | `0.0 / 0.0 / 0.0 / 0.0` | `575.0 / 25.0 / 21.0` |
 
 ## 3. Non-Parametric Two-Sample Control Comparisons (Mann-Whitney U & Rank-Biserial)
 
 | Metric | Arm A | Arm B | `median(A) - median(B)` | `U` (`U_A`) | Rank-Biserial `r_rb` | `p_perm` (`1000` perms) | `p_norm` |
 | :--- | :--- | :--- | ---: | :--- | ---: | ---: | ---: |
-| `achieved_influx_per_tick` | `Natural` | `FrozenPlasticity` | `+0.00287` | `6.0` (`138.0`) | `+0.9167` | `0.0010` | `0.0002` |
-| `net_achieved_energy_per_tick` | `Natural` | `FrozenPlasticity` | `+0.00329` | `4.0` (`140.0`) | `+0.9444` | `0.0010` | `0.0001` |
-| `second_half_influx_per_tick` | `Natural` | `FrozenPlasticity` | `-0.00008` | `39.5` (`39.5`) | `-0.4514` | `0.0669` | `0.0552` |
-| `mean_interventional_agency` | `Natural` | `FrozenPlasticity` | `+0.00000` | `42.0` (`102.0`) | `+0.4167` | `0.0509` | `0.0165` |
+| `achieved_influx_per_tick` | `Natural` | `FrozenPlasticity` | `+0.00282` | `21.0` (`123.0`) | `+0.7083` | `0.0040` | `0.0035` |
+| `net_achieved_energy_per_tick` | `Natural` | `FrozenPlasticity` | `+0.00182` | `22.0` (`122.0`) | `+0.6944` | `0.0050` | `0.0043` |
+| `second_half_influx_per_tick` | `Natural` | `FrozenPlasticity` | `+0.00207` | `57.0` (`87.0`) | `+0.2083` | `0.4086` | `0.3967` |
+| `mean_interventional_agency` | `Natural` | `FrozenPlasticity` | `+0.00089` | `18.0` (`126.0`) | `+0.7500` | `0.0010` | `0.0004` |
 | `noisy_tv_conductance_share` | `Natural` | `FrozenPlasticity` | `-0.25000` | `0.0` (`0.0`) | `-1.0000` | `0.0010` | `0.0000` |
-| `achieved_influx_per_tick` | `Natural` | `YokedMetabolism` | `+0.00223` | `31.0` (`113.0`) | `+0.5694` | `0.0240` | `0.0194` |
-| `net_achieved_energy_per_tick` | `Natural` | `YokedMetabolism` | `+0.00321` | `15.0` (`129.0`) | `+0.7917` | `0.0020` | `0.0011` |
-| `second_half_influx_per_tick` | `Natural` | `YokedMetabolism` | `+0.00000` | `64.5` (`64.5`) | `-0.1042` | `0.6703` | `0.6301` |
-| `mean_interventional_agency` | `Natural` | `YokedMetabolism` | `+0.00000` | `52.0` (`92.0`) | `+0.2778` | `0.1728` | `0.1610` |
-| `noisy_tv_conductance_share` | `Natural` | `YokedMetabolism` | `+0.00000` | `66.0` (`66.0`) | `-0.0833` | `0.7473` | `0.5807` |
-| `achieved_influx_per_tick` | `Natural` | `ActionShuffled` | `+0.00276` | `14.0` (`130.0`) | `+0.8056` | `0.0010` | `0.0009` |
-| `net_achieved_energy_per_tick` | `Natural` | `ActionShuffled` | `+0.00298` | `2.0` (`142.0`) | `+0.9722` | `0.0010` | `0.0001` |
-| `second_half_influx_per_tick` | `Natural` | `ActionShuffled` | `+0.00000` | `69.5` (`74.5`) | `+0.0347` | `0.8072` | `0.8794` |
-| `mean_interventional_agency` | `Natural` | `ActionShuffled` | `+0.00000` | `45.5` (`98.5`) | `+0.3681` | `0.0509` | `0.0485` |
-| `noisy_tv_conductance_share` | `Natural` | `ActionShuffled` | `+0.00000` | `60.5` (`60.5`) | `-0.1597` | `0.4905` | `0.3281` |
-| `post_life_achieved_influx_per_tick` | `UnlesionedPostLife` | `FlaglessPostLifeLesion` | `+0.00163` | `60.0` (`84.0`) | `+0.1667` | `0.5145` | `0.5067` |
-| `post_life_net_energy_per_tick` | `UnlesionedPostLife` | `FlaglessPostLifeLesion` | `+0.00150` | `61.0` (`83.0`) | `+0.1528` | `0.5534` | `0.5444` |
-| `lesion_vs_frozen_influx_per_tick` | `FlaglessPostLifeLesion` | `FrozenPlasticity` | `+0.00174` | `14.0` (`130.0`) | `+0.8056` | `0.0010` | `0.0009` |
+| `achieved_influx_per_tick` | `Natural` | `YokedMetabolism` | `+0.00064` | `59.0` (`85.0`) | `+0.1806` | `0.4845` | `0.4705` |
+| `net_achieved_energy_per_tick` | `Natural` | `YokedMetabolism` | `+0.00563` | `16.0` (`128.0`) | `+0.7778` | `0.0030` | `0.0014` |
+| `second_half_influx_per_tick` | `Natural` | `YokedMetabolism` | `+0.00067` | `63.0` (`63.0`) | `-0.1250` | `0.6284` | `0.6142` |
+| `mean_interventional_agency` | `Natural` | `YokedMetabolism` | `+0.00068` | `58.0` (`86.0`) | `+0.1944` | `0.4535` | `0.4234` |
+| `noisy_tv_conductance_share` | `Natural` | `YokedMetabolism` | `+0.00000` | `62.0` (`62.0`) | `-0.1389` | `0.6094` | `0.4709` |
+| `achieved_influx_per_tick` | `Natural` | `ActionShuffled` | `+0.00313` | `19.0` (`125.0`) | `+0.7361` | `0.0040` | `0.0024` |
+| `net_achieved_energy_per_tick` | `Natural` | `ActionShuffled` | `+0.00214` | `22.0` (`122.0`) | `+0.6944` | `0.0050` | `0.0043` |
+| `second_half_influx_per_tick` | `Natural` | `ActionShuffled` | `+0.00214` | `44.5` (`99.5`) | `+0.3819` | `0.1099` | `0.0957` |
+| `mean_interventional_agency` | `Natural` | `ActionShuffled` | `+0.00089` | `40.5` (`103.5`) | `+0.4375` | `0.0609` | `0.0558` |
+| `noisy_tv_conductance_share` | `Natural` | `ActionShuffled` | `+0.00000` | `70.0` (`74.0`) | `+0.0278` | `0.7552` | `0.8939` |
+| `post_life_achieved_influx_per_tick` | `UnlesionedPostLife` | `FlaglessPostLifeLesion` | `+0.00009` | `71.0` (`73.0`) | `+0.0139` | `0.9810` | `0.9770` |
+| `post_life_net_energy_per_tick` | `UnlesionedPostLife` | `FlaglessPostLifeLesion` | `-0.00147` | `52.0` (`52.0`) | `-0.2778` | `0.2887` | `0.2602` |
+| `lesion_vs_frozen_influx_per_tick` | `FlaglessPostLifeLesion` | `FrozenPlasticity` | `+0.00088` | `30.0` (`114.0`) | `+0.5833` | `0.0220` | `0.0166` |
 
 ## 4. Sense-Organ Band Conductance Allocation & Delay Tuning
 
 | Control Arm | Band Label | Role | Uniform Share | Observed Conductance Share (`p50 [IQR]`, `p95`) | Pore Count (`p50`) | Weighted Delay `\Delta` (`p50 [IQR]`) |
 | :--- | :--- | :--- | ---: | :--- | ---: | :--- |
-| `Natural` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `97.4% [3.4%]` (`p95=100.0%`) | `56.0` | `1.00 [0.00]` |
-| `Natural` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `2.4% [3.8%]` (`p95=5.6%`) | `3.5` | `1.00 [0.25]` |
-| `Natural` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=0.7%`) | `0.0` | `0.00 [0.00]` |
+| `Natural` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `81.3% [22.1%]` (`p95=99.3%`) | `48.0` | `1.00 [0.00]` |
+| `Natural` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `18.7% [24.0%]` (`p95=47.7%`) | `16.0` | `1.00 [0.00]` |
+| `Natural` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=1.9%`) | `0.0` | `0.00 [0.00]` |
 | `FrozenPlasticity` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `45.0% [21.3%]` (`p95=62.2%`) | `9.0` | `1.00 [0.00]` |
 | `FrozenPlasticity` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `22.5% [15.0%]` (`p95=39.5%`) | `4.5` | `1.00 [0.00]` |
 | `FrozenPlasticity` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `25.0% [11.2%]` (`p95=46.2%`) | `5.0` | `1.00 [0.00]` |
-| `YokedMetabolism` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `96.2% [2.5%]` (`p95=99.2%`) | `54.5` | `1.00 [0.00]` |
-| `YokedMetabolism` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `3.8% [2.0%]` (`p95=9.0%`) | `5.5` | `1.00 [0.00]` |
-| `YokedMetabolism` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=1.5%`) | `0.0` | `0.00 [0.00]` |
-| `ActionShuffled` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `99.9% [1.2%]` (`p95=100.0%`) | `53.0` | `1.00 [0.00]` |
-| `ActionShuffled` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `0.0% [0.7%]` (`p95=1.2%`) | `0.0` | `0.00 [1.00]` |
-| `ActionShuffled` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=1.5%`) | `0.0` | `0.00 [0.25]` |
-| `UnlesionedPostLife` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `97.4% [3.4%]` (`p95=100.0%`) | `56.0` | `1.00 [0.00]` |
-| `UnlesionedPostLife` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `2.4% [3.8%]` (`p95=5.6%`) | `3.5` | `1.00 [0.25]` |
-| `UnlesionedPostLife` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=0.7%`) | `0.0` | `0.00 [0.00]` |
+| `YokedMetabolism` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `78.7% [20.2%]` (`p95=97.7%`) | `42.5` | `1.00 [0.00]` |
+| `YokedMetabolism` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `21.3% [20.7%]` (`p95=55.1%`) | `19.0` | `1.00 [0.00]` |
+| `YokedMetabolism` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.3%]` (`p95=1.6%`) | `0.0` | `0.00 [1.00]` |
+| `ActionShuffled` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `91.5% [9.4%]` (`p95=97.6%`) | `53.0` | `1.00 [0.00]` |
+| `ActionShuffled` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `8.5% [8.8%]` (`p95=26.5%`) | `10.0` | `1.00 [0.00]` |
+| `ActionShuffled` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=0.6%`) | `0.0` | `0.00 [0.00]` |
+| `UnlesionedPostLife` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `81.3% [22.1%]` (`p95=99.3%`) | `48.0` | `1.00 [0.00]` |
+| `UnlesionedPostLife` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `18.7% [24.0%]` (`p95=47.7%`) | `16.0` | `1.00 [0.00]` |
+| `UnlesionedPostLife` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=1.9%`) | `0.0` | `0.00 [0.00]` |
 | `FlaglessPostLifeLesion` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `0.0% [0.0%]` (`p95=0.0%`) | `9.0` | `1.00 [0.00]` |
 | `FlaglessPostLifeLesion` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `0.0% [0.0%]` (`p95=0.0%`) | `4.5` | `1.00 [0.00]` |
 | `FlaglessPostLifeLesion` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=0.0%`) | `5.0` | `1.00 [0.00]` |
@@ -101,42 +101,42 @@ All `128` ambient sensory channels and all `6` motor actuator channels were bije
 | Tick | Stage | Window Influx/Tick | ATP | Cells | Tubes | Mean `tau` | Octaves | Agency | Noisy-TV Share | `Photonic 2D (0..64)` Share / `\Delta` | `Wave-Echo Sonar (64..96)` Share / `\Delta` | `Noisy TV Static (96..128)` Share / `\Delta` |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- | :--- | :--- |
 | `1` | `0%` | `0.0000` | `11.999` | `32.0` | `319.0` | `3.91` | `4.0` | `0.0000` | `30.0%` | `45.0%` / `1.00` | `30.0%` / `1.00` | `30.0%` / `1.00` |
-| `240` | `10%` | `0.0169` | `12.458` | `40.0` | `416.5` | `4.31` | `4.0` | `0.0000` | `0.3%` | `97.1%` / `1.00` | `2.9%` / `1.00` | `0.3%` / `1.00` |
-| `600` | `25%` | `0.0002` | `6.507` | `55.0` | `596.5` | `4.88` | `4.5` | `0.0000` | `0.0%` | `96.6%` / `1.00` | `2.9%` / `1.00` | `0.0%` / `0.00` |
-| `1200` | `50%` | `0.0000` | `2.306` | `64.0` | `703.0` | `5.11` | `4.5` | `0.0000` | `0.0%` | `98.4%` / `1.00` | `1.6%` / `1.00` | `0.0%` / `0.00` |
-| `1800` | `75%` | `0.0000` | `1.482` | `64.0` | `700.0` | `5.11` | `4.5` | `0.0000` | `0.0%` | `99.1%` / `1.00` | `0.9%` / `1.00` | `0.0%` / `0.00` |
-| `2400` | `100%` | `0.0000` | `0.226` | `69.5` | `763.5` | `5.21` | `4.5` | `0.0000` | `0.0%` | `97.4%` / `1.00` | `2.4%` / `1.00` | `0.0%` / `0.00` |
+| `240` | `10%` | `0.0198` | `13.084` | `40.0` | `417.0` | `4.29` | `4.0` | `0.0000` | `0.5%` | `74.7%` / `1.00` | `24.5%` / `1.00` | `0.5%` / `1.00` |
+| `600` | `25%` | `0.0009` | `7.407` | `55.0` | `597.0` | `4.70` | `4.0` | `0.0000` | `0.0%` | `68.8%` / `1.00` | `31.2%` / `1.00` | `0.0%` / `0.00` |
+| `1200` | `50%` | `0.0000` | `2.175` | `65.0` | `706.5` | `5.01` | `4.0` | `0.0028` | `0.0%` | `67.2%` / `1.00` | `32.8%` / `1.00` | `0.0%` / `0.00` |
+| `1800` | `75%` | `0.0034` | `2.144` | `66.5` | `716.5` | `5.08` | `4.0` | `0.0004` | `0.0%` | `83.0%` / `1.00` | `17.0%` / `1.00` | `0.0%` / `0.00` |
+| `2400` | `100%` | `0.0000` | `0.824` | `67.0` | `715.0` | `5.08` | `4.0` | `0.0009` | `0.0%` | `81.3%` / `1.00` | `18.7%` / `1.00` | `0.0%` / `0.00` |
 
 ## 6. Emergent Individuality & Constrained-Randomness Divergence
 
 | Control Arm | Cohort `N` | Outcome `CV` | Pairwise Pore Cosine Dist (`mean` / `max`) | Pairwise `tau` JSD (`mean` / `max` bits) | Intra-Trajectory Entropy (`bits` / `norm`) | Inter-Individual Trajectory JSD (`bits`) | Composite Individuality (`[0..1]`) |
 | :--- | ---: | ---: | :--- | :--- | :--- | ---: | ---: |
-| `Natural` | `12` | `0.5260` | `0.2559 / 0.4518` | `0.0451 / 0.1214` | `3.6243 / 0.9794` | `0.0274` | `0.2848` |
-| `FrozenPlasticity` | `12` | `0.5722` | `0.8470 / 1.0000` | `0.0002 / 0.0007` | `3.6955 / 0.9987` | `0.0005` | `0.4276` |
-| `YokedMetabolism` | `12` | `0.9904` | `0.2794 / 0.6136` | `0.0706 / 0.1772` | `3.5942 / 0.9713` | `0.0534` | `0.3352` |
-| `ActionShuffled` | `12` | `0.7751` | `0.2502 / 0.4396` | `0.0569 / 0.1266` | `3.6353 / 0.9824` | `0.0524` | `0.3106` |
-| `UnlesionedPostLife` | `12` | `0.9079` | `0.2559 / 0.4518` | `0.0908 / 0.3115` | `3.3568 / 0.9071` | `0.2665` | `0.3283` |
-| `FlaglessPostLifeLesion` | `12` | `0.9811` | `0.0000 / 0.0000` | `0.0002 / 0.0007` | `3.6729 / 0.9926` | `0.0027` | `0.2480` |
+| `Natural` | `12` | `0.8535` | `0.3889 / 0.7156` | `0.0407 / 0.0918` | `3.5572 / 0.9613` | `0.1168` | `0.3468` |
+| `FrozenPlasticity` | `12` | `0.5206` | `0.8470 / 1.0000` | `0.0002 / 0.0007` | `3.6956 / 0.9987` | `0.0005` | `0.4222` |
+| `YokedMetabolism` | `12` | `0.8702` | `0.4169 / 0.6944` | `0.0323 / 0.0862` | `3.6092 / 0.9754` | `0.0859` | `0.3535` |
+| `ActionShuffled` | `12` | `0.8335` | `0.2987 / 0.4668` | `0.0192 / 0.1010` | `3.5672 / 0.9640` | `0.0932` | `0.3169` |
+| `UnlesionedPostLife` | `12` | `1.1356` | `0.3889 / 0.7156` | `0.1229 / 0.3371` | `3.2844 / 0.8876` | `0.3584` | `0.3843` |
+| `FlaglessPostLifeLesion` | `12` | `1.0645` | `0.0000 / 0.0000` | `0.0002 / 0.0007` | `3.6756 / 0.9933` | `0.0027` | `0.2532` |
 
 ## 7. External World `CaveMetrics` & Active Sonar Emission Telemetry
 
 | Control Arm | Active Pings (`p50 [IQR]`) | Echo Energy (`p50 [IQR]`) | Emit-Pulse Motor `g` (`p50 [IQR]`) | Springs Depleted (`p50 [IQR]`) | Wall Impacts (`p50`) | Distance (`p50`) | Valve Activations (`p50`) |
 | :--- | :--- | :--- | :--- | :--- | ---: | ---: | ---: |
-| `Natural` | `1030.5 [146.5]` | `336.675 [399.859]` | `0.950 [0.004]` | `2.5 [1.2]` | `3.0` | `231.15` | `0.0` |
-| `FrozenPlasticity` | `1422.0 [33.2]` | `510.949 [147.993]` | `0.450 [0.000]` | `2.0 [0.5]` | `6.5` | `180.12` | `0.5` |
-| `YokedMetabolism` | `960.0 [131.8]` | `269.674 [91.365]` | `0.950 [0.001]` | `2.0 [1.0]` | `15.0` | `212.13` | `0.5` |
-| `ActionShuffled` | `1067.0 [86.2]` | `547.680 [480.690]` | `0.949 [0.004]` | `1.5 [1.0]` | `5.5` | `174.82` | `1.0` |
-| `UnlesionedPostLife` | `272.0 [100.5]` | `76.724 [45.626]` | `0.950 [0.004]` | `1.0 [1.0]` | `0.5` | `51.54` | `0.0` |
-| `FlaglessPostLifeLesion` | `419.0 [23.5]` | `241.634 [56.752]` | `0.000 [0.000]` | `1.0 [0.0]` | `1.0` | `62.12` | `0.0` |
+| `Natural` | `789.0 [978.8]` | `619.075 [1489.828]` | `0.950 [0.005]` | `2.5 [2.2]` | `8.0` | `304.54` | `1.0` |
+| `FrozenPlasticity` | `1424.0 [23.5]` | `498.008 [144.844]` | `0.450 [0.000]` | `2.0 [1.0]` | `4.0` | `180.67` | `1.0` |
+| `YokedMetabolism` | `843.5 [320.5]` | `888.398 [850.194]` | `0.950 [0.003]` | `1.0 [1.2]` | `123.0` | `346.95` | `1.0` |
+| `ActionShuffled` | `876.0 [162.2]` | `555.086 [424.547]` | `0.950 [0.005]` | `2.0 [2.0]` | `4.5` | `168.02` | `1.0` |
+| `UnlesionedPostLife` | `193.5 [319.0]` | `32.550 [364.795]` | `0.950 [0.005]` | `0.5 [1.0]` | `7.5` | `46.04` | `0.0` |
+| `FlaglessPostLifeLesion` | `417.5 [37.2]` | `214.454 [75.849]` | `0.000 [0.000]` | `1.0 [0.0]` | `0.5` | `57.90` | `0.0` |
 
 ### Cross-Habitat Modality Comparison (`02a PermutedMedium<BrightRadiantWorld> (128 Scrambled Sensor + 6 Scrambled Motor Wires)` vs `02b PermutedMedium<PitchBlackEchoCave> (128 Scrambled Sensor + 6 Scrambled Motor Wires)` — `Natural` Cohort)
 
 | Cross-World Observable | `median(Self) - median(Peer)` | Rank-Biserial `r_rb` | `p_perm` (`1000` perms) |
 | :--- | ---: | ---: | ---: |
-| `active_pings_emitted` | `-323.50000` | `-1.0000` | `0.0010` |
-| `echo_energy_received` | `-21.28281` | `+0.0139` | `0.9810` |
-| `photonic_band_conductance_share` | `+0.97353` | `+1.0000` | `0.0010` |
-| `sonar_echo_band_conductance_share` | `+0.02418` | `+0.0208` | `0.9291` |
+| `active_pings_emitted` | `+480.00000` | `+0.1528` | `0.5534` |
+| `echo_energy_received` | `+264.13051` | `+0.6806` | `0.0050` |
+| `photonic_band_conductance_share` | `+0.81347` | `+1.0000` | `0.0010` |
+| `sonar_echo_band_conductance_share` | `-0.81347` | `-0.2361` | `0.3497` |
 
 ---
 
@@ -151,66 +151,66 @@ All `128` ambient sensory channels and all `6` motor actuator channels were bije
 
 | Control Arm | Ticks | Influx / Tick (`p50 [IQR]`, `min..max`) | Stress / Tick (`p50 [IQR]`) | Net Energy / Tick (`p50 [IQR]`) | 1st->2nd Half Influx / Tick (`p50`) | Agency (`p50 [IQR]`) | Pred Error (`p50 [IQR]`) | Final ATP (`p50`) |
 | :--- | ---: | :--- | :--- | :--- | :--- | :--- | :--- | ---: |
-| `Natural` | `2400` | `0.0017 [0.0010]` (`0.0006..0.0035`) | `0.0009 [0.0011]` | `0.0008 [0.0011]` | `0.0034 -> 0.0000` | `0.0000 [0.0000]` | `0.0122 [0.0011]` | `8.128` |
-| `FrozenPlasticity` | `2400` | `0.0005 [0.0006]` (`0.0002..0.0024`) | `0.0005 [0.0012]` | `-0.0002 [0.0017]` | `0.0010 -> 0.0001` | `0.0000 [0.0000]` | `0.0294 [0.0094]` | `9.743` |
-| `YokedMetabolism` | `2400` | `0.0005 [0.0003]` (`0.0002..0.0025`) | `0.0012 [0.0029]` | `-0.0006 [0.0028]` | `0.0007 -> 0.0000` | `0.0000 [0.0000]` | `0.0126 [0.0016]` | `8.575` |
-| `ActionShuffled` | `2400` | `0.0005 [0.0005]` (`0.0002..0.0014`) | `0.0006 [0.0014]` | `0.0001 [0.0010]` | `0.0009 -> 0.0000` | `0.0000 [0.0000]` | `0.0125 [0.0014]` | `6.390` |
-| `UnlesionedPostLife` | `600` | `0.0031 [0.0025]` (`0.0006..0.0091`) | `0.0007 [0.0009]` | `0.0021 [0.0036]` | `0.0043 -> 0.0000` | `0.0000 [0.0000]` | `0.0116 [0.0009]` | `10.313` |
-| `FlaglessPostLifeLesion` | `600` | `0.0014 [0.0010]` (`0.0006..0.0059`) | `0.0000 [0.0002]` | `0.0013 [0.0010]` | `0.0020 -> 0.0000` | `0.0000 [0.0000]` | `0.0114 [0.0007]` | `8.474` |
+| `Natural` | `2400` | `0.0012 [0.0012]` (`0.0007..0.0050`) | `0.0010 [0.0012]` | `0.0006 [0.0016]` | `0.0023 -> 0.0000` | `0.0000 [0.0000]` | `0.0126 [0.0028]` | `1.370` |
+| `FrozenPlasticity` | `2400` | `0.0008 [0.0006]` (`0.0002..0.0026`) | `0.0006 [0.0008]` | `0.0002 [0.0011]` | `0.0013 -> 0.0002` | `0.0000 [0.0000]` | `0.0281 [0.0067]` | `10.427` |
+| `YokedMetabolism` | `2400` | `0.0006 [0.0005]` (`0.0001..0.0021`) | `0.0003 [0.0015]` | `0.0002 [0.0005]` | `0.0011 -> 0.0000` | `0.0000 [0.0000]` | `0.0123 [0.0021]` | `1.756` |
+| `ActionShuffled` | `2400` | `0.0005 [0.0002]` (`0.0002..0.0015`) | `0.0012 [0.0050]` | `-0.0008 [0.0047]` | `0.0011 -> 0.0000` | `0.0000 [0.0000]` | `0.0136 [0.0022]` | `0.518` |
+| `UnlesionedPostLife` | `600` | `0.0017 [0.0020]` (`0.0005..0.0077`) | `0.0000 [0.0008]` | `0.0015 [0.0023]` | `0.0031 -> 0.0000` | `0.0000 [0.0000]` | `0.0118 [0.0005]` | `1.745` |
+| `FlaglessPostLifeLesion` | `600` | `0.0022 [0.0022]` (`0.0007..0.0061`) | `0.0008 [0.0020]` | `0.0013 [0.0021]` | `0.0025 -> 0.0000` | `0.0000 [0.0000]` | `0.0121 [0.0007]` | `1.877` |
 
 ## 2. Unbounded Morphogenesis, Time-Constants & Motor Clutch Dynamics
 
 | Control Arm | Cells (`p50 [IQR]`, `p95`) | Tubes (`p50 [IQR]`) | Stiff Highways (`p50`) | Inhibitory (`p50`) | Echo-Delay Tubes (`p50`) | Mean `tau` / Max `tau` / Octaves (`p50`) | Mitosis / Splits / Myelin / Atrophy (`p50`) | Pulses / Rehearsals / Rest (`p50`) |
 | :--- | :--- | :--- | ---: | ---: | ---: | :--- | :--- | :--- |
-| `Natural` | `42.0 [2.2]` (`p95=43.9`) | `390.5 [41.2]` | `40.0` | `10.0` | `10.0` | `4.47 / 9.99 / 4.0` | `10.0 / 0.0 / 1.0 / 132.5` | `2238.5 / 163.5 / 105.0` |
+| `Natural` | `57.5 [4.0]` (`p95=68.5`) | `594.5 [64.2]` | `101.0` | `28.0` | `51.0` | `5.17 / 17.59 / 5.0` | `25.5 / 0.0 / 1.0 / 149.5` | `2203.5 / 203.5 / 105.0` |
 | `FrozenPlasticity` | `32.0 [0.0]` (`p95=32.0`) | `319.0 [2.0]` | `0.0` | `13.5` | `12.5` | `3.91 / 8.00 / 4.0` | `0.0 / 0.0 / 0.0 / 0.0` | `2270.0 / 130.0 / 105.0` |
-| `YokedMetabolism` | `41.5 [1.5]` (`p95=44.0`) | `388.0 [40.2]` | `38.0` | `10.0` | `9.5` | `4.36 / 8.87 / 4.0` | `9.5 / 0.0 / 1.0 / 130.5` | `2241.5 / 161.0 / 105.0` |
-| `ActionShuffled` | `40.5 [1.0]` (`p95=41.5`) | `392.0 [19.2]` | `34.0` | `8.5` | `8.5` | `4.37 / 10.06 / 4.0` | `8.5 / 0.0 / 0.0 / 100.5` | `2235.5 / 164.5 / 105.0` |
-| `UnlesionedPostLife` | `42.0 [2.2]` (`p95=43.9`) | `390.5 [41.2]` | `40.0` | `10.0` | `10.0` | `4.47 / 9.99 / 4.0` | `10.0 / 0.0 / 1.0 / 132.5` | `2786.5 / 215.5 / 147.0` |
-| `FlaglessPostLifeLesion` | `32.0 [0.0]` (`p95=32.0`) | `319.0 [2.0]` | `0.0` | `0.0` | `0.0` | `3.91 / 8.00 / 4.0` | `0.0 / 0.0 / 0.0 / 0.0` | `574.5 / 25.5 / 21.0` |
+| `YokedMetabolism` | `58.0 [7.0]` (`p95=69.6`) | `590.0 [108.2]` | `104.0` | `28.0` | `52.0` | `5.15 / 15.38 / 4.5` | `26.0 / 0.0 / 1.0 / 183.5` | `2224.5 / 185.5 / 105.0` |
+| `ActionShuffled` | `53.0 [0.8]` (`p95=57.5`) | `548.5 [10.5]` | `84.0` | `21.0` | `42.0` | `5.13 / 16.84 / 5.0` | `21.0 / 0.0 / 0.0 / 225.5` | `2244.0 / 156.5 / 105.5` |
+| `UnlesionedPostLife` | `57.5 [4.0]` (`p95=68.5`) | `594.5 [64.2]` | `101.0` | `28.0` | `51.0` | `5.17 / 17.59 / 5.0` | `25.5 / 0.0 / 1.0 / 149.5` | `2753.0 / 255.5 / 147.0` |
+| `FlaglessPostLifeLesion` | `32.0 [0.0]` (`p95=32.0`) | `319.0 [2.0]` | `0.0` | `0.0` | `0.0` | `3.91 / 8.00 / 4.0` | `0.0 / 0.0 / 0.0 / 0.0` | `575.0 / 25.0 / 21.0` |
 
 ## 3. Non-Parametric Two-Sample Control Comparisons (Mann-Whitney U & Rank-Biserial)
 
 | Metric | Arm A | Arm B | `median(A) - median(B)` | `U` (`U_A`) | Rank-Biserial `r_rb` | `p_perm` (`1000` perms) | `p_norm` |
 | :--- | :--- | :--- | ---: | :--- | ---: | ---: | ---: |
-| `achieved_influx_per_tick` | `Natural` | `FrozenPlasticity` | `+0.00116` | `23.0` (`121.0`) | `+0.6806` | `0.0050` | `0.0051` |
-| `net_achieved_energy_per_tick` | `Natural` | `FrozenPlasticity` | `+0.00100` | `45.0` (`99.0`) | `+0.3750` | `0.1578` | `0.1260` |
-| `second_half_influx_per_tick` | `Natural` | `FrozenPlasticity` | `-0.00008` | `41.0` (`41.0`) | `-0.4306` | `0.0699` | `0.0599` |
-| `mean_interventional_agency` | `Natural` | `FrozenPlasticity` | `+0.00000` | `66.0` (`78.0`) | `+0.0833` | `1.0000` | `0.3593` |
+| `achieved_influx_per_tick` | `Natural` | `FrozenPlasticity` | `+0.00038` | `31.0` (`113.0`) | `+0.5694` | `0.0240` | `0.0194` |
+| `net_achieved_energy_per_tick` | `Natural` | `FrozenPlasticity` | `+0.00048` | `48.0` (`96.0`) | `+0.3333` | `0.1998` | `0.1749` |
+| `second_half_influx_per_tick` | `Natural` | `FrozenPlasticity` | `-0.00016` | `55.0` (`55.0`) | `-0.2361` | `0.3267` | `0.3087` |
+| `mean_interventional_agency` | `Natural` | `FrozenPlasticity` | `+0.00000` | `54.0` (`90.0`) | `+0.2500` | `0.2318` | `0.0788` |
 | `noisy_tv_conductance_share` | `Natural` | `FrozenPlasticity` | `-0.25000` | `0.0` (`0.0`) | `-1.0000` | `0.0010` | `0.0000` |
-| `achieved_influx_per_tick` | `Natural` | `YokedMetabolism` | `+0.00121` | `22.0` (`122.0`) | `+0.6944` | `0.0050` | `0.0043` |
-| `net_achieved_energy_per_tick` | `Natural` | `YokedMetabolism` | `+0.00142` | `25.0` (`119.0`) | `+0.6528` | `0.0060` | `0.0073` |
-| `second_half_influx_per_tick` | `Natural` | `YokedMetabolism` | `-0.00002` | `52.0` (`52.0`) | `-0.2778` | `0.2268` | `0.2087` |
-| `mean_interventional_agency` | `Natural` | `YokedMetabolism` | `+0.00000` | `59.5` (`59.5`) | `-0.1736` | `0.3526` | `0.2860` |
-| `noisy_tv_conductance_share` | `Natural` | `YokedMetabolism` | `+0.00000` | `66.0` (`78.0`) | `+0.0833` | `1.0000` | `0.3593` |
-| `achieved_influx_per_tick` | `Natural` | `ActionShuffled` | `+0.00124` | `13.0` (`131.0`) | `+0.8194` | `0.0010` | `0.0007` |
-| `net_achieved_energy_per_tick` | `Natural` | `ActionShuffled` | `+0.00064` | `34.0` (`110.0`) | `+0.5278` | `0.0360` | `0.0304` |
-| `second_half_influx_per_tick` | `Natural` | `ActionShuffled` | `+0.00000` | `65.0` (`65.0`) | `-0.0972` | `0.6853` | `0.6661` |
-| `mean_interventional_agency` | `Natural` | `ActionShuffled` | `+0.00000` | `66.0` (`78.0`) | `+0.0833` | `1.0000` | `0.3593` |
-| `noisy_tv_conductance_share` | `Natural` | `ActionShuffled` | `+0.00000` | `71.5` (`71.5`) | `-0.0069` | `1.0000` | `1.0000` |
-| `post_life_achieved_influx_per_tick` | `UnlesionedPostLife` | `FlaglessPostLifeLesion` | `+0.00169` | `37.0` (`107.0`) | `+0.4861` | `0.0500` | `0.0464` |
-| `post_life_net_energy_per_tick` | `UnlesionedPostLife` | `FlaglessPostLifeLesion` | `+0.00075` | `50.0` (`94.0`) | `+0.3056` | `0.2438` | `0.2145` |
-| `lesion_vs_frozen_influx_per_tick` | `FlaglessPostLifeLesion` | `FrozenPlasticity` | `+0.00083` | `29.0` (`115.0`) | `+0.5972` | `0.0180` | `0.0141` |
+| `achieved_influx_per_tick` | `Natural` | `YokedMetabolism` | `+0.00056` | `27.0` (`117.0`) | `+0.6250` | `0.0110` | `0.0102` |
+| `net_achieved_energy_per_tick` | `Natural` | `YokedMetabolism` | `+0.00044` | `43.0` (`101.0`) | `+0.4028` | `0.1309` | `0.0999` |
+| `second_half_influx_per_tick` | `Natural` | `YokedMetabolism` | `+0.00000` | `65.0` (`79.0`) | `+0.0972` | `0.6833` | `0.6548` |
+| `mean_interventional_agency` | `Natural` | `YokedMetabolism` | `+0.00000` | `54.0` (`90.0`) | `+0.2500` | `0.2318` | `0.0788` |
+| `noisy_tv_conductance_share` | `Natural` | `YokedMetabolism` | `+0.00000` | `60.0` (`60.0`) | `-0.1667` | `0.4935` | `0.1658` |
+| `achieved_influx_per_tick` | `Natural` | `ActionShuffled` | `+0.00064` | `16.0` (`128.0`) | `+0.7778` | `0.0030` | `0.0014` |
+| `net_achieved_energy_per_tick` | `Natural` | `ActionShuffled` | `+0.00143` | `21.0` (`123.0`) | `+0.7083` | `0.0040` | `0.0035` |
+| `second_half_influx_per_tick` | `Natural` | `ActionShuffled` | `+0.00000` | `66.0` (`78.0`) | `+0.0833` | `0.7133` | `0.7052` |
+| `mean_interventional_agency` | `Natural` | `ActionShuffled` | `+0.00000` | `59.5` (`84.5`) | `+0.1736` | `0.3526` | `0.2860` |
+| `noisy_tv_conductance_share` | `Natural` | `ActionShuffled` | `+0.00000` | `66.0` (`66.0`) | `-0.0833` | `1.0000` | `0.3593` |
+| `post_life_achieved_influx_per_tick` | `UnlesionedPostLife` | `FlaglessPostLifeLesion` | `-0.00050` | `67.0` (`67.0`) | `-0.0694` | `0.7882` | `0.7950` |
+| `post_life_net_energy_per_tick` | `UnlesionedPostLife` | `FlaglessPostLifeLesion` | `+0.00018` | `65.0` (`79.0`) | `+0.0972` | `0.7113` | `0.7075` |
+| `lesion_vs_frozen_influx_per_tick` | `FlaglessPostLifeLesion` | `FrozenPlasticity` | `+0.00136` | `26.0` (`118.0`) | `+0.6389` | `0.0080` | `0.0086` |
 
 ## 4. Sense-Organ Band Conductance Allocation & Delay Tuning
 
 | Control Arm | Band Label | Role | Uniform Share | Observed Conductance Share (`p50 [IQR]`, `p95`) | Pore Count (`p50`) | Weighted Delay `\Delta` (`p50 [IQR]`) |
 | :--- | :--- | :--- | ---: | :--- | ---: | :--- |
 | `Natural` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `0.0% [0.0%]` (`p95=0.0%`) | `0.0` | `0.00 [0.00]` |
-| `Natural` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `0.0% [100.0%]` (`p95=100.0%`) | `0.0` | `0.00 [1.00]` |
-| `Natural` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=3.3%`) | `0.0` | `0.00 [0.00]` |
+| `Natural` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `100.0% [100.0%]` (`p95=100.0%`) | `3.0` | `1.00 [1.00]` |
+| `Natural` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=0.0%`) | `0.0` | `0.00 [0.00]` |
 | `FrozenPlasticity` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `45.0% [21.3%]` (`p95=62.2%`) | `9.0` | `1.00 [0.00]` |
 | `FrozenPlasticity` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `22.5% [15.0%]` (`p95=39.5%`) | `4.5` | `1.00 [0.00]` |
 | `FrozenPlasticity` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `25.0% [11.2%]` (`p95=46.2%`) | `5.0` | `1.00 [0.00]` |
 | `YokedMetabolism` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `0.0% [0.0%]` (`p95=0.0%`) | `0.0` | `0.00 [0.00]` |
-| `YokedMetabolism` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `50.0% [100.0%]` (`p95=100.0%`) | `1.0` | `0.50 [1.00]` |
-| `YokedMetabolism` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=0.0%`) | `0.0` | `0.00 [0.00]` |
+| `YokedMetabolism` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `50.0% [100.0%]` (`p95=100.0%`) | `0.5` | `0.50 [1.00]` |
+| `YokedMetabolism` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=100.0%`) | `0.0` | `0.00 [0.00]` |
 | `ActionShuffled` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `0.0% [0.0%]` (`p95=0.0%`) | `0.0` | `0.00 [0.00]` |
-| `ActionShuffled` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `0.0% [100.0%]` (`p95=100.0%`) | `0.0` | `0.00 [1.00]` |
-| `ActionShuffled` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=45.0%`) | `0.0` | `0.00 [0.00]` |
+| `ActionShuffled` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `100.0% [0.0%]` (`p95=100.0%`) | `7.5` | `1.00 [0.00]` |
+| `ActionShuffled` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=3.3%`) | `0.0` | `0.00 [0.00]` |
 | `UnlesionedPostLife` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `0.0% [0.0%]` (`p95=0.0%`) | `0.0` | `0.00 [0.00]` |
-| `UnlesionedPostLife` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `0.0% [100.0%]` (`p95=100.0%`) | `0.0` | `0.00 [1.00]` |
-| `UnlesionedPostLife` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=3.3%`) | `0.0` | `0.00 [0.00]` |
+| `UnlesionedPostLife` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `100.0% [100.0%]` (`p95=100.0%`) | `3.0` | `1.00 [1.00]` |
+| `UnlesionedPostLife` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=0.0%`) | `0.0` | `0.00 [0.00]` |
 | `FlaglessPostLifeLesion` | `Photonic 2D (0..64)` | `structured_physical` | `50.0%` | `0.0% [0.0%]` (`p95=0.0%`) | `9.0` | `1.00 [0.00]` |
 | `FlaglessPostLifeLesion` | `Wave-Echo Sonar (64..96)` | `active_echo` | `25.0%` | `0.0% [0.0%]` (`p95=0.0%`) | `4.5` | `1.00 [0.00]` |
 | `FlaglessPostLifeLesion` | `Noisy TV Static (96..128)` | `noisy_tv_distractor` | `25.0%` | `0.0% [0.0%]` (`p95=0.0%`) | `5.0` | `1.00 [0.00]` |
@@ -220,39 +220,39 @@ All `128` ambient sensory channels and all `6` motor actuator channels were bije
 | Tick | Stage | Window Influx/Tick | ATP | Cells | Tubes | Mean `tau` | Octaves | Agency | Noisy-TV Share | `Photonic 2D (0..64)` Share / `\Delta` | `Wave-Echo Sonar (64..96)` Share / `\Delta` | `Noisy TV Static (96..128)` Share / `\Delta` |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- | :--- | :--- |
 | `1` | `0%` | `0.0000` | `11.999` | `32.0` | `319.0` | `3.91` | `4.0` | `0.0000` | `30.0%` | `45.0%` / `1.00` | `30.0%` / `1.00` | `30.0%` / `1.00` |
-| `240` | `10%` | `0.0120` | `11.604` | `39.5` | `410.0` | `4.25` | `4.0` | `0.0000` | `19.3%` | `0.0%` / `0.00` | `74.2%` / `1.00` | `19.3%` / `1.00` |
-| `600` | `25%` | `0.0000` | `10.796` | `41.5` | `418.5` | `4.44` | `4.0` | `0.0000` | `0.0%` | `0.0%` / `0.00` | `100.0%` / `1.00` | `0.0%` / `0.00` |
-| `1200` | `50%` | `0.0000` | `9.935` | `42.0` | `404.5` | `4.47` | `4.0` | `0.0000` | `0.0%` | `0.0%` / `0.00` | `0.0%` / `0.00` | `0.0%` / `0.00` |
-| `1800` | `75%` | `0.0000` | `9.034` | `42.0` | `397.0` | `4.47` | `4.0` | `0.0000` | `0.0%` | `0.0%` / `0.00` | `100.0%` / `1.00` | `0.0%` / `0.00` |
-| `2400` | `100%` | `0.0000` | `8.128` | `42.0` | `390.5` | `4.47` | `4.0` | `0.0000` | `0.0%` | `0.0%` / `0.00` | `0.0%` / `0.00` | `0.0%` / `0.00` |
+| `240` | `10%` | `0.0116` | `11.194` | `40.0` | `415.5` | `4.27` | `4.0` | `0.0000` | `0.0%` | `0.0%` / `0.00` | `100.0%` / `1.00` | `0.0%` / `0.00` |
+| `600` | `25%` | `0.0000` | `7.050` | `50.5` | `530.0` | `4.67` | `4.0` | `0.0000` | `0.0%` | `0.0%` / `0.00` | `100.0%` / `1.00` | `0.0%` / `0.00` |
+| `1200` | `50%` | `0.0000` | `2.603` | `56.5` | `599.5` | `5.01` | `4.5` | `0.0000` | `0.0%` | `0.0%` / `0.00` | `100.0%` / `1.00` | `0.0%` / `0.00` |
+| `1800` | `75%` | `0.0000` | `1.816` | `56.5` | `594.5` | `5.06` | `5.0` | `0.0000` | `0.0%` | `0.0%` / `0.00` | `100.0%` / `1.00` | `0.0%` / `0.00` |
+| `2400` | `100%` | `0.0000` | `1.370` | `57.5` | `594.5` | `5.17` | `5.0` | `0.0000` | `0.0%` | `0.0%` / `0.00` | `100.0%` / `1.00` | `0.0%` / `0.00` |
 
 ## 6. Emergent Individuality & Constrained-Randomness Divergence
 
 | Control Arm | Cohort `N` | Outcome `CV` | Pairwise Pore Cosine Dist (`mean` / `max`) | Pairwise `tau` JSD (`mean` / `max` bits) | Intra-Trajectory Entropy (`bits` / `norm`) | Inter-Individual Trajectory JSD (`bits`) | Composite Individuality (`[0..1]`) |
 | :--- | ---: | ---: | :--- | :--- | :--- | ---: | ---: |
-| `Natural` | `12` | `0.4924` | `0.6808 / 1.0000` | `0.0794 / 0.2178` | `3.6990 / 0.9996` | `0.0012` | `0.3975` |
-| `FrozenPlasticity` | `12` | `0.7868` | `0.8470 / 1.0000` | `0.0002 / 0.0007` | `3.6954 / 0.9986` | `0.0005` | `0.4467` |
-| `YokedMetabolism` | `12` | `0.9823` | `0.7468 / 1.0000` | `0.0343 / 0.1742` | `3.6994 / 0.9997` | `0.0008` | `0.4442` |
-| `ActionShuffled` | `12` | `0.6021` | `0.7509 / 1.0000` | `0.0296 / 0.2016` | `3.6992 / 0.9997` | `0.0009` | `0.4141` |
-| `UnlesionedPostLife` | `12` | `0.7762` | `0.6808 / 1.0000` | `0.1064 / 0.2772` | `3.6944 / 0.9984` | `0.0045` | `0.4310` |
-| `FlaglessPostLifeLesion` | `12` | `0.8437` | `0.0000 / 0.0000` | `0.0002 / 0.0007` | `3.6848 / 0.9958` | `0.0023` | `0.2390` |
+| `Natural` | `12` | `0.7492` | `0.7685 / 1.0000` | `0.0300 / 0.1001` | `3.6036 / 0.9738` | `0.0838` | `0.4314` |
+| `FrozenPlasticity` | `12` | `0.7072` | `0.8470 / 1.0000` | `0.0002 / 0.0007` | `3.6955 / 0.9987` | `0.0006` | `0.4402` |
+| `YokedMetabolism` | `12` | `0.7861` | `0.8549 / 1.0000` | `0.0279 / 0.1071` | `3.6041 / 0.9740` | `0.0856` | `0.4555` |
+| `ActionShuffled` | `12` | `0.6226` | `0.8317 / 1.0000` | `0.0322 / 0.1149` | `3.6589 / 0.9888` | `0.0382` | `0.4368` |
+| `UnlesionedPostLife` | `12` | `0.8903` | `0.7685 / 1.0000` | `0.0638 / 0.1531` | `3.4604 / 0.9351` | `0.2126` | `0.4501` |
+| `FlaglessPostLifeLesion` | `12` | `0.6870` | `0.0000 / 0.0000` | `0.0002 / 0.0007` | `3.6774 / 0.9938` | `0.0027` | `0.2262` |
 
 ## 7. External World `CaveMetrics` & Active Sonar Emission Telemetry
 
 | Control Arm | Active Pings (`p50 [IQR]`) | Echo Energy (`p50 [IQR]`) | Emit-Pulse Motor `g` (`p50 [IQR]`) | Springs Depleted (`p50 [IQR]`) | Wall Impacts (`p50`) | Distance (`p50`) | Valve Activations (`p50`) |
 | :--- | :--- | :--- | :--- | :--- | ---: | ---: | ---: |
-| `Natural` | `1354.0 [66.0]` | `357.958 [103.842]` | `0.950 [0.000]` | `2.0 [0.5]` | `19.5` | `178.65` | `0.0` |
-| `FrozenPlasticity` | `1428.5 [23.5]` | `466.267 [96.941]` | `0.450 [0.000]` | `2.0 [0.0]` | `5.0` | `179.73` | `1.0` |
-| `YokedMetabolism` | `1355.5 [46.0]` | `439.093 [142.534]` | `0.950 [0.000]` | `2.0 [1.0]` | `8.0` | `178.47` | `1.0` |
-| `ActionShuffled` | `1409.0 [31.5]` | `508.502 [149.635]` | `0.950 [0.003]` | `2.0 [1.5]` | `13.5` | `168.57` | `1.0` |
-| `UnlesionedPostLife` | `350.5 [9.5]` | `129.769 [15.482]` | `0.950 [0.000]` | `1.0 [0.0]` | `1.0` | `44.63` | `0.0` |
-| `FlaglessPostLifeLesion` | `365.5 [16.5]` | `143.437 [14.118]` | `0.000 [0.000]` | `1.0 [0.2]` | `0.0` | `46.54` | `0.0` |
+| `Natural` | `309.0 [1070.0]` | `354.944 [103.857]` | `0.950 [0.001]` | `2.0 [2.0]` | `5.5` | `177.56` | `0.0` |
+| `FrozenPlasticity` | `1421.5 [17.8]` | `468.393 [90.905]` | `0.450 [0.000]` | `2.0 [0.2]` | `4.0` | `179.63` | `0.0` |
+| `YokedMetabolism` | `255.5 [1184.5]` | `291.543 [106.203]` | `0.950 [0.001]` | `1.5 [1.0]` | `3.5` | `177.94` | `0.5` |
+| `ActionShuffled` | `1181.0 [72.0]` | `386.399 [176.153]` | `0.950 [0.000]` | `2.0 [2.0]` | `4.5` | `153.23` | `1.0` |
+| `UnlesionedPostLife` | `33.5 [298.5]` | `16.677 [76.097]` | `0.950 [0.001]` | `1.0 [0.0]` | `0.0` | `37.65` | `0.0` |
+| `FlaglessPostLifeLesion` | `399.5 [27.8]` | `189.072 [86.445]` | `0.000 [0.000]` | `1.0 [0.0]` | `2.5` | `52.53` | `0.5` |
 
 ### Cross-Habitat Modality Comparison (`02b PermutedMedium<PitchBlackEchoCave> (128 Scrambled Sensor + 6 Scrambled Motor Wires)` vs `02a PermutedMedium<BrightRadiantWorld> (128 Scrambled Sensor + 6 Scrambled Motor Wires)` — `Natural` Cohort)
 
 | Cross-World Observable | `median(Self) - median(Peer)` | Rank-Biserial `r_rb` | `p_perm` (`1000` perms) |
 | :--- | ---: | ---: | ---: |
-| `active_pings_emitted` | `+323.50000` | `+1.0000` | `0.0010` |
-| `echo_energy_received` | `+21.28281` | `-0.0139` | `0.9810` |
-| `photonic_band_conductance_share` | `-0.97353` | `-1.0000` | `0.0010` |
-| `sonar_echo_band_conductance_share` | `-0.02418` | `-0.0208` | `0.9291` |
+| `active_pings_emitted` | `-480.00000` | `-0.1528` | `0.5534` |
+| `echo_energy_received` | `-264.13051` | `-0.6806` | `0.0050` |
+| `photonic_band_conductance_share` | `-0.81347` | `-1.0000` | `0.0010` |
+| `sonar_echo_band_conductance_share` | `+0.81347` | `+0.2361` | `0.3497` |

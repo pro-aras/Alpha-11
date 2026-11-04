@@ -5,7 +5,7 @@
 - **String Literals**: `0` | **Forbidden Anthropomorphic Identifiers**: `0` | **`unsafe` Blocks**: `0` | **`unwrap(` Calls**: `0`
 
 ## 2. Transactional CRC32C Persistence & Fail-Closed Poisoning
-- **All Checks Passed**: `true` | **Checkpoint Size @100**: `54418` bytes
+- **All Checks Passed**: `true` | **Checkpoint Size @100**: `76853` bytes
 - **`@100` Restore Snapshot/Hash Exact**: `true` / `true`
 - **`@200` Continuation Bit-Identical (`Pulses` / `Snapshot` / `Hash`)**: `true` / `true` / `true`
 - **Payload Bit-Flip Fail-Closed**: `true` | **Header/CRC Bit-Flips Passed**: `2/2` | **Truncations Passed**: `5/5` | **Oversized Fail-Closed**: `true`
@@ -17,9 +17,9 @@
 
 ## 4. Step Latency & Logical / OS Memory Profile
 - **Steps Profiled**: `2000` (`4096` ambient channels, `6` actuators)
-- **`OrganismEngine::step` Latency (`us`)**: `p50=65.65`, `p95=72.41`, `p99=75.57`, `max=165.79`, `mean=59.85`
-- **Logical State Bytes (`final` / `peak`)**: `243026` / `243046` bytes | **Checkpoint Bytes**: `243359` bytes
-- **Linux `/proc/self/status` Memory**: `VmRSS=4812800` bytes (`4.59 MiB`), `VmHWM=5341184` bytes (`5.09 MiB`)
+- **`OrganismEngine::step` Latency (`us`)**: `p50=85.79`, `p95=98.49`, `p99=105.37`, `max=129.11`, `mean=79.78`
+- **Logical State Bytes (`final` / `peak`)**: `270687` / `271099` bytes | **Checkpoint Bytes**: `271017` bytes
+- **Linux `/proc/self/status` Memory**: `VmRSS=5128192` bytes (`4.89 MiB`), `VmHWM=5476352` bytes (`5.22 MiB`)
 
 ## 5. Multi-Crate Source Hygiene Breakdown (`a11-medium`, `a11-core`, `a11-worlds`, `a11-portals`)
 
@@ -42,7 +42,7 @@
 
 | World Arena | Ambient Channels | Steps | `step()` `p50` (`us`) | `step()` `p95` (`us`) | `step()` `p99` (`us`) | `step()` `max` (`us`) | Full Tick `p50` (`us`) | Final Logical State (`bytes`) | Checkpoint (`bytes`) |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `BrightRadiantWorld (128ch)` | `128` | `2000` | `71.44` | `79.36` | `87.32` | `231.80` | `81.48` | `88873` | `89206` |
-| `DenseFieldWorld (4096ch)` | `4096` | `2000` | `65.65` | `72.41` | `75.57` | `165.79` | `355.73` | `243026` | `243359` |
+| `BrightRadiantWorld (128ch)` | `128` | `2000` | `94.08` | `107.25` | `112.99` | `137.87` | `103.85` | `115525` | `115855` |
+| `DenseFieldWorld (4096ch)` | `4096` | `2000` | `85.79` | `98.49` | `105.37` | `129.11` | `368.34` | `270687` | `271017` |
 
-- **`32x` Channel Width Scaling Ratio (`4096ch / 128ch`)**: `p50_ratio = 0.919x`, `p99_ratio = 0.865x` (vs `32.000x` linear `O(N)` scaling).
+- **`32x` Channel Width Scaling Ratio (`4096ch / 128ch`)**: `p50_ratio = 0.912x`, `p99_ratio = 0.933x` (vs `32.000x` linear `O(N)` scaling).

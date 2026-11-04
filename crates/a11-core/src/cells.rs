@@ -62,6 +62,8 @@ pub struct CellArena {
     pub alive_count: usize,
     pub active_indices: Vec<u32>,
     pub min_cells_floor: usize,
+    pub theta_phase: f32,
+    pub error_reversal_gate: f32,
 }
 
 impl CellArena {
@@ -78,12 +80,15 @@ impl CellArena {
             let phi = ((i as f32) * 0.618_034 * TAU + 0.25 * rng.next_f32_unit()) % TAU;
             slots.push(Cell::newborn(tau, phi));
         }
+        let init_theta = sanitize_clamp((slots[0].phi * 4.0).rem_euclid(TAU), 0.0, TAU - 1.0e-5);
         Self {
             slots,
             free_list: Vec::new(),
             alive_count: count,
             active_indices: Vec::with_capacity(96),
             min_cells_floor: count,
+            theta_phase: init_theta,
+            error_reversal_gate: 0.0,
         }
     }
 
@@ -92,7 +97,7 @@ impl CellArena {
         self.slots.len() * Cell::LOGICAL_BYTES
             + self.free_list.len() * 4
             + self.active_indices.len() * 4
-            + 24
+            + 32
     }
 
     #[must_use]
@@ -110,9 +115,15 @@ impl CellArena {
         mode: ControlMode,
     ) {
         let ne_reset = sanitize_clamp(ne_network_reset, 0.0, 0.90);
+        self.error_reversal_gate =
+            sanitize_clamp((0.80 * self.error_reversal_gate).max(ne_reset), 0.0, 0.90);
+        let err_rev = self.error_reversal_gate;
+
         let n = self.slots.len();
         let mut sum_abs = 0.0_f32;
         let mut alive_seen = 0usize;
+        let mut kuramoto_sin = 0.0_f32;
+        let mut kuramoto_w = 0.0_f32;
 
         for i in 0..n {
             if !self.slots[i].alive {
@@ -121,7 +132,25 @@ impl CellArena {
             let d = ext_drive.get(i).copied().unwrap_or(0.0);
             sum_abs += sanitize(d).abs();
             alive_seen += 1;
+            let st_in = sanitize(sensory_trophic_in.get(i).copied().unwrap_or(0.0)).max(0.0);
+            if st_in > 0.01 {
+                let w = st_in.min(1.0);
+                kuramoto_sin += w * (self.slots[i].phi - self.theta_phase).sin();
+                kuramoto_w += w;
+            }
         }
+        let phase_pull = if kuramoto_w > 1.0e-4 {
+            0.06 * (kuramoto_sin / kuramoto_w)
+        } else {
+            0.0
+        };
+        self.theta_phase = sanitize_clamp(
+            (self.theta_phase + (TAU / 10.0) + phase_pull).rem_euclid(TAU),
+            0.0,
+            TAU - 1.0e-5,
+        );
+        let theta_cos = self.theta_phase.cos();
+        let beta_falling_flank = (1.40..=2.44).contains(&self.theta_phase);
         let mean_abs = if alive_seen > 0 {
             sum_abs / (alive_seen as f32)
         } else {
@@ -141,11 +170,29 @@ impl CellArena {
             }
 
             let omega = TAU / (4.0 * cell.tau).clamp(3.0, 256.0);
-            cell.phi = (cell.phi + omega) % TAU;
+            let theta_lock = 0.025 * (self.theta_phase - cell.phi).sin();
+            cell.phi = (cell.phi + omega + theta_lock).rem_euclid(TAU);
             let pacemaking = 0.012 * cell.phi.cos();
 
+            let top_pred = smooth_saturate(pred_drive.get(i).copied().unwrap_or(0.0));
+            let s_trophic = sanitize(sensory_trophic_in.get(i).copied().unwrap_or(0.0)).max(0.0);
+            let bottom_up_gain = if cell.tau >= 4.0 {
+                1.0 + 0.30 * err_rev
+            } else {
+                1.0 + 0.12 * err_rev
+            };
+            let top_down_beta = if cell.tau >= 6.0 {
+                0.055 * (1.0 - err_rev) * theta_cos.max(0.0) * top_pred
+            } else {
+                0.0
+            };
+
             let gain = sanitize_clamp(1.0 + cell.excitability_bias, 0.45, 2.20);
-            let raw_in = sanitize(ext_drive.get(i).copied().unwrap_or(0.0)) * div_norm * gain
+            let raw_in = sanitize(ext_drive.get(i).copied().unwrap_or(0.0))
+                * div_norm
+                * gain
+                * bottom_up_gain
+                + top_down_beta
                 + pacemaking;
             let eff_tau = if ne_reset > 0.01 && cell.tau > 6.0 {
                 6.0 + (cell.tau - 6.0) * (1.0 - ne_reset)
@@ -159,17 +206,20 @@ impl CellArena {
             cell.v_real = smooth_saturate(integrated);
             cell.delta_v = sanitize_clamp(cell.v_real - cell.v_prev, -2.0, 2.0);
 
-            let top_pred = smooth_saturate(pred_drive.get(i).copied().unwrap_or(0.0));
             cell.v_pred = top_pred;
             cell.pred_err = sanitize_clamp(cell.v_real - cell.v_pred, -2.0, 2.0);
 
-            let salience = sanitize(cell.v_real.abs() + 0.55 * cell.delta_v.abs());
+            let err_salience = if err_rev > 0.05 && s_trophic > 0.008 {
+                0.22 * err_rev * cell.pred_err.abs()
+            } else {
+                0.0
+            };
+            let salience = sanitize(cell.v_real.abs() + 0.55 * cell.delta_v.abs() + err_salience);
             if salience > 1.0e-4 {
                 candidates.push((salience, i as u32));
             }
 
             if mode == ControlMode::Natural {
-                let s_trophic = sanitize(sensory_trophic_in.get(i).copied().unwrap_or(0.0)).max(0.0);
                 cell.sensory_trophic_ema =
                     sanitize_clamp(0.95 * cell.sensory_trophic_ema + 0.05 * s_trophic, 0.0, 5.0);
                 let surprise_sample = cell.pred_err.abs();
@@ -187,7 +237,14 @@ impl CellArena {
             }
         }
 
-        let k = self.k_winners_target();
+        let base_k = self.k_winners_target();
+        let k = if beta_falling_flank && err_rev < 0.25 {
+            (((base_k as f32) * 0.86).round() as usize)
+                .max(4)
+                .min(self.alive_count.max(1))
+        } else {
+            base_k
+        };
         self.active_indices.clear();
         if candidates.len() > k {
             candidates.select_nth_unstable_by(k - 1, |a, b| compare_candidate(b, a));
@@ -363,8 +420,16 @@ impl CellArena {
             octave_mask |= 1u32 << oct;
             seen += 1;
         }
-        let mean_tau = if seen > 0 { sum_tau / (seen as f32) } else { 0.0 };
-        (sanitize(mean_tau), sanitize(max_tau), octave_mask.count_ones() as usize)
+        let mean_tau = if seen > 0 {
+            sum_tau / (seen as f32)
+        } else {
+            0.0
+        };
+        (
+            sanitize(mean_tau),
+            sanitize(max_tau),
+            octave_mask.count_ones() as usize,
+        )
     }
 
     #[must_use]
@@ -404,6 +469,8 @@ impl CellArena {
     }
 
     pub fn zero_learned_conductances(&mut self) {
+        self.theta_phase = 0.0;
+        self.error_reversal_gate = 0.0;
         for cell in &mut self.slots {
             cell.excitability_bias = 0.0;
             cell.v_homeo = 0.0;

@@ -104,7 +104,7 @@ impl ChannelScoutStat {
     #[inline]
     #[must_use]
     pub fn passive_quality(&self) -> f32 {
-        if !self.initialized || self.var_ema < 1.5e-5 {
+        if !self.initialized || self.var_ema < 4.0e-6 {
             return 0.0;
         }
         let roughness = self.diff_sq_ema / self.var_ema.max(1.0e-8);
@@ -116,11 +116,17 @@ impl ChannelScoutStat {
         // Stationary 1st-order OU(rho) drift has vel_corr = -(1 - rho)/2 <= 0, kurtosis ~ 2.95,
         // and motor_r ~ 0; white NoisyTV has roughness ~ 2.0 and vel_corr ~ -0.50.
         // Real physical waves, cochlear hair cells, viscoelastic limbs, and sparse wave echoes
-        // exhibit C1 inertial flow (vel_corr > 0.12), non-Gaussian wave arrivals (kurtosis > 5.2),
+        // exhibit C1 inertial flow (vel_corr > 0.12), non-Gaussian wave arrivals (kurtosis > 5.4),
         // or direct efference contingency (motor_r > 0.16).
-        let is_c1_wave = roughness < 0.72 && ar1_ratio < 0.78 && vel_corr > 0.12;
-        let is_sparse_echo = roughness < 1.65 && kurtosis > 5.2;
-        let is_motor_contingent = roughness < 1.35 && motor_r > 0.16;
+        let is_c1_wave =
+            self.var_ema >= 1.5e-5 && roughness < 0.72 && ar1_ratio < 0.78 && vel_corr > 0.12;
+        let is_sparse_echo = !self.is_smooth_spatial_field()
+            && roughness > 0.72
+            && roughness < 2.25
+            && vel_corr < 0.06
+            && kurtosis > 4.5
+            && self.var_ema < 0.050;
+        let is_motor_contingent = self.var_ema >= 1.5e-5 && roughness < 1.35 && motor_r > 0.16;
 
         if !(is_c1_wave || is_sparse_echo || is_motor_contingent) {
             return 0.0;
@@ -135,7 +141,7 @@ impl ChannelScoutStat {
             0.0
         };
         let echo_q = if is_sparse_echo {
-            ((kurtosis - 5.0) / 14.0).clamp(0.15, 0.88)
+            ((kurtosis - 4.0) / 9.5).clamp(0.28, 0.64)
         } else {
             0.0
         };
@@ -146,8 +152,37 @@ impl ChannelScoutStat {
         };
 
         let raw_q = wave_q.max(echo_q).max(motor_q);
-        let amp_scale = (self.var_ema.sqrt() * 3.2).clamp(0.10, 1.0);
+        let amp_mult = if is_sparse_echo { 10.5 } else { 3.2 };
+        let amp_scale = (self.var_ema.sqrt() * amp_mult).clamp(0.12, 1.0);
         sanitize_clamp(raw_q * amp_scale, 0.0, 1.0)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_sparse_impulse(&self) -> bool {
+        if !self.initialized
+            || self.var_ema < 4.0e-6
+            || self.var_ema >= 0.050
+            || self.is_smooth_spatial_field()
+        {
+            return false;
+        }
+        let roughness = self.diff_sq_ema / self.var_ema.max(1.0e-8);
+        let vel_corr = self.cov_dx_ema / self.diff_sq_ema.max(1.0e-8);
+        let kurtosis = self.fourth_ema / (self.var_ema * self.var_ema).max(1.0e-10);
+        roughness > 0.72 && roughness < 2.25 && vel_corr < 0.06 && kurtosis > 4.5
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_smooth_spatial_field(&self) -> bool {
+        if !self.initialized || self.var_ema < 4.0e-6 {
+            return false;
+        }
+        let roughness = self.diff_sq_ema / self.var_ema.max(1.0e-8);
+        let ar1_ratio = self.ar1_err_ema / self.var_ema.max(1.0e-8);
+        let vel_corr = self.cov_dx_ema / self.diff_sq_ema.max(1.0e-8);
+        roughness < 0.42 && ar1_ratio < 0.45 && vel_corr > 0.26
     }
 }
 
@@ -226,7 +261,12 @@ impl PoreMembrane {
         self.alive_sensor_count + self.alive_motor_count
     }
 
-    pub fn ensure_actuators_bound(&mut self, num_actuators: usize, max_pores: usize, mode: ControlMode) {
+    pub fn ensure_actuators_bound(
+        &mut self,
+        num_actuators: usize,
+        max_pores: usize,
+        mode: ControlMode,
+    ) {
         if mode != ControlMode::Natural {
             return;
         }
@@ -262,8 +302,11 @@ impl PoreMembrane {
         let me = sanitize_clamp(last_motor_energy.sqrt(), 0.0, 2.0);
         self.motor_env_fast = sanitize_clamp(0.76 * self.motor_env_fast + 0.24 * me, 0.0, 2.0);
         let dm = sanitize(self.motor_env_fast - self.motor_env_mean);
-        self.motor_env_mean =
-            sanitize_clamp(0.98 * self.motor_env_mean + 0.02 * self.motor_env_fast, 0.0, 2.0);
+        self.motor_env_mean = sanitize_clamp(
+            0.98 * self.motor_env_mean + 0.02 * self.motor_env_fast,
+            0.0,
+            2.0,
+        );
         self.motor_env_var =
             sanitize_clamp(0.96 * self.motor_env_var + 0.04 * dm * dm, 1.0e-5, 4.0);
 
@@ -376,23 +419,37 @@ impl PoreMembrane {
             }
 
             if mode == ControlMode::Natural {
-                let q_pass = if c < capped_amb {
-                    self.scout_stats[c].passive_quality()
+                let (q_pass, is_sparse_imp) = if c < capped_amb {
+                    let st = &self.scout_stats[c];
+                    (st.passive_quality(), st.is_sparse_impulse())
                 } else {
-                    0.0
+                    (0.0, false)
                 };
                 passive_sum += q_pass;
 
-                let trophic_in = 1.55 * q_pass;
-                sp.trophic_ema =
-                    sanitize_clamp(0.95 * sp.trophic_ema + 0.05 * trophic_in, 0.0, 3.0);
+                let trophic_in = if is_sparse_imp && raw_x.abs() >= 0.015 {
+                    2.25 * q_pass + 0.55 * raw_x.abs()
+                } else {
+                    1.55 * q_pass
+                };
+                let tr_decay = if is_sparse_imp && raw_x.abs() < 0.015 {
+                    0.996
+                } else {
+                    0.95
+                };
+                sp.trophic_ema = sanitize_clamp(
+                    tr_decay * sp.trophic_ema + (1.0 - tr_decay) * trophic_in,
+                    0.0,
+                    3.0,
+                );
 
                 if trophic_in > 0.02 || sp.trophic_ema > 0.03 {
                     let target_g = sanitize_clamp(0.18 + 1.8 * sp.trophic_ema, 0.05, 1.6);
                     sp.conductance =
                         sanitize_clamp(0.94 * sp.conductance + 0.06 * target_g, 0.0, 1.8);
                 } else {
-                    sp.conductance = sanitize(sp.conductance * 0.92);
+                    let g_decay = if is_sparse_imp { 0.993 } else { 0.92 };
+                    sp.conductance = sanitize(sp.conductance * g_decay);
                 }
 
                 let cell_trophic = sanitize(sp.conductance * q_pass);
@@ -423,8 +480,11 @@ impl PoreMembrane {
         }
 
         if mode == ControlMode::Natural {
-            self.passive_health_ema =
-                sanitize_clamp(0.96 * self.passive_health_ema + 0.04 * passive_sum, 0.0, 4.0);
+            self.passive_health_ema = sanitize_clamp(
+                0.96 * self.passive_health_ema + 0.04 * passive_sum,
+                0.0,
+                4.0,
+            );
         }
     }
 
@@ -612,10 +672,16 @@ fn update_channel_stat(st: &mut ChannelScoutStat, x: f32, motor_dev: f32, motor_
     }
 
     let step_diff = sanitize(x - st.prev_val);
-    st.cov_dx_ema =
-        sanitize_clamp(0.93 * st.cov_dx_ema + 0.07 * step_diff * st.prev_dx, -16.0, 16.0);
-    st.diff_sq_ema =
-        sanitize_clamp(0.93 * st.diff_sq_ema + 0.07 * step_diff * step_diff, 0.0, 16.0);
+    st.cov_dx_ema = sanitize_clamp(
+        0.93 * st.cov_dx_ema + 0.07 * step_diff * st.prev_dx,
+        -16.0,
+        16.0,
+    );
+    st.diff_sq_ema = sanitize_clamp(
+        0.93 * st.diff_sq_ema + 0.07 * step_diff * step_diff,
+        0.0,
+        16.0,
+    );
     st.prev_dx = step_diff;
 
     let dx_prev = sanitize(st.prev_val - st.mean);
@@ -633,8 +699,11 @@ fn update_channel_stat(st: &mut ChannelScoutStat, x: f32, motor_dev: f32, motor_
     let x_std = st.var_ema.max(1.0e-5).sqrt();
     let norm_excursion = sanitize_clamp((dx.abs() - 0.7 * x_std) / x_std, -3.0, 3.0);
     let norm_motor = sanitize_clamp(motor_dev / motor_std.max(1.0e-3), -3.0, 3.0);
-    st.motor_cov_ema =
-        sanitize_clamp(0.96 * st.motor_cov_ema + 0.04 * norm_excursion * norm_motor, -1.5, 1.5);
+    st.motor_cov_ema = sanitize_clamp(
+        0.96 * st.motor_cov_ema + 0.04 * norm_excursion * norm_motor,
+        -1.5,
+        1.5,
+    );
 
     let denom = 0.02 + dx_prev * dx_prev;
     st.ar1_w = sanitize_clamp(st.ar1_w + 0.06 * err * dx_prev / denom, -1.2, 1.2);

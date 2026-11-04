@@ -17,6 +17,9 @@ pub struct BodyCore {
     pub baseline_valence_ema: f32,
     pub prev_raw_valence: f32,
     pub valence_scale_ema: f32,
+    pub valence_min_ema: f32,
+    pub valence_max_ema: f32,
+    pub ers_scarcity: f32,
     pub fast_valence: f32,
     pub rest_ticks_remaining: u16,
     pub rest_consolidation_ticks: u64,
@@ -27,7 +30,7 @@ pub struct BodyCore {
 }
 
 impl BodyCore {
-    pub const LOGICAL_BYTES: usize = 4 * 10 + 2 + 8 + 4 * EXPLORE_CHANNELS * 3 + EXPLORE_CHANNELS;
+    pub const LOGICAL_BYTES: usize = 4 * 13 + 2 + 8 + 4 * EXPLORE_CHANNELS * 3 + EXPLORE_CHANNELS;
 
     #[must_use]
     pub fn new(initial_atp: f32, max_atp: f32) -> Self {
@@ -43,6 +46,9 @@ impl BodyCore {
             baseline_valence_ema: 0.0,
             prev_raw_valence: 0.0,
             valence_scale_ema: 0.0015,
+            valence_min_ema: -0.04,
+            valence_max_ema: 0.04,
+            ers_scarcity: 0.0,
             fast_valence: 0.0,
             rest_ticks_remaining: 0,
             rest_consolidation_ticks: 0,
@@ -51,6 +57,11 @@ impl BodyCore {
             explore_target: [0.0; EXPLORE_CHANNELS],
             explore_hold_ticks: [0; EXPLORE_CHANNELS],
         }
+    }
+
+    #[must_use]
+    pub fn context_valence_span(&self) -> f32 {
+        sanitize_clamp(self.valence_max_ema - self.valence_min_ema, 0.008, 4.0)
     }
 
     #[must_use]
@@ -91,7 +102,8 @@ impl BodyCore {
 
         let level_adv = sanitize(raw_valence - self.baseline_valence_ema);
         let combined_signal = sanitize(0.25 * level_adv + 2.2 * delta_valence);
-        let scale = self.valence_scale_ema.max(2.0e-3);
+        let span = self.context_valence_span();
+        let scale = (0.65 * self.valence_scale_ema + 0.12 * span).max(2.0e-3);
         let normalized_advantage = if combined_signal.abs() > 1.0e-7 {
             sanitize_clamp(0.45 * (combined_signal / scale), -2.0, 2.0)
         } else {
@@ -100,8 +112,11 @@ impl BodyCore {
 
         self.fast_valence = raw_valence;
         if mode == ControlMode::Natural {
-            self.baseline_valence_ema =
-                sanitize_clamp(0.98 * self.baseline_valence_ema + 0.02 * raw_valence, -5.0, 5.0);
+            self.baseline_valence_ema = sanitize_clamp(
+                0.98 * self.baseline_valence_ema + 0.02 * raw_valence,
+                -5.0,
+                5.0,
+            );
             if delta_valence.abs() > 1.0e-7 && delta_valence.abs() < 0.12 {
                 self.valence_scale_ema = sanitize_clamp(
                     0.94 * self.valence_scale_ema + 0.06 * delta_valence.abs(),
@@ -109,6 +124,37 @@ impl BodyCore {
                     1.0,
                 );
             }
+            let min_relax = self.baseline_valence_ema - 0.015;
+            if raw_valence < self.valence_min_ema {
+                self.valence_min_ema =
+                    sanitize_clamp(0.86 * self.valence_min_ema + 0.14 * raw_valence, -5.0, 5.0);
+            } else {
+                self.valence_min_ema =
+                    sanitize_clamp(0.996 * self.valence_min_ema + 0.004 * min_relax, -5.0, 5.0);
+            }
+            let max_relax = (self.baseline_valence_ema + 0.015).max(self.valence_min_ema + 0.008);
+            if raw_valence > self.valence_max_ema {
+                self.valence_max_ema = sanitize_clamp(
+                    0.86 * self.valence_max_ema + 0.14 * raw_valence,
+                    self.valence_min_ema + 0.008,
+                    5.0,
+                );
+            } else {
+                self.valence_max_ema = sanitize_clamp(
+                    0.996 * self.valence_max_ema + 0.004 * max_relax,
+                    self.valence_min_ema + 0.008,
+                    5.0,
+                );
+            }
+
+            let reserve_thresh = (0.50 * self.initial_atp).clamp(2.0, 12.0);
+            let atp_deficit = ((reserve_thresh - self.atp) / reserve_thresh).clamp(0.0, 1.0);
+            let chronic_stress = (-14.0 * self.baseline_valence_ema).clamp(0.0, 0.60);
+            let net_gain_relief = if influx > total_burn { 0.35 } else { 0.0 };
+            let ers_target =
+                (0.70 * atp_deficit + 0.50 * chronic_stress - net_gain_relief).clamp(0.0, 1.0);
+            self.ers_scarcity =
+                sanitize_clamp(0.985 * self.ers_scarcity + 0.015 * ers_target, 0.0, 1.0);
         }
 
         let comfort_atp = 0.65 * self.max_atp;
@@ -122,8 +168,7 @@ impl BodyCore {
             + (-delta_valence - 0.02).max(0.0);
         let somatic_surprise = sanitize_clamp(2.2 * valence_drop, 0.0, 0.75);
         let temp_target = sanitize_clamp(
-            0.05
-                + 0.45 * hunger
+            0.05 + 0.45 * hunger
                 + 0.30 * surprise.min(1.0)
                 + 0.26 * stress.min(1.0)
                 + 0.45 * somatic_surprise
@@ -134,7 +179,7 @@ impl BodyCore {
         self.temperature = sanitize_clamp(0.90 * self.temperature + 0.10 * temp_target, 0.03, 1.0);
 
         if self.rest_ticks_remaining > 0 {
-            if stress >= 0.05 || somatic_surprise > 0.14 {
+            if stress >= 0.035 || somatic_surprise > 0.12 || surprise > 0.16 {
                 self.rest_ticks_remaining = 0;
                 self.motor_clutch_threshold = 0.05;
             } else {
@@ -152,8 +197,11 @@ impl BodyCore {
                 self.adenosine = sanitize_clamp(self.adenosine - 0.042, 0.0, 1.0);
             } else {
                 let awake_clutch = 0.045;
-                self.motor_clutch_threshold =
-                    sanitize_clamp(0.80 * self.motor_clutch_threshold + 0.20 * awake_clutch, 0.04, 0.85);
+                self.motor_clutch_threshold = sanitize_clamp(
+                    0.80 * self.motor_clutch_threshold + 0.20 * awake_clutch,
+                    0.04,
+                    0.85,
+                );
             }
         }
 
@@ -179,7 +227,11 @@ impl BodyCore {
             }
 
             let target = self.explore_target[slot];
-            let m = sanitize_clamp(0.80 * self.explore_momentum[slot] + 0.20 * target, -1.0, 1.0);
+            let m = sanitize_clamp(
+                0.80 * self.explore_momentum[slot] + 0.20 * target,
+                -1.0,
+                1.0,
+            );
             self.explore_momentum[slot] = m;
             self.explore_dc_accum[slot] =
                 sanitize_clamp(0.97 * self.explore_dc_accum[slot] + 0.03 * m, -1.5, 1.5);
@@ -194,6 +246,9 @@ impl BodyCore {
         self.baseline_valence_ema = 0.0;
         self.prev_raw_valence = 0.0;
         self.valence_scale_ema = 0.0015;
+        self.valence_min_ema = -0.04;
+        self.valence_max_ema = 0.04;
+        self.ers_scarcity = 0.0;
         self.fast_valence = 0.0;
         self.rest_ticks_remaining = 0;
         self.rest_consolidation_ticks = 0;
@@ -206,5 +261,8 @@ impl BodyCore {
     pub fn hash_learned(&self, hasher: &mut ParamHasher) {
         hasher.write_f32(self.baseline_valence_ema);
         hasher.write_f32(self.valence_scale_ema);
+        hasher.write_f32(self.valence_min_ema);
+        hasher.write_f32(self.valence_max_ema);
+        hasher.write_f32(self.ers_scarcity);
     }
 }
