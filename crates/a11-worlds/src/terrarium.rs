@@ -608,6 +608,41 @@ impl MultiGenTerrarium {
     }
 
     /// Steps a population of `1..=16` [`OrganismEngine`] instances by one shared physics tick.
+    /// Environment-side provisioning (a caregiver bringing cracked food): relocates the first
+    /// intact, closed pod to `agent_pos + offset` (clamped inside the arena) and opens it with
+    /// `nutrients` of harvestable food. Returns `false` when the agent or a closed pod is missing.
+    /// Organisms only ever experience the result through ordinary senses and `metabolic_influx`.
+    pub fn provision_open_pod_near(
+        &mut self,
+        agent_idx: usize,
+        offset: (f32, f32),
+        nutrients: f32,
+    ) -> bool {
+        let Some(agent) = self.agents.get(agent_idx) else {
+            return false;
+        };
+        let target = (agent.pos.0 + offset.0, agent.pos.1 + offset.1);
+        let max_r = (self.arena_radius - AGENT_RADIUS).max(1.0);
+        let r = target.0.hypot(target.1);
+        let target = if r > max_r && r > 1.0e-5 {
+            (target.0 * max_r / r, target.1 * max_r / r)
+        } else {
+            target
+        };
+        let Some(pod) = self
+            .pods
+            .iter_mut()
+            .find(|p| p.shell_integrity > 0.0 && p.open_nutrients <= 0.02)
+        else {
+            return false;
+        };
+        pod.pos = target;
+        pod.ripeness = 1.0;
+        pod.shell_integrity = 0.0;
+        pod.open_nutrients = nutrients.clamp(0.0, 1.0);
+        true
+    }
+
     pub fn step_population<O: OrganismEngine>(
         &mut self,
         organisms: &mut [O],

@@ -5,6 +5,7 @@ pub mod campaign;
 pub mod campaign_social_portals;
 pub mod forensics;
 pub mod gates;
+pub mod open_habitat;
 pub mod report;
 pub mod stats;
 pub mod twins;
