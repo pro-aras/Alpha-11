@@ -28,6 +28,10 @@
 //!
 //! Pre-committed interpretation: passing shows learned contingent vocal behaviour (calling that
 //! is shaped by its consequences), not language and not reference.
+//!
+//! `teach2` (ledger entry 59, added after the `teach` v1 null): identical programs, gates, seeds and
+//! ticks, with caregiver timing fitted to the organism's 2–5 tick credit window: delay `2`,
+//! refractory `20`, food `0.15` at `0.6 m`.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -47,10 +51,34 @@ const ENERGY_SALT: u64 = 0x10A6_11FE_2026_2002;
 const TEACH_SALT: u64 = 0x7EAC_4C41_2026_2003;
 const STARVE_ATP: f32 = 0.05;
 const SERIES_POINTS: usize = 20;
-const DELAY: u64 = 10;
-const REFRACT: u64 = 200;
-const FEED_NUTRIENTS: f32 = 0.6;
-const FEED_DIST: f32 = 1.2;
+/// Caregiver timing for a teach study.
+#[derive(Clone, Copy, Debug)]
+struct TeachParams {
+    study: &'static str,
+    delay: u64,
+    refract: u64,
+    nutrients: f32,
+    dist: f32,
+}
+
+/// `teach` v1 (locked at `bebcc10`).
+const TEACH_V1: TeachParams = TeachParams {
+    study: "teach",
+    delay: 10,
+    refract: 200,
+    nutrients: 0.6,
+    dist: 1.2,
+};
+
+/// `teach2` (ledger entry 59): fits the organism's 2–5 tick credit window and removes schedule
+/// saturation so the delivery rate scales with the calling rate. Same programs, gates and seeds.
+const TEACH_V2: TeachParams = TeachParams {
+    study: "teach2",
+    delay: 2,
+    refract: 20,
+    nutrients: 0.15,
+    dist: 0.6,
+};
 const REPLY_LEN: usize = 15;
 const REPLY_GAIN: f32 = 0.8;
 const HUNGRY_ATP: f32 = 6.0;
@@ -413,7 +441,14 @@ struct TResult {
     final_atp: f64,
 }
 
-fn teach_arm(seed: u64, program: Program, frozen: bool, ticks: usize, schedule: &[u64]) -> TResult {
+fn teach_arm(
+    tp: &TeachParams,
+    seed: u64,
+    program: Program,
+    frozen: bool,
+    ticks: usize,
+    schedule: &[u64],
+) -> TResult {
     // Yoked twins get an independent birth seed (same rule as the locked `alpha11-gates` Yoked arm);
     // with the same seed a deterministic twin would replay the contingent life exactly.
     let org_seed = if program.contingent() || program == Program::Silent {
@@ -514,8 +549,8 @@ fn teach_arm(seed: u64, program: Program, frozen: bool, ticks: usize, schedule: 
         let mut fire: Option<u64> = None;
         if program.contingent() {
             if d_on > 0 && pending.is_none() && t >= next_allowed {
-                pending = Some(t + DELAY);
-                next_allowed = t + DELAY + REFRACT;
+                pending = Some(t + tp.delay);
+                next_allowed = t + tp.delay + tp.refract;
             }
             if let Some(e) = pending
                 && t + 1 == e
@@ -536,8 +571,8 @@ fn teach_arm(seed: u64, program: Program, frozen: bool, ticks: usize, schedule: 
                 let theta = (rng.next_f64() as f32) * std::f32::consts::TAU;
                 if hab.terrarium.provision_open_pod_near(
                     1,
-                    (FEED_DIST * theta.cos(), FEED_DIST * theta.sin()),
-                    FEED_NUTRIENTS,
+                    (tp.dist * theta.cos(), tp.dist * theta.sin()),
+                    tp.nutrients,
                 ) {
                     r.delivered += 1;
                 }
@@ -565,7 +600,7 @@ fn teach_arm(seed: u64, program: Program, frozen: bool, ticks: usize, schedule: 
     r
 }
 
-fn run_teach(cli: &Cli) -> Result<String, String> {
+fn run_teach(cli: &Cli, tp: &TeachParams) -> Result<String, String> {
     let ticks = cli.ticks.unwrap_or(40_000);
     let seeds: Vec<u64> = (0..cli.seeds as u64).map(|k| cli.seed_offset + k).collect();
     // Phase 1: SILENT, FEED_C, VOICE_C (Natural) and FEED_C (Frozen).
@@ -580,7 +615,7 @@ fn run_teach(cli: &Cli) -> Result<String, String> {
         .flat_map(|&s| p1.iter().map(move |&(p, f)| (s, p, f)))
         .collect();
     let r1 = run_jobs(jobs1.len(), cli.threads, |j| {
-        teach_arm(jobs1[j].0, jobs1[j].1, jobs1[j].2, ticks, &[])
+        teach_arm(tp, jobs1[j].0, jobs1[j].1, jobs1[j].2, ticks, &[])
     });
     let r1: Vec<TResult> = r1
         .into_iter()
@@ -607,7 +642,7 @@ fn run_teach(cli: &Cli) -> Result<String, String> {
         }
     }
     let r2 = run_jobs(jobs2.len(), cli.threads, |j| {
-        teach_arm(jobs2[j].0, jobs2[j].1, jobs2[j].2, ticks, &jobs2[j].3)
+        teach_arm(tp, jobs2[j].0, jobs2[j].1, jobs2[j].2, ticks, &jobs2[j].3)
     });
     let r2: Vec<TResult> = r2
         .into_iter()
@@ -658,7 +693,7 @@ fn run_teach(cli: &Cli) -> Result<String, String> {
         (Program::FeedY, true),
     ];
     let mut js = String::new();
-    let _ = write!(js, "{{\"study\":\"teach\",\"ticks\":{ticks},\"passed\":{passed},\"arms\":{{");
+    let _ = write!(js, "{{\"study\":\"{}\",\"ticks\":{ticks},\"passed\":{passed},\"arms\":{{", tp.study);
     for (ai, &(p, f)) in arms_all.iter().enumerate() {
         let m = |g: fn(&TResult) -> f64| mean(&col(p, f, g));
         let label = format!("{}{}", if f { "frz_" } else { "nat_" }, p.label());
@@ -698,7 +733,7 @@ fn run_teach(cli: &Cli) -> Result<String, String> {
         js.push(']');
     }
     js.push_str("}}\n");
-    write_report(cli, "teach", &js)?;
+    write_report(cli, tp.study, &js)?;
     Ok(out)
 }
 
@@ -733,8 +768,8 @@ fn write_report(cli: &Cli, study: &str, js: &str) -> Result<(), String> {
 
 fn parse_cli() -> Result<Cli, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let cmd = args.first().cloned().ok_or("missing subcommand (energy | teach)")?;
-    if cmd != "energy" && cmd != "teach" {
+    let cmd = args.first().cloned().ok_or("missing subcommand (energy | teach | teach2)")?;
+    if cmd != "energy" && cmd != "teach" && cmd != "teach2" {
         return Err(format!("unknown subcommand {cmd}"));
     }
     let mut cli = Cli {
@@ -778,13 +813,17 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("[alpha11-life] {e}");
             eprintln!(
-                "Usage: alpha11-life energy|teach [--seeds 10] [--seed-offset 0] [--ticks N] [--threads 12] [--tag name]"
+                "Usage: alpha11-life energy|teach|teach2 [--seeds 10] [--seed-offset 0] [--ticks N] [--threads 12] [--tag name]"
             );
             return ExitCode::from(2);
         }
     };
     let t0 = Instant::now();
-    let res = if cli.cmd == "energy" { run_energy(&cli) } else { run_teach(&cli) };
+    let res = match cli.cmd.as_str() {
+        "energy" => run_energy(&cli),
+        "teach2" => run_teach(&cli, &TEACH_V2),
+        _ => run_teach(&cli, &TEACH_V1),
+    };
     match res {
         Ok(text) => {
             println!(
