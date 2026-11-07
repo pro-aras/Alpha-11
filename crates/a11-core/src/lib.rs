@@ -398,10 +398,33 @@ impl OrganismEngine for Alpha11Organism {
                     self.atrophied_structures.saturating_add(atrophied_pores);
             }
 
+            let m_organs = self.membrane.alive_motor_count.max(1);
+            let (dev_tier1, dev_tier2, adult_phase, tau_grace_mode) = if m_organs <= 8 {
+                (12u64, 20u64, true, true)
+            } else {
+                let t1 = (15 * m_organs) as u64;
+                let t2 = (17 * m_organs) as u64;
+                (t1, t2, self.mitosis_births >= t1, false)
+            };
+            let anabolic_floor = if self.mitosis_births < dev_tier1 {
+                if m_organs <= 8 {
+                    (0.50 * self.body.initial_atp).max(3.2)
+                } else {
+                    3.2
+                }
+            } else if self.mitosis_births < dev_tier2 {
+                (1.35 * self.body.initial_atp).max(4.0)
+            } else {
+                (1.95 * self.body.initial_atp).clamp(4.0, (0.24 * self.body.max_atp).max(4.0))
+            };
             if self.tick.rem_euclid(24) == 0
                 && state_budget_ok
-                && self.body.atp >= 3.2
-                && let Some(child_idx) = self.cells.find_mitosis_candidate(self.config.max_cells)
+                && self.body.atp >= anabolic_floor
+                && let Some(child_idx) = self.cells.find_mitosis_candidate(
+                    self.config.max_cells,
+                    adult_phase,
+                    tau_grace_mode,
+                )
                 && let Some(parent_idx) =
                     self.cells
                         .spawn_mitosis_parent(child_idx, self.config.max_cells, &mut self.rng)
@@ -412,7 +435,13 @@ impl OrganismEngine for Alpha11Organism {
             }
 
             if (self.tick & 31) == 0 {
-                let dead_cells = self.cells.prune_starved_cells();
+                let trophic_floor =
+                    if m_organs > 8 && self.mitosis_births >= dev_tier1 && self.body.atp > 22.0 {
+                        (8 * m_organs).min(self.config.max_cells)
+                    } else {
+                        self.cells.min_cells_floor
+                    };
+                let dead_cells = self.cells.prune_starved_cells(trophic_floor);
                 if !dead_cells.is_empty() {
                     let dead_tubes = self.tubes.prune_tubes_referencing_cells(&dead_cells);
                     self.atrophied_structures = self

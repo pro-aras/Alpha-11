@@ -293,9 +293,37 @@ impl CellArena {
         sanitize_clamp(sum / weight_norm.sqrt(), -4.0, 4.0)
     }
 
-    pub fn find_mitosis_candidate(&self, max_cells: usize) -> Option<u32> {
+    pub fn find_mitosis_candidate(
+        &self,
+        max_cells: usize,
+        adult_phase: bool,
+        tau_grace_mode: bool,
+    ) -> Option<u32> {
         if self.alive_count >= max_cells {
             return None;
+        }
+        if adult_phase {
+            let mut stalled_neuroblasts = 0usize;
+            for (i, cell) in self.slots.iter().enumerate() {
+                let tau_grace =
+                    if tau_grace_mode && self.alive_count >= 56 && self.alive_count < 176 {
+                        ((cell.tau - 40.0).max(0.0) * 2.5) as u32
+                    } else {
+                        0
+                    };
+                let min_age = 120u32.saturating_add(tau_grace.min(280));
+                if i >= self.min_cells_floor
+                    && cell.alive
+                    && cell.age_ticks > min_age
+                    && cell.atp_credit_ema < 0.020
+                    && cell.firing_rate_ema < 0.004
+                {
+                    stalled_neuroblasts += 1;
+                    if stalled_neuroblasts >= 2 {
+                        return None;
+                    }
+                }
+            }
         }
         let mut best: Option<(f32, u32)> = None;
         for (i, cell) in self.slots.iter().enumerate() {
@@ -374,13 +402,14 @@ impl CellArena {
         best.map(|(_, idx)| idx)
     }
 
-    pub fn prune_starved_cells(&mut self) -> Vec<u32> {
+    pub fn prune_starved_cells(&mut self, trophic_floor: usize) -> Vec<u32> {
         let mut pruned = Vec::new();
-        if self.alive_count <= self.min_cells_floor {
+        let floor = self.min_cells_floor.max(trophic_floor);
+        if self.alive_count <= floor {
             return pruned;
         }
         for (i, cell) in self.slots.iter_mut().enumerate() {
-            if self.alive_count <= self.min_cells_floor {
+            if self.alive_count <= floor {
                 break;
             }
             if i < self.min_cells_floor || !cell.alive {
