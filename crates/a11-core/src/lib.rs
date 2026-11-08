@@ -22,7 +22,9 @@ use crate::persistence::{
 };
 use crate::pores::PoreMembrane;
 use crate::rng::{ParamHasher, Rng64, sanitize, sanitize_clamp};
-use crate::tubes::{EfferenceEntry, EfferenceRing, TRACKED_ACTUATORS, Tube, TubeGraph, TubeKind};
+use crate::tubes::{
+    EfferenceEntry, EfferenceRing, StriatalOfc, TRACKED_ACTUATORS, Tube, TubeGraph, TubeKind,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OrganismConfig {
@@ -80,12 +82,13 @@ impl Alpha11Organism {
         let body = BodyCore::new(config.initial_atp, config.max_atp);
         let cells = CellArena::new(config.initial_cells, config.max_cells, &mut rng);
         let membrane = PoreMembrane::new(cells.alive_count, config.max_pores, &mut rng);
-        let tubes = TubeGraph::new(
+        let mut tubes = TubeGraph::new(
             cells.alive_count,
             membrane.alive_motor_count,
             config.max_tubes,
             &mut rng,
         );
+        tubes.striatal = StriatalOfc::from_seed(seed);
         Self {
             seed,
             config,
@@ -359,6 +362,16 @@ impl OrganismEngine for Alpha11Organism {
             self.mode,
         );
 
+        let (striatal_pulse, ofc_splits) = self.tubes.step_striatal_ofc(
+            view.ambient_in,
+            view.metabolic_influx,
+            view.tissue_stress,
+            view.num_actuators,
+            &mut self.membrane,
+            self.mode,
+        );
+        self.contradiction_splits = self.contradiction_splits.saturating_add(ofc_splits);
+
         if self.mode == ControlMode::Natural {
             let (splits, shortcuts, pruned_tubes) =
                 self.tubes.apply_delayed_credit_and_morphogenesis(
@@ -451,20 +464,31 @@ impl OrganismEngine for Alpha11Organism {
             }
         }
 
-        let outcome = self.tubes.rollout_and_select_pulse(
-            view.num_actuators,
-            &self.cells,
-            &self.membrane,
-            &mut self.body,
-            &self.ring,
-            self.mode,
-            &mut self.explore_rng,
-        );
-        let pulse = outcome.pulse;
-        let committed = outcome.committed;
-        let rehearsals = outcome.rehearsals;
-        let pred_with = outcome.pred_with;
-        let pred_null = outcome.pred_null;
+        let (pulse, committed, rehearsals, pred_with, pred_null) =
+            if let Some(actuator_out) = striatal_pulse {
+                let is_comm = actuator_out.iter().any(|&v| v.abs() > 1.0e-4);
+                let (pw, pn) =
+                    self.tubes
+                        .predict_sensory_cells_for_pulse(&self.cells, &actuator_out, is_comm);
+                (FieldPulse { actuator_out }, is_comm, 0u64, pw, pn)
+            } else {
+                let outcome = self.tubes.rollout_and_select_pulse(
+                    view.num_actuators,
+                    &self.cells,
+                    &self.membrane,
+                    &mut self.body,
+                    &self.ring,
+                    self.mode,
+                    &mut self.explore_rng,
+                );
+                (
+                    outcome.pulse,
+                    outcome.committed,
+                    outcome.rehearsals,
+                    outcome.pred_with,
+                    outcome.pred_null,
+                )
+            };
         self.subthreshold_rehearsals = self.subthreshold_rehearsals.saturating_add(rehearsals);
         if committed {
             self.committed_motor_pulses = self.committed_motor_pulses.saturating_add(1);
@@ -586,6 +610,7 @@ impl OrganismEngine for Alpha11Organism {
             self.config.max_tubes,
             &mut birth_rng,
         );
+        self.tubes.striatal = StriatalOfc::from_seed(self.seed);
         if prev_motors > 0 {
             let before = self.membrane.motor_pores.len();
             self.membrane.ensure_actuators_bound(
@@ -1100,6 +1125,43 @@ mod tests {
         full
     }
 
+    fn downgrade_v5_checkpoint_to_v4(v5: &[u8]) -> Vec<u8> {
+        use crate::persistence::{STRIATAL_SERIALIZED_BYTES, TAG_TUBE};
+        let rd = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        let payload_end = v5.len() - 4;
+        let mut slabs: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut pos = 24usize;
+        while pos < payload_end {
+            let tag = rd(v5, pos);
+            let len = rd(v5, pos + 4) as usize;
+            let payload = if tag == TAG_TUBE {
+                v5[pos + 8..pos + 8 + len - STRIATAL_SERIALIZED_BYTES].to_vec()
+            } else {
+                v5[pos + 8..pos + 8 + len].to_vec()
+            };
+            slabs.push((tag, payload));
+            pos += 8 + len + 4;
+        }
+        assert_eq!(slabs.len(), 6);
+        let mut slabs_buf = Vec::new();
+        for (tag, p) in &slabs {
+            let start = slabs_buf.len();
+            slabs_buf.extend_from_slice(&tag.to_le_bytes());
+            slabs_buf.extend_from_slice(&(p.len() as u32).to_le_bytes());
+            slabs_buf.extend_from_slice(p);
+            let scrc = crc32c(&slabs_buf[start..]);
+            slabs_buf.extend_from_slice(&scrc.to_le_bytes());
+        }
+        let mut full = v5[..8].to_vec();
+        full.extend_from_slice(&4u32.to_le_bytes());
+        full.extend_from_slice(&v5[12..16]);
+        full.extend_from_slice(&(slabs_buf.len() as u64).to_le_bytes());
+        full.extend_from_slice(&slabs_buf);
+        let fcrc = crc32c(&full);
+        full.extend_from_slice(&fcrc.to_le_bytes());
+        full
+    }
+
     #[test]
     fn v3_checkpoint_upgrades_to_v4_and_keeps_stepping() {
         let cfg = OrganismConfig::default();
@@ -1125,10 +1187,18 @@ mod tests {
         for t in 0..150u64 {
             let _ = drive(&mut org, t, &mut ambient);
         }
-        let v4 = org.encode_checkpoint().expect("encode v4");
+        let v5 = org.encode_checkpoint().expect("encode v5");
+        assert_eq!(u32::from_le_bytes([v5[8], v5[9], v5[10], v5[11]]), 5);
+        let v4 = downgrade_v5_checkpoint_to_v4(&v5);
+        assert_eq!(u32::from_le_bytes([v4[8], v4[9], v4[10], v4[11]]), 4);
+        assert!(v4.len() < v5.len());
         let v3 = downgrade_v4_checkpoint_to_v3(&v4);
         assert_eq!(u32::from_le_bytes([v3[8], v3[9], v3[10], v3[11]]), 3);
         assert!(v3.len() < v4.len());
+
+        let mut upgraded_v4 = Alpha11Organism::new(1, cfg);
+        upgraded_v4.restore_checkpoint(&v4).expect("v4 restore");
+        assert!(!upgraded_v4.is_poisoned());
 
         let mut upgraded = Alpha11Organism::new(1, cfg);
         upgraded.restore_checkpoint(&v3).expect("v3 restore");
@@ -1140,7 +1210,7 @@ mod tests {
         assert_eq!(a.tube_count, b.tube_count);
 
         let re = upgraded.encode_checkpoint().expect("re-encode");
-        assert_eq!(u32::from_le_bytes([re[8], re[9], re[10], re[11]]), 4);
+        assert_eq!(u32::from_le_bytes([re[8], re[9], re[10], re[11]]), 5);
         let mut corrupt = v3.clone();
         let mid = corrupt.len() / 2;
         corrupt[mid] ^= 0x01;

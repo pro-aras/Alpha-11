@@ -14,14 +14,40 @@ use crate::crc32c::{crc32c, crc32c_update};
 use crate::pores::{ChannelScoutStat, MAX_SCOUT_CHANNELS, MotorPore, PoreMembrane, SensorPore};
 use crate::rng::{Rng64, sanitize};
 use crate::tubes::{
-    EfferenceEntry, EfferenceRing, PRED_BUCKETS, RING_LEN, TRACKED_ACTUATORS, Tube, TubeGraph,
-    TubeKind,
+    EfferenceEntry, EfferenceRing, OFC_CONTEXTS, PRED_BUCKETS, RING_LEN, STRIATAL_ACTUATORS,
+    STRIATAL_CUES, STRIATAL_FEATS, STRIATAL_FWD_LEN, STRIATAL_PORES, STRIATAL_TAP_DIM,
+    STRIATAL_W_LEN, StriatalOfc, TRACKED_ACTUATORS, Tube, TubeGraph, TubeKind,
 };
 
 pub const FILE_MAGIC: u64 = 0x4131_3143_484B_5031;
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
 pub const MIN_COMPAT_FORMAT_VERSION: u32 = 3;
 pub const SLAB_COUNT: u32 = 6;
+
+pub const STRIATAL_SERIALIZED_BYTES: usize = 3
+    + OFC_CONTEXTS
+    + 3 * 4 * OFC_CONTEXTS
+    + 5 * 4 * STRIATAL_PORES
+    + 4 * STRIATAL_PORES * STRIATAL_TAP_DIM
+    + 4 * STRIATAL_W_LEN
+    + 2 * 4 * OFC_CONTEXTS * STRIATAL_W_LEN
+    + 2 * 4 * OFC_CONTEXTS * STRIATAL_FEATS
+    + 2 * 4 * OFC_CONTEXTS * STRIATAL_CUES
+    + 4 * 4 * STRIATAL_CUES
+    + (1 + 2 * OFC_CONTEXTS) * 4 * STRIATAL_FWD_LEN
+    + 2 * 4 * OFC_CONTEXTS
+    + 4 * STRIATAL_ACTUATORS
+    + 8
+    + 4 * OFC_CONTEXTS
+    + 12
+    + 4 * STRIATAL_TAP_DIM
+    + 4 * STRIATAL_W_LEN
+    + 3 * 4 * STRIATAL_FEATS
+    + 2 * 4 * STRIATAL_CUES
+    + 2 * 4 * STRIATAL_ACTUATORS
+    + 4
+    + 1
+    + 24;
 
 pub const TAG_BODY: u32 = 0x424F_4459;
 pub const TAG_CELL: u32 = 0x4345_4C4C;
@@ -268,7 +294,8 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     cell_w.write_f32(org.cells.theta_phase)?;
     cell_w.write_f32(org.cells.error_reversal_gate)?;
 
-    let mut tube_w = ByteWriter::with_capacity(org.tubes.slots.len() * 64 + 9600);
+    let mut tube_w =
+        ByteWriter::with_capacity(org.tubes.slots.len() * 64 + 9600 + STRIATAL_SERIALIZED_BYTES);
     tube_w.write_u32(org.tubes.slots.len() as u32);
     tube_w.write_u32(org.tubes.alive_count as u32);
     for t in &org.tubes.slots {
@@ -372,6 +399,135 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
         tube_w.write_f32(am)?;
     }
     tube_w.write_f32(org.tubes.mean_interventional_agency)?;
+    let before_striatal = tube_w.buf.len();
+    let st = &org.tubes.striatal;
+    tube_w.write_u8(st.num_ctx);
+    tube_w.write_u8(st.active_ctx);
+    tube_w.write_u8(st.impact_refrac);
+    for &hc in &st.ctx_has_cons {
+        tube_w.write_u8(hc);
+    }
+    for &ct in &st.ctx_ticks {
+        tube_w.write_u32(ct);
+    }
+    for &rp in &st.ctx_r_peak {
+        tube_w.write_f32(rp)?;
+    }
+    for &rb in &st.r_bar_ctx {
+        tube_w.write_f32(rb)?;
+    }
+    for &pc in &st.pore_ch {
+        tube_w.write_u32(pc);
+    }
+    for &pa in &st.pore_age {
+        tube_w.write_u32(pa);
+    }
+    for &pm in &st.pore_mean {
+        tube_w.write_f32(pm)?;
+    }
+    for &vr in &st.pore_var_raw {
+        tube_w.write_f32(vr)?;
+    }
+    for &ve in &st.pore_var_exaff {
+        tube_w.write_f32(ve)?;
+    }
+    for &cg in &st.canc_g {
+        tube_w.write_f32(cg)?;
+    }
+    for &wb in &st.w_birth {
+        tube_w.write_f32(wb)?;
+    }
+    for &wc in &st.w_ctx {
+        tube_w.write_f32(wc)?;
+    }
+    for &ws in &st.w_cons {
+        tube_w.write_f32(ws)?;
+    }
+    for &vc in &st.v_ctx {
+        tube_w.write_f32(vc)?;
+    }
+    for &vs in &st.v_cons {
+        tube_w.write_f32(vs)?;
+    }
+    for &qc in &st.q_ctx {
+        tube_w.write_f32(qc)?;
+    }
+    for &qs in &st.q_cons {
+        tube_w.write_f32(qs)?;
+    }
+    for &fb in &st.fwd_b {
+        tube_w.write_f32(fb)?;
+    }
+    for &fa in &st.fwd_alpha {
+        tube_w.write_f32(fa)?;
+    }
+    for &fj in &st.fwd_j {
+        tube_w.write_f32(fj)?;
+    }
+    for &fjc in &st.fwd_j_ctx {
+        tube_w.write_f32(fjc)?;
+    }
+    for &fjs in &st.fwd_j_cons {
+        tube_w.write_f32(fjs)?;
+    }
+    for &vn in &st.fwd_var_null {
+        tube_w.write_f32(vn)?;
+    }
+    for &va in &st.fwd_var_act {
+        tube_w.write_f32(va)?;
+    }
+    for &fnm in &st.fwd_num {
+        tube_w.write_f32(fnm)?;
+    }
+    for &fdn in &st.fwd_den {
+        tube_w.write_f32(fdn)?;
+    }
+    for &sam in &st.act_mean {
+        tube_w.write_f32(sam)?;
+    }
+    tube_w.write_u32(st.ctx_cooldown);
+    tube_w.write_u32(st.ctx_out_events);
+    for &oe in &st.ctx_out_err {
+        tube_w.write_f32(oe)?;
+    }
+    tube_w.write_f32(st.r_fast_ema)?;
+    tube_w.write_f32(st.r_med200)?;
+    tube_w.write_f32(st.valence_flip_ema)?;
+    for &dr in &st.da_ring {
+        tube_w.write_f32(dr)?;
+    }
+    for &ea in &st.elig_actor {
+        tube_w.write_f32(ea)?;
+    }
+    for &ec in &st.elig_critic {
+        tube_w.write_f32(ec)?;
+    }
+    for &ft in &st.feat {
+        tube_w.write_f32(ft)?;
+    }
+    for &pcf in &st.prev_critic_feat {
+        tube_w.write_f32(pcf)?;
+    }
+    for &pf in &st.prev_feat {
+        tube_w.write_f32(pf)?;
+    }
+    for &pdf in &st.prev_df {
+        tube_w.write_f32(pdf)?;
+    }
+    for &pa in &st.prev_act {
+        tube_w.write_f32(pa)?;
+    }
+    for &nz in &st.noise {
+        tube_w.write_f32(nz)?;
+    }
+    tube_w.write_f32(st.v_prev)?;
+    tube_w.write_bool(st.has_prev);
+    tube_w.write_u64(st.tick);
+    tube_w.write_u64(st.rng.s0);
+    tube_w.write_u64(st.rng.s1);
+    if tube_w.buf.len().saturating_sub(before_striatal) != STRIATAL_SERIALIZED_BYTES {
+        return Err(PersistError::InvalidTopology);
+    }
 
     let mut pore_w = ByteWriter::with_capacity(org.membrane.sensor_pores.len() * 112 + 512);
     pore_w.write_u32(org.membrane.sensor_pores.len() as u32);
@@ -1174,6 +1330,232 @@ pub fn shadow_decode_organism(
         *dst = tr.read_f32()?;
     }
     let mean_interventional_agency = tr.read_f32()?;
+    let striatal = if version >= 5 {
+        let num_ctx = tr.read_u8()?;
+        let active_ctx = tr.read_u8()?;
+        let impact_refrac = tr.read_u8()?;
+        if num_ctx == 0 || (num_ctx as usize) > OFC_CONTEXTS || active_ctx >= num_ctx {
+            return Err(PersistError::InvalidTopology);
+        }
+        let mut ctx_has_cons = [0u8; OFC_CONTEXTS];
+        for dst in &mut ctx_has_cons {
+            let v = tr.read_u8()?;
+            if v > 1 {
+                return Err(PersistError::InvalidTopology);
+            }
+            *dst = v;
+        }
+        let mut ctx_ticks = [0u32; OFC_CONTEXTS];
+        for dst in &mut ctx_ticks {
+            *dst = tr.read_u32()?;
+        }
+        let mut ctx_r_peak = [0.0_f32; OFC_CONTEXTS];
+        for dst in &mut ctx_r_peak {
+            *dst = tr.read_f32()?;
+        }
+        let mut r_bar_ctx = [0.0_f32; OFC_CONTEXTS];
+        for dst in &mut r_bar_ctx {
+            *dst = tr.read_f32()?;
+        }
+        let mut pore_ch = [u32::MAX; STRIATAL_PORES];
+        for dst in &mut pore_ch {
+            *dst = tr.read_u32()?;
+        }
+        let mut pore_age = [0u32; STRIATAL_PORES];
+        for dst in &mut pore_age {
+            *dst = tr.read_u32()?;
+        }
+        let mut pore_mean = [0.0_f32; STRIATAL_PORES];
+        for dst in &mut pore_mean {
+            *dst = tr.read_f32()?;
+        }
+        let mut pore_var_raw = [1.0e-4_f32; STRIATAL_PORES];
+        for dst in &mut pore_var_raw {
+            *dst = tr.read_f32()?;
+        }
+        let mut pore_var_exaff = [1.0e-4_f32; STRIATAL_PORES];
+        for dst in &mut pore_var_exaff {
+            *dst = tr.read_f32()?;
+        }
+        let mut canc_g = vec![0.0_f32; STRIATAL_PORES * STRIATAL_TAP_DIM];
+        for dst in &mut canc_g {
+            *dst = tr.read_f32()?;
+        }
+        let mut w_birth = vec![0.0_f32; STRIATAL_W_LEN];
+        for dst in &mut w_birth {
+            *dst = tr.read_f32()?;
+        }
+        let mut w_ctx = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_W_LEN];
+        for dst in &mut w_ctx {
+            *dst = tr.read_f32()?;
+        }
+        let mut w_cons = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_W_LEN];
+        for dst in &mut w_cons {
+            *dst = tr.read_f32()?;
+        }
+        let mut v_ctx = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_FEATS];
+        for dst in &mut v_ctx {
+            *dst = tr.read_f32()?;
+        }
+        let mut v_cons = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_FEATS];
+        for dst in &mut v_cons {
+            *dst = tr.read_f32()?;
+        }
+        let mut q_ctx = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_CUES];
+        for dst in &mut q_ctx {
+            *dst = tr.read_f32()?;
+        }
+        let mut q_cons = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_CUES];
+        for dst in &mut q_cons {
+            *dst = tr.read_f32()?;
+        }
+        let mut fwd_b = [0.0_f32; STRIATAL_CUES];
+        for dst in &mut fwd_b {
+            *dst = tr.read_f32()?;
+        }
+        let mut fwd_alpha = [0.0_f32; STRIATAL_CUES];
+        for dst in &mut fwd_alpha {
+            *dst = tr.read_f32()?;
+        }
+        let mut fwd_j = vec![0.0_f32; STRIATAL_FWD_LEN];
+        for dst in &mut fwd_j {
+            *dst = tr.read_f32()?;
+        }
+        let mut fwd_j_ctx = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_FWD_LEN];
+        for dst in &mut fwd_j_ctx {
+            *dst = tr.read_f32()?;
+        }
+        let mut fwd_j_cons = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_FWD_LEN];
+        for dst in &mut fwd_j_cons {
+            *dst = tr.read_f32()?;
+        }
+        let mut fwd_var_null = [1.0e-4_f32; STRIATAL_CUES];
+        for dst in &mut fwd_var_null {
+            *dst = tr.read_f32()?;
+        }
+        let mut fwd_var_act = [1.0e-4_f32; STRIATAL_CUES];
+        for dst in &mut fwd_var_act {
+            *dst = tr.read_f32()?;
+        }
+        let mut fwd_num = [0.0_f32; OFC_CONTEXTS];
+        for dst in &mut fwd_num {
+            *dst = tr.read_f32()?;
+        }
+        let mut fwd_den = [0.0_f32; OFC_CONTEXTS];
+        for dst in &mut fwd_den {
+            *dst = tr.read_f32()?;
+        }
+        let mut s_act_mean = [0.0_f32; STRIATAL_ACTUATORS];
+        for dst in &mut s_act_mean {
+            *dst = tr.read_f32()?;
+        }
+        let ctx_cooldown = tr.read_u32()?;
+        let ctx_out_events = tr.read_u32()?;
+        let mut ctx_out_err = [0.0_f32; OFC_CONTEXTS];
+        for dst in &mut ctx_out_err {
+            *dst = tr.read_f32()?;
+        }
+        let r_fast_ema = tr.read_f32()?;
+        let r_med200 = tr.read_f32()?;
+        let valence_flip_ema = tr.read_f32()?;
+        let mut da_ring = [0.0_f32; STRIATAL_TAP_DIM];
+        for dst in &mut da_ring {
+            *dst = tr.read_f32()?;
+        }
+        let mut elig_actor = vec![0.0_f32; STRIATAL_W_LEN];
+        for dst in &mut elig_actor {
+            *dst = tr.read_f32()?;
+        }
+        let mut elig_critic = [0.0_f32; STRIATAL_FEATS];
+        for dst in &mut elig_critic {
+            *dst = tr.read_f32()?;
+        }
+        let mut feat = [0.0_f32; STRIATAL_FEATS];
+        for dst in &mut feat {
+            *dst = tr.read_f32()?;
+        }
+        let mut prev_critic_feat = [0.0_f32; STRIATAL_FEATS];
+        for dst in &mut prev_critic_feat {
+            *dst = tr.read_f32()?;
+        }
+        let mut prev_feat = [0.0_f32; STRIATAL_CUES];
+        for dst in &mut prev_feat {
+            *dst = tr.read_f32()?;
+        }
+        let mut prev_df = [0.0_f32; STRIATAL_CUES];
+        for dst in &mut prev_df {
+            *dst = tr.read_f32()?;
+        }
+        let mut prev_act = [0.0_f32; STRIATAL_ACTUATORS];
+        for dst in &mut prev_act {
+            *dst = tr.read_f32()?;
+        }
+        let mut noise = [0.0_f32; STRIATAL_ACTUATORS];
+        for dst in &mut noise {
+            *dst = tr.read_f32()?;
+        }
+        let v_prev = tr.read_f32()?;
+        let has_prev = tr.read_bool()?;
+        let s_tick = tr.read_u64()?;
+        let rs0 = tr.read_u64()?;
+        let rs1 = tr.read_u64()?;
+        if (rs0 | rs1) == 0 {
+            return Err(PersistError::InvalidTopology);
+        }
+        StriatalOfc {
+            num_ctx,
+            active_ctx,
+            impact_refrac,
+            ctx_has_cons,
+            ctx_ticks,
+            ctx_r_peak,
+            r_bar_ctx,
+            pore_ch,
+            pore_age,
+            pore_mean,
+            pore_var_raw,
+            pore_var_exaff,
+            canc_g,
+            w_birth,
+            w_ctx,
+            w_cons,
+            v_ctx,
+            v_cons,
+            q_ctx,
+            q_cons,
+            fwd_b,
+            fwd_alpha,
+            fwd_j,
+            fwd_j_ctx,
+            fwd_j_cons,
+            fwd_var_null,
+            fwd_var_act,
+            fwd_num,
+            fwd_den,
+            act_mean: s_act_mean,
+            ctx_cooldown,
+            ctx_out_events,
+            ctx_out_err,
+            r_fast_ema,
+            r_med200,
+            valence_flip_ema,
+            da_ring,
+            elig_actor,
+            elig_critic,
+            feat,
+            prev_critic_feat,
+            prev_feat,
+            prev_df,
+            prev_act,
+            noise,
+            v_prev,
+            has_prev,
+            tick: s_tick,
+            rng: Rng64 { s0: rs0, s1: rs1 },
+        }
+    } else {
+        StriatalOfc::from_seed(seed)
+    };
     if tr.remaining() != 0 {
         return Err(PersistError::InvalidTopology);
     }
@@ -1212,6 +1594,7 @@ pub fn shadow_decode_organism(
         peer_bearing_ema,
         act_mean,
         mean_interventional_agency,
+        striatal,
     };
     tubes.rebuild_adjacency(cells.slots.len());
 
