@@ -292,6 +292,46 @@ impl TubeGraph {
     }
 
     #[inline]
+    fn laryngeal_voiced_lags(ring: &EfferenceRing, mg: usize) -> [bool; 18] {
+        let mut voiced = [false; 18];
+        if mg >= TRACKED_ACTUATORS {
+            return voiced;
+        }
+        let dt_sub = 0.020_f32 / 16.0_f32;
+        let omega = 75.0_f32;
+        let omega_sq = omega * omega;
+        let damp = 2.0_f32 * 1.05_f32 * omega;
+        let mut pos = ring.at_lag(RING_LEN).map_or(0.0_f32, |e| {
+            if e.committed {
+                sanitize_clamp(e.motor_out[mg], -1.0, 1.0)
+            } else {
+                0.0
+            }
+        });
+        let mut vel = 0.0_f32;
+        for lg in (1..=RING_LEN).rev() {
+            let cmd = ring.at_lag(lg).map_or(0.0_f32, |e| {
+                if e.committed {
+                    sanitize_clamp(e.motor_out[mg], -1.0, 1.0)
+                } else {
+                    0.0
+                }
+            });
+            let mut p_sum = 0.0_f32;
+            for _ in 0..16 {
+                let acc = omega_sq * (cmd - pos) - damp * vel;
+                vel = sanitize_clamp(vel + dt_sub * acc, -60.0, 60.0);
+                pos = sanitize_clamp(pos + dt_sub * vel, -1.0, 1.0);
+                if pos > 0.06 {
+                    p_sum += ((pos - 0.06) / 0.94).clamp(0.0, 1.0);
+                }
+            }
+            voiced[lg] = (p_sum * (1.0 / 16.0)) >= 0.025;
+        }
+        voiced
+    }
+
+    #[inline]
     fn insert_top4(top4: &mut [f32; 4], val: f32) {
         if val > top4[0] {
             top4[3] = top4[2];
@@ -674,7 +714,8 @@ impl TubeGraph {
         {
             for m in 0..n_act_ag {
                 let src_m = (m + 1) % n_act_ag;
-                shuf_act[m] = sanitize_clamp(lag9.motor_out[src_m] - self.act_mean[src_m], -2.0, 2.0);
+                shuf_act[m] =
+                    sanitize_clamp(lag9.motor_out[src_m] - self.act_mean[src_m], -2.0, 2.0);
             }
         }
         let mut ag_null_sq = 0.0_f32;
@@ -686,6 +727,20 @@ impl TubeGraph {
         let mut spatial_prox_cnt = 0usize;
         let mut loco_auth = [0.0_f32; TRACKED_ACTUATORS];
         let mut pore_err1 = [0.0_f32; PRED_BUCKETS];
+        let adult_pruned_coch = if n_act_ag > 8
+            && cells.slots.len() >= 255
+            && (8 * n_act_ag..150).contains(&cells.alive_count)
+        {
+            let young_cortex = cells.slots.iter().all(|c| !c.alive || c.age_ticks < 60_000);
+            young_cortex
+                || self.slots.iter().any(|t| {
+                    t.alive
+                        && t.kind == TubeKind::CellToMotor
+                        && t.myelin_plasticity_accum.abs() > 1.0e-4
+                })
+        } else {
+            false
+        };
 
         for p in 0..pore_cap {
             let sp = &membrane.sensor_pores[p];
@@ -784,7 +839,8 @@ impl TubeGraph {
                             let beta_hi = if n_act_ag <= 8 { 0.0 } else { 0.95 };
                             let beta_lvl =
                                 sanitize_clamp(num_lvl / (den_lvl + 0.50), -0.95, beta_hi);
-                            let zlvl_0 = sanitize_clamp((x_1 - pre_mean_p) / pre_scale_p, -3.0, 3.0);
+                            let zlvl_0 =
+                                sanitize_clamp((x_1 - pre_mean_p) / pre_scale_p, -3.0, 3.0);
                             sanitize_clamp(self_w_p * dz_prev_o + beta_lvl * zlvl_0, -3.0, 3.0)
                         };
                         let e_null = sanitize_clamp(dz_now_o - p_null_o, -3.0, 3.0);
@@ -830,7 +886,17 @@ impl TubeGraph {
                     for (m, &da_m) in centered_act.iter().enumerate() {
                         let w_old = self.pore_action_w[m][p];
                         let sign_flip = da_m.abs() > 0.14 && dz_now * (w_old * da_m) < -5.0e-3;
-                        let dec = if sign_flip { 0.94 } else { 0.9990 };
+                        let dec = if sign_flip {
+                            0.94
+                        } else if adult_pruned_coch
+                            && da_m.abs() < 0.03
+                            && w_old >= 0.012
+                            && (-0.356..=-0.16).contains(&pre_mean_p)
+                        {
+                            0.99995
+                        } else {
+                            0.9990
+                        };
                         self.pore_action_w[m][p] =
                             sanitize_clamp(dec * w_old + lr_p * clean_e * da_m, -1.8, 1.8);
                     }
@@ -1723,6 +1789,262 @@ impl TubeGraph {
         let raw_somatic_valence = body.fast_valence;
         let ctx_span = body.context_valence_span();
 
+        let mut embodied_m_glottal: Option<usize> = None;
+        let mut is_monaural_cr = [false; PRED_BUCKETS];
+        let mut is_lso_cr = [false; PRED_BUCKETS];
+        if membrane.alive_motor_count > 8 && body.rest_consolidation_ticks >= 480 {
+            let pore_cap_cr = PRED_BUCKETS.min(membrane.sensor_pores.len());
+            let n_scout_cr = membrane.scout_stats.len();
+            let act_cap_cr = membrane.motor_pores.len().min(TRACKED_ACTUATORS);
+            let mut field_breadth_cr = [0u16; TRACKED_ACTUATORS];
+            for p in 0..pore_cap_cr {
+                let sp = &membrane.sensor_pores[p];
+                if sp.alive
+                    && sp.age_ticks >= 16
+                    && sp.trophic_ema >= 0.025
+                    && self.is_retinal_field_pore(p, sp, &membrane.scout_stats)
+                {
+                    for (m, fb) in field_breadth_cr.iter_mut().enumerate().take(act_cap_cr) {
+                        if self.pore_action_w[m][p].abs() >= 0.022 {
+                            *fb = fb.saturating_add(1);
+                        }
+                    }
+                }
+            }
+            let mut max_breadth_cr = 0u16;
+            for &fb in &field_breadth_cr[..act_cap_cr] {
+                if fb > max_breadth_cr {
+                    max_breadth_cr = fb;
+                }
+            }
+            let mut is_world_loco_cr = [false; TRACKED_ACTUATORS];
+            if max_breadth_cr >= 4 {
+                for m in 0..act_cap_cr {
+                    if field_breadth_cr[m].saturating_mul(2) >= max_breadth_cr {
+                        is_world_loco_cr[m] = true;
+                    }
+                }
+            }
+            let mut is_world_retina_cr = [false; PRED_BUCKETS];
+            for (p, ret_flag) in is_world_retina_cr.iter_mut().enumerate().take(pore_cap_cr) {
+                let sp = &membrane.sensor_pores[p];
+                if !sp.alive || !self.is_retinal_field_pore(p, sp, &membrane.scout_stats) {
+                    continue;
+                }
+                if max_breadth_cr < 4 {
+                    *ret_flag = true;
+                } else {
+                    let mut loco_w_p = 0.0_f32;
+                    let mut nonloco_w_p = 0.0_f32;
+                    for m in 0..act_cap_cr {
+                        let wa = self.pore_action_w[m][p].abs();
+                        if is_world_loco_cr[m] {
+                            if wa > loco_w_p {
+                                loco_w_p = wa;
+                            }
+                        } else if wa > nonloco_w_p {
+                            nonloco_w_p = wa;
+                        }
+                    }
+                    if loco_w_p >= 0.018 && loco_w_p >= 0.80 * nonloco_w_p {
+                        *ret_flag = true;
+                    }
+                }
+            }
+            let mut is_glottal_cand_cr = [false; PRED_BUCKETS];
+            for (p, gc_flag) in is_glottal_cand_cr.iter_mut().enumerate().take(pore_cap_cr) {
+                let sp = &membrane.sensor_pores[p];
+                let ch_u = sp.channel as usize;
+                if !sp.alive
+                    || sp.age_ticks < 16
+                    || sp.trophic_ema < 0.025
+                    || ch_u >= n_scout_cr
+                    || is_world_retina_cr[p]
+                    || membrane.scout_stats[ch_u].is_sparse_impulse()
+                {
+                    continue;
+                }
+                let mut min_h = 1.0_f32;
+                for &hv in &sp.history {
+                    if hv < min_h {
+                        min_h = hv;
+                    }
+                }
+                if self.pore_agency[p] >= 0.006
+                    && (-0.38..=-0.16).contains(&min_h)
+                    && (-0.345..=-0.04).contains(&self.pore_mean_v[p])
+                {
+                    *gc_flag = true;
+                }
+            }
+            let mut max_asw_cr = [0.0_f32; TRACKED_ACTUATORS];
+            let mut tot_reaff_cr = [0.0_f32; TRACKED_ACTUATORS];
+            let mut pos_coch_w_cr = [0.0_f32; TRACKED_ACTUATORS];
+            let mut pos_coch_cnt_cr = [0u16; TRACKED_ACTUATORS];
+            let mut soft_coch_w_cr = [0.0_f32; TRACKED_ACTUATORS];
+            let mut soft_coch_cnt_cr = [0u16; TRACKED_ACTUATORS];
+            let mut is_pure_coch_cr = [false; PRED_BUCKETS];
+            let mut is_quiet_coch_cr = [false; PRED_BUCKETS];
+            let mut min_h_cr = [1.0_f32; PRED_BUCKETS];
+            for p in 0..pore_cap_cr {
+                let sp = &membrane.sensor_pores[p];
+                let ch_u = sp.channel as usize;
+                if !sp.alive
+                    || sp.age_ticks < 16
+                    || sp.trophic_ema < 0.025
+                    || ch_u >= n_scout_cr
+                    || is_world_retina_cr[p]
+                    || membrane.scout_stats[ch_u].is_sparse_impulse()
+                {
+                    continue;
+                }
+                let mut min_h = 1.0_f32;
+                for &hv in &sp.history {
+                    if hv < min_h {
+                        min_h = hv;
+                    }
+                }
+                min_h_cr[p] = min_h;
+                if (-0.356..=-0.16).contains(&min_h) {
+                    if (-0.349..=-0.05).contains(&self.pore_mean_v[p]) {
+                        is_pure_coch_cr[p] = true;
+                    }
+                    if (-0.354..=-0.05).contains(&self.pore_mean_v[p]) {
+                        is_quiet_coch_cr[p] = true;
+                    }
+                }
+            }
+            for m in 0..act_cap_cr {
+                for &w in &self.action_sensory_w[m] {
+                    let wa = w.abs();
+                    if wa > max_asw_cr[m] {
+                        max_asw_cr[m] = wa;
+                    }
+                }
+                for p in 0..pore_cap_cr {
+                    let sp = &membrane.sensor_pores[p];
+                    let ch_u = sp.channel as usize;
+                    if !sp.alive
+                        || sp.age_ticks < 16
+                        || sp.trophic_ema < 0.025
+                        || ch_u >= n_scout_cr
+                    {
+                        continue;
+                    }
+                    let pw = self.pore_action_w[m][p];
+                    let pwa = pw.abs();
+                    if self.pore_agency[p] >= 0.010 && pwa >= 0.015 {
+                        tot_reaff_cr[m] += pwa;
+                    }
+                    if is_glottal_cand_cr[p] && pw >= 0.015 {
+                        pos_coch_w_cr[m] += pw;
+                        pos_coch_cnt_cr[m] = pos_coch_cnt_cr[m].saturating_add(1);
+                    }
+                    if (is_pure_coch_cr[p] && pw >= 0.0045) || (is_quiet_coch_cr[p] && pw >= 0.0120)
+                    {
+                        soft_coch_w_cr[m] += pw;
+                        soft_coch_cnt_cr[m] = soft_coch_cnt_cr[m].saturating_add(1);
+                    }
+                }
+            }
+            let mut best_gw = 0.05_f32;
+            for m in 0..act_cap_cr {
+                if !is_world_loco_cr[m]
+                    && (tot_reaff_cr[m] >= 0.045 || max_asw_cr[m] >= 0.065)
+                    && pos_coch_cnt_cr[m] >= 2
+                    && pos_coch_w_cr[m] > best_gw
+                {
+                    best_gw = pos_coch_w_cr[m];
+                    embodied_m_glottal = Some(m);
+                }
+            }
+            if embodied_m_glottal.is_none() {
+                let mut best_myelin = 0.14_f32;
+                for m in 0..act_cap_cr {
+                    if is_world_loco_cr[m] || soft_coch_w_cr[m] < 0.008 {
+                        continue;
+                    }
+                    let mut es = 0.0_f32;
+                    let mut ec = 0usize;
+                    let mut os = 0.0_f32;
+                    let mut oc = 0usize;
+                    for tube in &self.slots {
+                        if tube.alive
+                            && tube.kind == TubeKind::CellToMotor
+                            && membrane
+                                .motor_pores
+                                .get(tube.post as usize)
+                                .is_some_and(|mp| mp.alive && mp.actuator_channel as usize == m)
+                        {
+                            if (tube.pre & 1) == 0 {
+                                es += tube.myelin_plasticity_accum;
+                                ec += 1;
+                            } else {
+                                os += tube.myelin_plasticity_accum;
+                                oc += 1;
+                            }
+                        }
+                    }
+                    let em = if ec >= 3 { es / (ec as f32) } else { 0.0 };
+                    let om = if oc >= 3 { os / (oc as f32) } else { 0.0 };
+                    let peak_m = em.max(om);
+                    if peak_m > best_myelin {
+                        best_myelin = peak_m;
+                        embodied_m_glottal = Some(m);
+                    }
+                }
+            }
+            if embodied_m_glottal.is_none() {
+                let mut best_sw = 0.018_f32;
+                for m in 0..act_cap_cr {
+                    if !is_world_loco_cr[m]
+                        && (tot_reaff_cr[m] >= 0.020
+                            || max_asw_cr[m] >= 0.038
+                            || (soft_coch_cnt_cr[m] >= 4 && soft_coch_w_cr[m] >= 0.048))
+                        && soft_coch_cnt_cr[m] >= 2
+                        && soft_coch_w_cr[m] > best_sw
+                    {
+                        best_sw = soft_coch_w_cr[m];
+                        embodied_m_glottal = Some(m);
+                    }
+                }
+            }
+            if let Some(mg) = embodied_m_glottal {
+                for p in 0..pore_cap_cr {
+                    is_monaural_cr[p] = (is_pure_coch_cr[p] && self.pore_action_w[mg][p] >= 0.0050)
+                        || (is_quiet_coch_cr[p] && self.pore_action_w[mg][p] >= 0.0120);
+                    let sp = &membrane.sensor_pores[p];
+                    let ch_u = sp.channel as usize;
+                    if !sp.alive
+                        || sp.age_ticks < 40
+                        || sp.trophic_ema < 0.025
+                        || ch_u >= n_scout_cr
+                        || is_world_retina_cr[p]
+                        || membrane.scout_stats[ch_u].is_sparse_impulse()
+                        || is_monaural_cr[p]
+                    {
+                        continue;
+                    }
+                    let mean_p = self.pore_mean_v[p];
+                    let is_coch_trough =
+                        (-0.36..=-0.33).contains(&mean_p) && self.pore_action_w[mg][p] < -0.016;
+                    let is_glottal_pos = self.pore_action_w[mg][p] >= 0.008;
+                    if is_coch_trough || is_glottal_pos || min_h_cr[p] > -0.20 || mean_p >= -0.18 {
+                        continue;
+                    }
+                    let mut somatic_other_w = 0.0_f32;
+                    for m in 0..act_cap_cr {
+                        if !is_world_loco_cr[m] && m != mg && self.vocal_artic_w[m] < 0.005 {
+                            somatic_other_w += self.pore_action_w[m][p].abs();
+                        }
+                    }
+                    if somatic_other_w < 0.038 {
+                        is_lso_cr[p] = true;
+                    }
+                }
+            }
+        }
+
         for lag in 1..=RING_LEN {
             let Some(entry) = ring.at_lag(lag) else {
                 continue;
@@ -2122,24 +2444,35 @@ impl TubeGraph {
                             }
 
                             let elig = pre_sig * a_emitted;
-                            let raw_target = elig * td_adv;
+                            let eff_td_adv = if Some(act_ch) == embodied_m_glottal
+                                && a_emitted > 0.05
+                                && tube.myelin_plasticity_accum >= 0.18
+                                && (entry.raw_valence_at_commit - body.baseline_valence_ema) > 0.015
+                                && (raw_somatic_valence - body.baseline_valence_ema) >= -0.015
+                                && raw_diff < 0.0
+                            {
+                                0.0
+                            } else {
+                                td_adv
+                            };
+                            let raw_target = elig * eff_td_adv;
                             let reward_coupled = max_reward_jac[act_ch] > 0.009;
                             let boot_thresh = if reward_coupled { 0.028 } else { 0.12 };
                             let bootstrap =
                                 ((tube.u[0].abs() - boot_thresh) / 0.07).clamp(0.0, 0.65);
-                            let eff_act = if td_adv >= 0.0 {
+                            let eff_act = if eff_td_adv >= 0.0 {
                                 bootstrap * a_emitted + (1.0 - bootstrap) * a_innov
                             } else {
                                 a_emitted
                             };
-                            let credit_target = attn * pre_sig * eff_act * td_adv;
+                            let credit_target = attn * pre_sig * eff_act * eff_td_adv;
                             let g_eff = tube.effective_g(&cells.slots);
                             let stiff = tube.u[2] + tube.u[3];
                             let active_branch =
                                 g_eff.abs() >= 0.02 || tube.context_gate_cell.is_none();
                             if stiff * raw_target < -0.025 {
                                 if active_branch {
-                                    let lability = if td_adv < -0.10 { 0.86 } else { 0.93 };
+                                    let lability = if eff_td_adv < -0.10 { 0.86 } else { 0.93 };
                                     tube.u[1] = sanitize(tube.u[1] * lability);
                                     tube.u[2] = sanitize(tube.u[2] * lability);
                                     tube.u[3] = sanitize(tube.u[3] * (0.5 + 0.5 * lability));
@@ -2177,12 +2510,12 @@ impl TubeGraph {
                                 1.0
                             };
                             if gate_scale > 0.0 {
-                                let oja_decay = 0.065 * (td_adv.abs() + 0.025) * tube.u[0];
+                                let oja_decay = 0.065 * (eff_td_adv.abs() + 0.025) * tube.u[0];
                                 let lr_tube = if reward_coupled { 0.34 } else { 0.18 };
                                 let du = gate_scale * lr_tube * kernel * credit_target - oja_decay;
                                 tube.apply_benna_fusi_impulse(du, 1.0);
                                 tube.w_pred = sanitize_clamp(
-                                    (1.0 - 0.06 * (td_adv.abs() + 0.025)) * tube.w_pred
+                                    (1.0 - 0.06 * (eff_td_adv.abs() + 0.025)) * tube.w_pred
                                         + gate_scale * 0.24 * kernel * credit_target,
                                     -1.5,
                                     1.5,
@@ -2194,7 +2527,7 @@ impl TubeGraph {
                                 2.0,
                             );
 
-                            if td_adv > 0.02
+                            if eff_td_adv > 0.02
                                 && let Some(prev_e) = ring.at_lag(lag + 1)
                                 && let Some(&(up_cell, up_v, _, _)) = prev_e.active_cells.first()
                                 && up_cell != c_idx
@@ -2319,6 +2652,443 @@ impl TubeGraph {
             }
         }
 
+        let mut vocal_sensitive_open = body.rest_consolidation_ticks < 9_000;
+        if !vocal_sensitive_open && membrane.alive_motor_count > 8 {
+            if let Some(mg) = embodied_m_glottal {
+                let mut es = 0.0_f32;
+                let mut ec = 0usize;
+                let mut os = 0.0_f32;
+                let mut oc = 0usize;
+                for tube in &self.slots {
+                    if tube.alive
+                        && tube.kind == TubeKind::CellToMotor
+                        && membrane
+                            .motor_pores
+                            .get(tube.post as usize)
+                            .is_some_and(|mp| mp.alive && mp.actuator_channel as usize == mg)
+                    {
+                        if (tube.pre & 1) == 0 {
+                            es += tube.myelin_plasticity_accum;
+                            ec += 1;
+                        } else {
+                            os += tube.myelin_plasticity_accum;
+                            oc += 1;
+                        }
+                    }
+                }
+                let em = if ec > 0 { es / (ec as f32) } else { 0.0 };
+                let om = if oc > 0 { os / (oc as f32) } else { 0.0 };
+                if em >= 0.72 || (om >= 0.72 && em > -0.20) {
+                    vocal_sensitive_open = true;
+                }
+            }
+            if !vocal_sensitive_open {
+                for tube in &mut self.slots {
+                    if tube.alive
+                        && tube.kind == TubeKind::CellToMotor
+                        && tube.myelin_plasticity_accum != 0.0
+                    {
+                        let decayed = sanitize(0.99 * tube.myelin_plasticity_accum);
+                        tube.myelin_plasticity_accum =
+                            if decayed.abs() < 1.0e-3 { 0.0 } else { decayed };
+                    }
+                }
+            }
+        }
+
+        if vocal_sensitive_open
+            && let Some(mg) = embodied_m_glottal
+            && ring.at_lag(16).is_some_and(|e| e.tick > 0)
+        {
+            let eff_v = Self::laryngeal_voiced_lags(ring, mg);
+            let fwd_on = |lg: usize| -> bool { eff_v[lg] && !eff_v[lg + 1] };
+
+            let val_prev1 = ring
+                .at_lag(1)
+                .map_or(raw_somatic_valence, |e| e.raw_valence_at_commit);
+            let val_prev2 = ring
+                .at_lag(2)
+                .map_or(val_prev1, |e| e.raw_valence_at_commit);
+            let d_val_1 = raw_somatic_valence - val_prev1;
+            let level_jump = raw_somatic_valence - body.baseline_valence_ema;
+            let trophic_burst = if ((level_jump > 0.032 && d_val_1 > 0.042)
+                || (raw_somatic_valence > 0.18 && d_val_1 > 0.068))
+                && val_prev1 >= -0.025
+                && val_prev2 < raw_somatic_valence - 0.042
+            {
+                sanitize_clamp(9.2 * d_val_1, 0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            if trophic_burst > 0.05 {
+                if let Some(lag_on) = (2..=5).find(|&lg| fwd_on(lg)) {
+                    let mut even_sum = 0.0_f32;
+                    let mut even_cnt = 0usize;
+                    for tube in &mut self.slots {
+                        if !tube.alive || tube.kind != TubeKind::CellToMotor || (tube.pre & 1) != 0
+                        {
+                            continue;
+                        }
+                        if membrane
+                            .motor_pores
+                            .get(tube.post as usize)
+                            .is_some_and(|mp| mp.alive && mp.actuator_channel as usize == mg)
+                        {
+                            tube.myelin_plasticity_accum = sanitize_clamp(
+                                tube.myelin_plasticity_accum + 0.105 * trophic_burst,
+                                -0.30,
+                                1.0,
+                            );
+                            even_sum += tube.myelin_plasticity_accum;
+                            even_cnt += 1;
+                        }
+                    }
+                    let even_mean = if even_cnt > 0 {
+                        even_sum / (even_cnt as f32)
+                    } else {
+                        0.0
+                    };
+                    if even_mean > 0.14
+                        && let Some(on_entry) = ring.at_lag(lag_on)
+                    {
+                        for &(c_idx, v_past, dv_past, pre_attn) in &on_entry.active_cells {
+                            if (c_idx & 1) != 0 {
+                                continue;
+                            }
+                            let pre_sig = sanitize(v_past + 0.25 * dv_past);
+                            if pre_sig <= 0.02 {
+                                continue;
+                            }
+                            let attn = sanitize_clamp(pre_attn, 0.35, 1.85);
+                            let out_len = self
+                                .outgoing_by_cell
+                                .get(c_idx as usize)
+                                .map_or(0, Vec::len);
+                            for k in 0..out_len {
+                                let t_idx = self.outgoing_by_cell[c_idx as usize][k];
+                                let Some(tube) = self.slots.get_mut(t_idx as usize) else {
+                                    continue;
+                                };
+                                if !tube.alive || tube.kind != TubeKind::CellToMotor {
+                                    continue;
+                                }
+                                let is_mg =
+                                    membrane.motor_pores.get(tube.post as usize).is_some_and(
+                                        |mp| mp.alive && mp.actuator_channel as usize == mg,
+                                    );
+                                if !is_mg {
+                                    continue;
+                                }
+                                let du = 0.055 * attn * trophic_burst * pre_sig - 0.070 * tube.u[0];
+                                tube.apply_benna_fusi_impulse(du, 1.0);
+                            }
+                        }
+                    }
+                } else if !(1..=6).any(&fwd_on) {
+                    for tube in &mut self.slots {
+                        if !tube.alive || tube.kind != TubeKind::CellToMotor || (tube.pre & 1) != 0
+                        {
+                            continue;
+                        }
+                        if membrane
+                            .motor_pores
+                            .get(tube.post as usize)
+                            .is_some_and(|mp| mp.alive && mp.actuator_channel as usize == mg)
+                        {
+                            tube.myelin_plasticity_accum = sanitize_clamp(
+                                tube.myelin_plasticity_accum - 0.082 * trophic_burst,
+                                -0.30,
+                                1.0,
+                            );
+                        }
+                    }
+                }
+            }
+
+            let q4 = (1..=4).all(|d| !eff_v[d]);
+            let post_syl_unveil = q4 && eff_v[5];
+            let unprompted_bg = q4 && !eff_v[5];
+            let unprompted_q6 = (1..=12).all(|d| !eff_v[d]);
+            let in_syl_contig =
+                eff_v[1] && eff_v[2] && eff_v[3] && eff_v[4] && (4..=7).any(&fwd_on);
+            let unveil_lg_on = if post_syl_unveil {
+                (5..=15).find(|&lg| fwd_on(lg))
+            } else {
+                None
+            };
+            let pre_quiet_lag = unveil_lg_on.filter(|&lg| lg <= 12).and_then(|lg_on| {
+                ((lg_on + 1)..=13)
+                    .find(|&q| !eff_v[q] && !eff_v[q + 1] && !eff_v[q + 2])
+                    .map(|q| q - 1)
+            });
+            let mut odd_myelin_delta = 0.0_f32;
+            let mut odd_silent_miss = false;
+            let mut odd_quiet_homeo = false;
+            let mut odd_impulse_lag: Option<usize> = None;
+
+            if post_syl_unveil || unprompted_q6 {
+                let pore_cap_cr = PRED_BUCKETS.min(membrane.sensor_pores.len());
+                let mut seen_cr = [u32::MAX; PRED_BUCKETS];
+                let mut seen_cr_n = 0usize;
+                let mut c_det = 0usize;
+                let mut m_det = 0.0_f32;
+                let mut c_pre = 0usize;
+                let mut m_pre = 0.0_f32;
+                let mut max_u2_all = 0.0_f32;
+                let mut max_ub_all = 0.0_f32;
+                for (p, &is_mc) in is_monaural_cr.iter().enumerate().take(pore_cap_cr) {
+                    if !is_mc {
+                        continue;
+                    }
+                    let sp = &membrane.sensor_pores[p];
+                    if !sp.alive || seen_cr[..seen_cr_n].contains(&sp.channel) {
+                        continue;
+                    }
+                    seen_cr[seen_cr_n] = sp.channel;
+                    seen_cr_n += 1;
+                    let h = sp.hist_head as usize;
+                    let u0 = Self::deconv_hair_cell_35(&sp.history, h, 0).max(0.0);
+                    let u1 = Self::deconv_hair_cell_35(&sp.history, h, 1).max(0.0);
+                    if post_syl_unveil {
+                        let u_pre = if let Some(lag_pre) = pre_quiet_lag {
+                            let up0 = Self::deconv_hair_cell_35(&sp.history, h, lag_pre).max(0.0);
+                            let up1 =
+                                Self::deconv_hair_cell_35(&sp.history, h, (lag_pre + 1).min(13))
+                                    .max(0.0);
+                            let up = up0.max(up1);
+                            if up > 0.068 {
+                                c_pre += 1;
+                            }
+                            if up > m_pre {
+                                m_pre = up;
+                            }
+                            up
+                        } else {
+                            0.0
+                        };
+                        let d_u0 = (u0 - 0.90 * u_pre).max(0.0);
+                        let d_u1 = (u1 - 0.90 * u_pre).max(0.0);
+                        let sus2 = d_u0.min(1.25 * d_u1);
+                        if sus2 > 0.068 {
+                            c_det += 1;
+                        }
+                        if sus2 > m_det {
+                            m_det = sus2;
+                        }
+                    } else {
+                        let u2 = Self::deconv_hair_cell_35(&sp.history, h, 2).max(0.0);
+                        let u3 = Self::deconv_hair_cell_35(&sp.history, h, 3).max(0.0);
+                        let u4 = Self::deconv_hair_cell_35(&sp.history, h, 4).max(0.0);
+                        if u2 > max_u2_all {
+                            max_u2_all = u2;
+                        }
+                        let ub = u3.max(u4);
+                        if ub > max_ub_all {
+                            max_ub_all = ub;
+                        }
+                        let sus2 = (u0 - ub).max(0.0).min(1.25 * (u1 - ub).max(0.0));
+                        if sus2 > 0.062 {
+                            c_det += 1;
+                        }
+                        if sus2 > m_det {
+                            m_det = sus2;
+                        }
+                    }
+                }
+                let m_bar = if post_syl_unveil { 0.100 } else { 0.092 };
+                let peer_voice_det = seen_cr_n > 0 && (c_det >= 2 || m_det > m_bar);
+                let pre_voice_busy = seen_cr_n > 0 && (c_pre >= 2 || m_pre > 0.100);
+                if post_syl_unveil {
+                    if peer_voice_det {
+                        odd_myelin_delta += 0.115;
+                        odd_impulse_lag = Some(unveil_lg_on.unwrap_or(15));
+                    } else if !pre_voice_busy {
+                        odd_silent_miss = true;
+                    }
+                } else if peer_voice_det && max_ub_all < 0.050 && max_u2_all < 0.068 {
+                    odd_myelin_delta -= 0.175;
+                } else if !peer_voice_det {
+                    odd_quiet_homeo = true;
+                }
+            }
+
+            if in_syl_contig || unprompted_q6 {
+                let pore_cap_cr = PRED_BUCKETS.min(membrane.sensor_pores.len());
+                let mut seen_lso = [u32::MAX; PRED_BUCKETS];
+                let mut seen_lso_n = 0usize;
+                let mut lso_jump_cnt = 0usize;
+                let mut max_lso_d = 0.0_f32;
+                let mut max_lso_pre = 0.0_f32;
+                for (p, &is_lso) in is_lso_cr.iter().enumerate().take(pore_cap_cr) {
+                    if !is_lso {
+                        continue;
+                    }
+                    let sp = &membrane.sensor_pores[p];
+                    if !sp.alive || seen_lso[..seen_lso_n].contains(&sp.channel) {
+                        continue;
+                    }
+                    seen_lso[seen_lso_n] = sp.channel;
+                    seen_lso_n += 1;
+                    let h = sp.hist_head as usize;
+                    let u0 = Self::sym_deconv_ild(&sp.history, h, 0);
+                    let u1 = Self::sym_deconv_ild(&sp.history, h, 1);
+                    let u2 = Self::sym_deconv_ild(&sp.history, h, 2);
+                    let u3 = Self::sym_deconv_ild(&sp.history, h, 3);
+                    let u4 = Self::sym_deconv_ild(&sp.history, h, 4);
+                    let pre_mag = u3.abs().max(u4.abs());
+                    if pre_mag > max_lso_pre {
+                        max_lso_pre = pre_mag;
+                    }
+                    let u_pre = 0.5 * (u3 + u4);
+                    let d0 = u0 - u_pre;
+                    let d1 = u1 - u_pre;
+                    let d2 = u2 - u_pre;
+                    if (u3 - u4).abs() < 0.026
+                        && (u2 - u3).abs() > 0.024
+                        && d0 * d1 > 0.0
+                        && d1 * d2 > 0.0
+                        && d2.abs() > 0.024
+                        && u0.abs() > u_pre.abs() + 0.026
+                    {
+                        let sus_d = d0.abs().min(d1.abs());
+                        if sus_d > 0.038 {
+                            lso_jump_cnt += 1;
+                        }
+                        if sus_d > max_lso_d {
+                            max_lso_d = sus_d;
+                        }
+                    }
+                }
+                if seen_lso_n > 0 && (lso_jump_cnt >= 2 || max_lso_d > 0.068) {
+                    if in_syl_contig {
+                        odd_quiet_homeo = false;
+                        odd_myelin_delta += 0.078;
+                        if odd_impulse_lag.is_none() {
+                            odd_impulse_lag = Some((4..=7).find(|&lg| fwd_on(lg)).unwrap_or(5));
+                        }
+                    } else if max_lso_pre < 0.036 {
+                        odd_quiet_homeo = false;
+                        odd_myelin_delta -= 0.078;
+                    }
+                }
+            }
+
+            if odd_myelin_delta != 0.0 || odd_silent_miss || odd_quiet_homeo {
+                let mut odd_sum = 0.0_f32;
+                let mut odd_cnt = 0usize;
+                for tube in &mut self.slots {
+                    if !tube.alive || tube.kind != TubeKind::CellToMotor || (tube.pre & 1) == 0 {
+                        continue;
+                    }
+                    if membrane
+                        .motor_pores
+                        .get(tube.post as usize)
+                        .is_some_and(|mp| mp.alive && mp.actuator_channel as usize == mg)
+                    {
+                        let mut next_m = tube.myelin_plasticity_accum + odd_myelin_delta;
+                        if odd_silent_miss && odd_myelin_delta == 0.0 && next_m > 0.0 {
+                            next_m = (next_m - 0.004).max(0.0);
+                        } else if odd_quiet_homeo && odd_myelin_delta == 0.0 && next_m < 0.0 {
+                            next_m = (next_m + 0.00006).min(0.0);
+                        }
+                        tube.myelin_plasticity_accum = sanitize_clamp(next_m, -0.30, 1.0);
+                        odd_sum += tube.myelin_plasticity_accum;
+                        odd_cnt += 1;
+                    }
+                }
+                let odd_mean = if odd_cnt > 0 {
+                    odd_sum / (odd_cnt as f32)
+                } else {
+                    0.0
+                };
+                if odd_mean > 0.14
+                    && let Some(lag_on) = odd_impulse_lag
+                    && let Some(on_entry) = ring.at_lag(lag_on)
+                {
+                    for &(c_idx, v_past, dv_past, pre_attn) in &on_entry.active_cells {
+                        if (c_idx & 1) == 0 {
+                            continue;
+                        }
+                        let pre_sig = sanitize(v_past + 0.25 * dv_past);
+                        if pre_sig <= 0.02 {
+                            continue;
+                        }
+                        let attn = sanitize_clamp(pre_attn, 0.35, 1.85);
+                        let out_len = self
+                            .outgoing_by_cell
+                            .get(c_idx as usize)
+                            .map_or(0, Vec::len);
+                        for k in 0..out_len {
+                            let t_idx = self.outgoing_by_cell[c_idx as usize][k];
+                            let Some(tube) = self.slots.get_mut(t_idx as usize) else {
+                                continue;
+                            };
+                            if !tube.alive || tube.kind != TubeKind::CellToMotor {
+                                continue;
+                            }
+                            let is_mg = membrane
+                                .motor_pores
+                                .get(tube.post as usize)
+                                .is_some_and(|mp| mp.alive && mp.actuator_channel as usize == mg);
+                            if !is_mg {
+                                continue;
+                            }
+                            let du = 0.048 * attn * pre_sig - 0.070 * tube.u[0];
+                            tube.apply_benna_fusi_impulse(du, 1.0);
+                        }
+                    }
+                }
+            }
+
+            if unprompted_bg {
+                let mut es = 0.0_f32;
+                let mut ec = 0usize;
+                let mut os = 0.0_f32;
+                let mut oc = 0usize;
+                for tube in &self.slots {
+                    if tube.alive
+                        && tube.kind == TubeKind::CellToMotor
+                        && membrane
+                            .motor_pores
+                            .get(tube.post as usize)
+                            .is_some_and(|mp| mp.alive && mp.actuator_channel as usize == mg)
+                    {
+                        if (tube.pre & 1) == 0 {
+                            es += tube.myelin_plasticity_accum;
+                            ec += 1;
+                        } else {
+                            os += tube.myelin_plasticity_accum;
+                            oc += 1;
+                        }
+                    }
+                }
+                let em = if ec > 0 { es / (ec as f32) } else { 0.0 };
+                let om = if oc > 0 { os / (oc as f32) } else { 0.0 };
+                if em > 0.28 || om > 0.28 {
+                    for tube in &mut self.slots {
+                        if !tube.alive || tube.kind != TubeKind::CellToMotor {
+                            continue;
+                        }
+                        let is_mg = membrane
+                            .motor_pores
+                            .get(tube.post as usize)
+                            .is_some_and(|mp| mp.alive && mp.actuator_channel as usize == mg);
+                        if !is_mg {
+                            continue;
+                        }
+                        if (tube.pre & 1) == 0 && em > 0.28 {
+                            let du = 0.008 * em - 0.055 * tube.u[0];
+                            tube.apply_benna_fusi_impulse(du, 1.0);
+                        } else if (tube.pre & 1) != 0 && om > 0.28 {
+                            let du = 0.008 * om - 0.055 * tube.u[0];
+                            tube.apply_benna_fusi_impulse(du, 1.0);
+                        }
+                    }
+                }
+            }
+        }
+
         if (rng.next_u32() & 15) == 0 && self.alive_count > 32 {
             for idx in 0..self.slots.len() {
                 if !self.slots[idx].alive {
@@ -2329,6 +3099,7 @@ impl TubeGraph {
                     && t.u[0].abs() < 0.004
                     && t.stiff_strength() < 0.005
                     && t.usage_ema < 0.002
+                    && !(t.kind == TubeKind::CellToMotor && t.myelin_plasticity_accum > 0.14)
                 {
                     let pre = t.pre as usize;
                     self.slots[idx].alive = false;
@@ -2351,7 +3122,11 @@ impl TubeGraph {
             if !tube.alive {
                 continue;
             }
-            if tube.u[0].abs() >= 0.045 {
+            if tube.u[0].abs() >= 0.045
+                || (tube.kind == TubeKind::CellToMotor
+                    && tube.myelin_plasticity_accum > 0.24
+                    && tube.u[0].abs() >= 0.018)
+            {
                 tube.apply_benna_fusi_impulse(0.0, 4.0);
             } else if tube.stiff_strength() < 0.025 {
                 tube.u[0] = sanitize(tube.u[0] * 0.995);
@@ -2420,6 +3195,8 @@ impl TubeGraph {
         let mut stiff_motor_conf = vec![0.0_f32; num_actuators];
         let mut mastery_by_act = vec![0.0_f32; num_actuators];
         let mut mp_cond_by_act = vec![0.0_f32; num_actuators];
+        let mut pyr_env_sum = [0.0_f32; TRACKED_ACTUATORS];
+        let mut pyr_env_cnt = [0u16; TRACKED_ACTUATORS];
 
         for mp in &membrane.motor_pores {
             if mp.alive {
@@ -2460,6 +3237,11 @@ impl TubeGraph {
                 let act_ch = mp.actuator_channel as usize;
                 if act_ch >= num_actuators {
                     continue;
+                }
+                if act_ch < TRACKED_ACTUATORS {
+                    pyr_env_sum[act_ch] =
+                        sanitize(pyr_env_sum[act_ch] + sig.abs() * mp.conductance);
+                    pyr_env_cnt[act_ch] = pyr_env_cnt[act_ch].saturating_add(1);
                 }
                 let g = tube.effective_g(&cells.slots);
                 let contrib = sanitize(g * sig * mp.conductance);
@@ -3534,6 +4316,230 @@ impl TubeGraph {
             }
             model_grad[m] = sanitize_clamp(homeo_grad[m] + v_align[m], -1.5, 1.5);
         }
+        let mut glottal_urge_gain = 0.0_f32;
+        let mut glottal_listen_gain = 0.0_f32;
+        let mut glottal_syl_exp = false;
+        let mut glottal_syl_inhale = false;
+        let mut mg_urge_active: Option<usize> = None;
+        let mut mg_listen_active: Option<usize> = None;
+        let mut sated_listen_mode = false;
+        if num_actuators > 8
+            && mode == ControlMode::Natural
+            && body.rest_consolidation_ticks >= 480
+            && body.atp > 1.2
+            && acute_distress < 0.96
+            && ring_warm
+        {
+            let mut soft_coch_w_ro = [0.0_f32; TRACKED_ACTUATORS];
+            let mut soft_coch_cnt_ro = [0u16; TRACKED_ACTUATORS];
+            let mut sat_coch_cnt_ro = [0u16; TRACKED_ACTUATORS];
+            for p in 0..pore_cap {
+                let sp = &membrane.sensor_pores[p];
+                let ch_u = sp.channel as usize;
+                if !sp.alive
+                    || sp.age_ticks < 16
+                    || sp.trophic_ema < 0.025
+                    || ch_u >= n_scout
+                    || is_world_retina[p]
+                    || membrane.scout_stats[ch_u].is_sparse_impulse()
+                {
+                    continue;
+                }
+                if (-0.356..=-0.16).contains(&min_h_ro[p])
+                    && (-0.354..=0.10).contains(&self.pore_mean_v[p])
+                {
+                    let pw_bar = if self.pore_mean_v[p] >= -0.349 {
+                        0.0045
+                    } else {
+                        0.0120
+                    };
+                    for m in 0..act_cap {
+                        let pw = self.pore_action_w[m][p];
+                        if pw >= pw_bar {
+                            soft_coch_w_ro[m] += pw;
+                            soft_coch_cnt_ro[m] = soft_coch_cnt_ro[m].saturating_add(1);
+                        }
+                    }
+                } else if (min_h_ro[p] > -0.16 || self.pore_mean_v[p] > 0.10)
+                    && self.pore_mean_v[p] >= -0.354
+                {
+                    for m in 0..act_cap {
+                        if self.pore_action_w[m][p] >= 0.006 {
+                            sat_coch_cnt_ro[m] = sat_coch_cnt_ro[m].saturating_add(1);
+                        }
+                    }
+                }
+            }
+            let mut mg_urge_opt = m_glottal;
+            if mg_urge_opt.is_none() {
+                let mut best_my = 0.14_f32;
+                for m in 0..act_cap {
+                    if is_world_loco[m] {
+                        continue;
+                    }
+                    let sat_apnea = cells.alive_count < 150
+                        && mastery_by_act[m] >= 0.52
+                        && soft_coch_w_ro[m] < 0.008
+                        && sat_coch_cnt_ro[m] >= 2
+                        && (1..=6).all(|d| {
+                            ring.at_lag(d)
+                                .is_some_and(|e| e.committed && e.motor_out[m] > 0.05)
+                        });
+                    if soft_coch_w_ro[m] < 0.008 && !sat_apnea {
+                        continue;
+                    }
+                    let mut es = 0.0_f32;
+                    let mut ec = 0usize;
+                    let mut os = 0.0_f32;
+                    let mut oc = 0usize;
+                    for tube in &self.slots {
+                        if tube.alive
+                            && tube.kind == TubeKind::CellToMotor
+                            && membrane
+                                .motor_pores
+                                .get(tube.post as usize)
+                                .is_some_and(|mp| mp.alive && mp.actuator_channel as usize == m)
+                        {
+                            if (tube.pre & 1) == 0 {
+                                es += tube.myelin_plasticity_accum;
+                                ec += 1;
+                            } else {
+                                os += tube.myelin_plasticity_accum;
+                                oc += 1;
+                            }
+                        }
+                    }
+                    let em = if ec >= 3 { es / (ec as f32) } else { 0.0 };
+                    let om = if oc >= 3 { os / (oc as f32) } else { 0.0 };
+                    let pk = if sat_apnea {
+                        if em.max(om) >= 0.65 { em.max(om) } else { 0.0 }
+                    } else {
+                        em.max(om)
+                    };
+                    if pk > best_my {
+                        best_my = pk;
+                        mg_urge_opt = Some(m);
+                    }
+                }
+            }
+            if mg_urge_opt.is_none() {
+                let mut best_sw = 0.018_f32;
+                for m in 0..act_cap {
+                    if !is_world_loco[m]
+                        && (tot_pore_reaff[m] >= 0.020
+                            || max_asw_jac[m] >= 0.038
+                            || (soft_coch_cnt_ro[m] >= 4 && soft_coch_w_ro[m] >= 0.048))
+                        && soft_coch_cnt_ro[m] >= 2
+                        && soft_coch_w_ro[m] > best_sw
+                    {
+                        best_sw = soft_coch_w_ro[m];
+                        mg_urge_opt = Some(m);
+                    }
+                }
+            }
+            if let Some(mg_act) = mg_urge_opt {
+                let mut even_sum = 0.0_f32;
+                let mut even_cnt = 0usize;
+                let mut odd_sum = 0.0_f32;
+                let mut odd_cnt = 0usize;
+                for tube in &self.slots {
+                    if !tube.alive || tube.kind != TubeKind::CellToMotor {
+                        continue;
+                    }
+                    if membrane
+                        .motor_pores
+                        .get(tube.post as usize)
+                        .is_some_and(|mp| mp.alive && mp.actuator_channel as usize == mg_act)
+                    {
+                        if (tube.pre & 1) == 0 {
+                            even_sum += tube.myelin_plasticity_accum;
+                            even_cnt += 1;
+                        } else {
+                            odd_sum += tube.myelin_plasticity_accum;
+                            odd_cnt += 1;
+                        }
+                    }
+                }
+                let u_even_raw = if even_cnt > 0 {
+                    even_sum / (even_cnt as f32)
+                } else {
+                    0.0
+                };
+                let u_odd_raw = if odd_cnt > 0 {
+                    odd_sum / (odd_cnt as f32)
+                } else {
+                    0.0
+                };
+                let u_even = u_even_raw.max(0.0);
+                let u_odd = u_odd_raw.max(0.0);
+                let vocal_sensitive_ro = body.rest_consolidation_ticks < 9_000
+                    || u_even >= 0.72
+                    || (u_odd >= 0.72 && u_even_raw > -0.20);
+                let contingent_urge = if vocal_sensitive_ro {
+                    u_even.max(u_odd).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                glottal_urge_gain = ((contingent_urge - 0.28) / 0.28).clamp(0.0, 1.0);
+                if glottal_urge_gain >= 0.25 {
+                    mg_urge_active = Some(mg_act);
+                    let mut q_urge = [false; 17];
+                    q_urge[0] = true;
+                    for (d, ql) in q_urge.iter_mut().enumerate().skip(1) {
+                        *ql = ring
+                            .at_lag(d)
+                            .is_some_and(|e| !e.committed || e.motor_out[mg_act] <= -0.05);
+                    }
+                    let q_8_now = (1..=8).all(|d| q_urge[d]);
+                    let q_8_s1 = !q_urge[1] && (2..=9).all(|d| q_urge[d]);
+                    let q_8_s2 = !q_urge[1] && !q_urge[2] && (3..=10).all(|d| q_urge[d]);
+                    let q_8_s3 =
+                        !q_urge[1] && !q_urge[2] && !q_urge[3] && (4..=11).all(|d| q_urge[d]);
+                    glottal_syl_exp = q_8_now || q_8_s1 || q_8_s2 || q_8_s3;
+                    glottal_syl_inhale = !glottal_syl_exp;
+                    if glottal_syl_exp {
+                        let pyr_mean = if pyr_env_cnt[mg_act] > 0 {
+                            pyr_env_sum[mg_act] / (pyr_env_cnt[mg_act] as f32)
+                        } else {
+                            0.25
+                        };
+                        let corticobulbar_drive =
+                            glottal_urge_gain * (0.58 + 1.05 * pyr_mean.clamp(0.12, 0.75));
+                        tube_drive[mg_act] = sanitize(
+                            (tube_drive[mg_act] + corticobulbar_drive)
+                                .max(0.78 * glottal_urge_gain),
+                        );
+                    }
+                } else {
+                    let adult_pruned = (8 * num_actuators..150).contains(&cells.alive_count);
+                    let sated_adult_listen = adult_pruned
+                        && vocal_sensitive_ro
+                        && body.atp > 24.0
+                        && u_odd_raw <= -0.25
+                        && u_even_raw <= -0.22
+                        && soft_coch_cnt_ro[mg_act] >= 4;
+                    let dev_listen = cells.alive_count >= 152
+                        && vocal_sensitive_ro
+                        && soft_coch_cnt_ro[mg_act] >= 6
+                        && u_odd_raw <= -0.20
+                        && u_even_raw < 0.02;
+                    if (sated_adult_listen || dev_listen) && body.atp > 2.0 && acute_distress < 0.85
+                    {
+                        mg_listen_active = Some(mg_act);
+                        sated_listen_mode = sated_adult_listen;
+                        glottal_listen_gain = if sated_adult_listen {
+                            ((-u_odd_raw - 0.22) / 0.07).clamp(0.0, 1.0)
+                        } else {
+                            ((-u_odd_raw - 0.18) / 0.10).clamp(0.0, 1.0)
+                        };
+                        let listen_pull = if sated_adult_listen { 0.42 } else { 0.14 };
+                        tube_drive[mg_act] =
+                            sanitize(tube_drive[mg_act] - listen_pull * glottal_listen_gain);
+                    }
+                }
+            }
+        }
+
         let idle_ers_damp = 1.0 - 0.45 * ers;
         let mut has_survival_vec = vec![false; num_actuators];
         let mut is_glottal_vec = vec![false; num_actuators];
@@ -3542,9 +4548,14 @@ impl TubeGraph {
         let mut candidates: [Vec<f32>; 5] = std::array::from_fn(|_| vec![0.0_f32; num_actuators]);
         for m in 0..num_actuators {
             let is_loco_m = m < TRACKED_ACTUATORS && is_world_loco[m];
-            let is_glottal_act = Some(m) == m_glottal;
+            let is_glottal_act =
+                Some(m) == m_glottal || Some(m) == mg_urge_active || Some(m) == mg_listen_active;
+            let is_urge_glottal = Some(m) == mg_urge_active;
+            let is_urge_vocal = is_urge_glottal;
             is_glottal_vec[m] = is_glottal_act;
-            let is_echo_emitter = Some(m) == m_echo_emitter;
+            let is_echo_emitter = Some(m) != mg_urge_active
+                && Some(m) != mg_listen_active
+                && Some(m) == m_echo_emitter;
             let som_dom = somatic_prop_reaff[m].max(0.5 * self.somatic_limb_w[m]);
             let is_vocal_artic = m < TRACKED_ACTUATORS
                 && !is_loco_m
@@ -3590,9 +4601,24 @@ impl TubeGraph {
             let mg = model_grad[m] * vigor;
             let mastery = mastery_by_act[m];
             let stiff_c = stiff_motor_conf[m].min(1.0);
-            let babble_maturity = (1.0 - 0.35 * mastery) * (1.0 - 0.20 * stiff_c);
+            let urge_babble_atten = if is_urge_vocal && glottal_syl_exp {
+                1.0 - 0.75 * glottal_urge_gain
+            } else if is_vocal_artic && mg_urge_active.is_some() {
+                1.0 - 0.68 * glottal_urge_gain
+            } else if Some(m) == mg_listen_active {
+                1.0 - (if sated_listen_mode { 0.88 } else { 0.52 }) * glottal_listen_gain
+            } else {
+                1.0
+            };
+            let babble_maturity =
+                (1.0 - 0.35 * mastery) * (1.0 - 0.20 * stiff_c) * urge_babble_atten;
+            let ep_listen_atten = if Some(m) == mg_listen_active && sated_listen_mode {
+                1.0 - 0.85 * glottal_listen_gain
+            } else {
+                1.0
+            };
             let ep = if !has_survival_drive {
-                epistemic_drive[m] * idle_ers_damp * mod_scale
+                epistemic_drive[m] * idle_ers_damp * mod_scale * ep_listen_atten
             } else {
                 0.0
             };
@@ -3622,16 +4648,31 @@ impl TubeGraph {
                     + (0.65 * klino_gain_mean.abs().max(0.15) * pa) * mod_scale.min(1.15)
                     + 0.14 * local_ex_scale * ex,
             );
+            let td_c2 = if is_urge_vocal && glottal_syl_exp {
+                1.60 * td
+            } else {
+                0.95 * td
+            };
             candidates[2][m] =
-                smooth_saturate(2.25 * mg + 0.95 * td + ep + 0.28 * local_ex_scale * ex2);
-            candidates[3][m] = smooth_saturate(
+                smooth_saturate(2.25 * mg + td_c2 + ep + 0.28 * local_ex_scale * ex2);
+            let td_c3 = if is_urge_vocal && glottal_syl_exp {
+                1.55 * td
+            } else {
                 0.80 * td
+            };
+            let td_c4 = if is_urge_vocal && glottal_syl_exp {
+                1.50 * td
+            } else {
+                0.55 * td
+            };
+            candidates[3][m] = smooth_saturate(
+                td_c3
                     + 0.80 * mg
                     + ep
                     + (0.42 + 0.48 * ex_scale) * babble_maturity * idle_ers_damp * mod_scale * ex,
             );
             candidates[4][m] = smooth_saturate(
-                0.55 * td
+                td_c4
                     + 0.55 * mg
                     + 0.82 * ex_scale * babble_maturity * idle_ers_damp * mod_scale * ex2,
             );
@@ -3679,7 +4720,12 @@ impl TubeGraph {
                 act_energy += cand[m] * cand[m];
                 brake_pen += slow_inhib_brake[m] * cand[m].abs();
                 cont_dot += cand[m] * prev_act[m];
-                pred_val += (tube_pred_action_val[m] + 0.55 * v_align[m]) * cand[m];
+                let urge_exp_m = if is_glottal_vec[m] && glottal_syl_exp {
+                    0.085 * glottal_urge_gain
+                } else {
+                    0.0
+                };
+                pred_val += (tube_pred_action_val[m] + 0.55 * v_align[m] + urge_exp_m) * cand[m];
             }
 
             for &(c_idx, v_now, dv_now) in &sensory_cells {
@@ -3757,22 +4803,41 @@ impl TubeGraph {
                 } else {
                     has_recent_breath_14
                 };
+                let urge_inhale_m = Some(m) == mg_urge_active
+                    && mode == ControlMode::Natural
+                    && glottal_syl_inhale
+                    && acute_distress < 0.96;
+                let soft_inhale_m = urge_inhale_m;
                 let hb_inhale = is_glottal_vec[m]
                     && mode == ControlMode::Natural
-                    && !recent_breath_ok
-                    && acute_distress < 0.40;
+                    && ((!recent_breath_ok && acute_distress < 0.40) || soft_inhale_m);
                 let spindle_alpha = if emit_s > 0.05 || hb_inhale {
-                    0.92
+                    if soft_inhale_m && recent_breath_ok {
+                        0.94
+                    } else {
+                        0.92
+                    }
                 } else if ls > 0.05 && social_active {
                     0.93
                 } else if is_glottal_vec[m] {
-                    (0.86 - 0.18 * maturity).clamp(0.68, 0.86)
+                    if glottal_syl_exp && glottal_urge_gain >= 0.25 {
+                        0.88
+                    } else {
+                        (0.86 - 0.18 * maturity).clamp(0.68, 0.86)
+                    }
                 } else if has_survival_vec[m] || is_loco_m {
                     (0.92 - 0.30 * maturity).clamp(0.58, 0.92)
                 } else {
                     (0.95 - 0.80 * maturity).clamp(0.38, 0.95)
                 };
-                let raw_t = if emit_s > 0.05 {
+                let urge_open_artic = mg_urge_active.is_some()
+                    && m < TRACKED_ACTUATORS
+                    && !is_loco_m
+                    && !is_glottal_vec[m]
+                    && (self.vocal_artic_w[m] >= 0.004 || abs_cochlea_reaff[m] >= 0.008);
+                let raw_t = if urge_open_artic {
+                    smoothed[m] * (1.0 - 0.64 * glottal_urge_gain)
+                } else if emit_s > 0.05 {
                     let ping_bout = mode == ControlMode::Natural
                         && body.atp > 1.2
                         && quiet_echo_self
@@ -3783,7 +4848,20 @@ impl TubeGraph {
                         0.0
                     }
                 } else if hb_inhale {
-                    -0.38
+                    if soft_inhale_m && recent_breath_ok {
+                        -0.28
+                    } else {
+                        -0.38
+                    }
+                } else if Some(m) == mg_urge_active && glottal_syl_exp {
+                    smoothed[m].max(0.74 * glottal_urge_gain)
+                } else if Some(m) == mg_listen_active {
+                    if sated_listen_mode {
+                        smoothed[m] * (1.0 - 0.78 * glottal_listen_gain)
+                            - 0.24 * glottal_listen_gain
+                    } else {
+                        smoothed[m] - 0.12 * glottal_listen_gain
+                    }
                 } else if ls > 0.05 && social_active {
                     let base_s = smoothed[m] * (1.0 - 0.28 * ls * peer_present_gate);
                     let shunted = base_s * (1.0 - 0.96 * ls * recede_call);
