@@ -1,24 +1,26 @@
-# Alpha 11 (`v11.0.0`) — Zero-String Biophysical Self-Wiring Organism & 16 kHz Embodied Earth Ecology
+# Alpha 11 (`v11.1.0`) — Zero-String Biophysical Self-Wiring Organism & 16 kHz Embodied Earth Ecology
 
 > Repository: https://github.com/pro-aras/Alpha-11
 > License: MIT
 > Language & Dependencies: Rust 2024 (`rustc >= 1.85`), 0 external crates (100% Rust `std`), `unsafe_code = "forbid"`
 
 ## Summary
-Alpha 11 is an offline, zero-dependency Rust artificial-life and biocomputation workspace in which embodied cellular organisms (`Alpha11Organism`) start life with zero pre-named sensory organs, zero strings, and zero hardcoded domain rules. Across an unlabeled floating-point boundary (`FieldView` / `FieldPulse`), each organism buds and prunes a bounded `O(1)` frontier of sensory pores (`K <= 64`), grows multi-scale cortical cells (`tau` spanning 7.7 octaves) and polychronous `[1, 3, 6]` predictive delay tubes via `t-1` / `t-\Delta` efference-copy credit, resets stale slow-cell working memory via phasic Locus Coeruleus somatic surprise, consolidates stiff long-term tubes during adenosine-driven sleep bouts, and cohabits an unscripted `276`-channel, `17`-muscle `16 kHz` binaural Earth valley (`OpenSocialHabitat`) with an autonomous Companion `Elder` organism.
+Alpha 11 is an offline, zero-dependency Rust artificial-life and biocomputation workspace in which embodied cellular organisms (`Alpha11Organism`) start life with zero pre-named sensory organs, zero strings, and zero hardcoded domain rules. Across an unlabeled floating-point boundary (`FieldView` / `FieldPulse`), each organism buds and prunes a bounded `O(1)` frontier of sensory pores (`K <= 64`), grows multi-scale cortical cells (`tau` spanning 7.7 octaves) and polychronous `[1, 3, 6]` predictive delay tubes via `t-1` / `t-\Delta` efference-copy credit, stratifies continuous spatial fields into `4` monotonic retinal IPL contrast bands with `4`-slot orbitofrontal (`OFC`) context consolidation and developmental DMS-to-DLS model-based/habit arbitration (`StriatalOfc`, `12/12 PASS` across `dev`, `dev30`, and the single-use `heldout` vault), tracks dual-stream Rescorla vocal contingency (`teach2` `3/3 PASS`), maintains lifelong Charnov marginal-value energy allostasis (`500,000`-tick `energy` `5/5 PASS`), and cohabits an unscripted `276`-channel, `17`-muscle `16 kHz` binaural Earth valley (`OpenSocialHabitat`) with an autonomous Companion `Elder` organism.
 
 ## Workspace Crates
 - `crates/a11-medium`: Pure numeric `FieldView`, `FieldPulse`, `OrganismEngine`, and `WorldMedium` boundary traits (`0` strings, `0` unsafe, `0` unwrap).
-- `crates/a11-core`: Zero-string biophysical organism core (`Alpha11Organism` + `CausalCore`): `BodyCore` (`ATP`, temperature, adenosine sleep), `PoreMembrane` (`K <= 64` corollary-canceled sensory/motor pores), `CellArena` (`k-WTA`, mitosis, phasic NE network reset), `TubeGraph` (polychronous `[1, 3, 6]` delays, `lag = 5..=16` sequence learning, contradiction spine splits, myelination), and fail-closed `CRC32C` shadow-decoded persistence.
+- `crates/a11-core`: Zero-string biophysical organism core (`Alpha11Organism` + `CausalCore`): `BodyCore` (`ATP` allostasis, temperature, adenosine sleep), `PoreMembrane` (`K <= 64` corollary-canceled sensory/motor pores), `CellArena` (`k-WTA`, mitosis, phasic NE network reset), `TubeGraph` (polychronous `[1, 3, 6]` delays, `lag = 5..=16` sequence learning, dual-stream cortico-laryngeal contingency myelination, `StriatalOfc` 4-stratum IPL contrast + OFC context consolidation + DMS-DLS arbitration), and fail-closed `FORMAT_VERSION = 5` `CRC32C` shadow-decoded persistence.
 - `crates/a11-worlds`: Continuous physical wave worlds (`BrightRadiantWorld`, `PitchBlackEchoCave`, `AdaptiveCaveWorld`, `DenseFieldWorld4096`, `HarmonicWaveStream`) and `MultiGenTerrarium` (`16 kHz` binaural seasonal springs, opaque sight-blocking basalt canyon ridges with `0.68x` acoustic diffraction, solo & obligate two-organism heavy grove pods, pushable boulder anvils, thermal shelters, day/night cycles).
 - `crates/a11-portals`: Embodied organs (`DrawingScratchpad` tactile/visual hands, `BalanceCatchToy` vestibular limb, `PatternMemoryBoard`, `BinauralVocalOrgan` with ontogenetic `8.8 -> 14.5 cm` `16 kHz` `PhysicalVocalTract`, `YIN` `F0` + multi-syllable contour tracking, `32`-band `ErbCochlea32` + `LSO`), and crash-safe `LiveHostRunner`.
-- `crates/a11-observe`: Read-only scientific microscope (`alpha11-observe` & `alpha11-gates`), source-hygiene AST scanner, 6-control twin evaluator, and Holm-Bonferroni longitudinal/causal gates.
-- `crates/a11-live`: Continuous background habitat daemon (`a11-live`) with dual `organism.ckpt` + `elder.ckpt` persistence, `development_status.json`, and `16 kHz` `.wav` capture (`< 10 MB` RSS).
+- `crates/a11-observe`: Read-only scientific microscope (`alpha11-observe`, `alpha11-gates`, `alpha11-life`), source-hygiene AST scanner, 6-control twin evaluator, and Holm-Bonferroni longitudinal/causal/life gates.
+- `crates/a11-live`: Continuous background habitat daemon (`a11-live`) with dual `organism.ckpt` + `elder.ckpt` persistence, `development_status.json`, and `16 kHz` `.wav` capture (`~8.7–13.5 MiB` RSS).
 
 ## Key Commands
-- Test all invariants (`47` tests): `cargo test --release --workspace`
+- Test all invariants (`48` tests): `cargo test --release --workspace`
 - Build all binaries: `cargo build --release --workspace --bins`
 - Run forensic & twin self-check (Studies `0..6`): `./target/release/alpha11-observe self-check`
-- Run 12-seed whole-body developmental & `7/7` Holm gate campaign: `./target/release/alpha11-observe observe-development --seeds 12 --ticks 8000`
-- Run locked `DEV-30` causal benchmark & ablations: `./target/release/alpha11-gates causal dev30`
+- Run 12-seed whole-body developmental campaign (`8/10` longitudinal gates PASS): `./target/release/alpha11-observe observe-development --seeds 12 --ticks 8000`
+- Run locked `12/12` causal benchmark (`dev` `n=10`, `dev30` `n=30`): `./target/release/alpha11-gates alpha11 dev30`
+- Run 500k-tick lifelong energy homeostasis judge (`5/5` PASS): `./target/release/alpha11-life energy --seeds 10 --ticks 500000`
+- Run 40k-tick contingent vocal turn-taking judge (`3/3` PASS): `./target/release/alpha11-life teach2 --seeds 10 --ticks 40000`
 - Run continuous live embodied valley (`50 Hz` real time): `./target/release/a11-live --state-dir live/state/open --habitat open --steps 0 --pace-ms 20`

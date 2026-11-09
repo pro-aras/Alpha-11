@@ -20,7 +20,7 @@ jobs:
       - name: Build release workspace and binaries
         run: cargo build --release --workspace --bins
 
-      - name: Run all 47 release unit & invariant tests
+      - name: Run all 48 release unit & invariant tests
         run: cargo test --release --workspace
 
       - name: Run Study 0..6 forensic hygiene, persistence, plasticity & O(1) latency self-check

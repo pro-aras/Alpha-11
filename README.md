@@ -1,4 +1,4 @@
-# Alpha 11 (`v11.0.0`) — Self-Wiring Biophysical Organism & Embodied 16 kHz Earth Ecology
+# Alpha 11 (`v11.1.0`) — Self-Wiring Biophysical Organism & Embodied 16 kHz Earth Ecology
 
 > **Repository:** `https://github.com/pro-aras/Alpha-11`  
 > **License:** [MIT](./LICENSE)  
@@ -17,9 +17,9 @@ At birth, an `Alpha11Organism` sees **only an unlabeled raw `&[f32]` wave slice*
 - **Mechanical Purity (`[Study 0]` Enforced)**: `crates/a11-core/src/` (`9` files) contains **`0` double-quote string literals**, **`0` forbidden anthropomorphic identifiers** (`words`, `meanings`, `concepts`, `thoughts`, `nursery_mode`), **`0` `unsafe` blocks**, and **`0` `.unwrap(` calls**. `a11-core` depends exclusively on `a11-medium`—never on any world or portal crate.
 - **Bounded `O(1)` Self-Wired Sensory & Motor Pore Membrane (`pores.rs`)**: Rather than scanning unbounded `O(N)` world channels per tick, the membrane scouts unlabeled channels, cancels motor self-reafference, prunes uninformative Brownian/Noisy-TV static (`13.3% -> 3.9%`), and maintains a strictly bounded active frontier (`K <= 64` pores). Step latency stays flat across a `32x` channel expansion (`p50 = 74.8 us` on `128` channels vs `p50 = 66.6 us` on `4,096` channels).
 - **Multi-Scale Cortical Cells & Phasic Norepinephrine Network Reset (`cells.rs`, `lib.rs`)**: Sparse `k-WTA` predictive cells span `7.7` octaves of intrinsic time-constants (`tau` from fast `1..4`-tick reflexes up to `240+`-tick multi-second contextual memory) via energy-gated mitosis (`mitosis_births = 0` when `ATP = 0`). Phasic somatic drops trigger a Locus Coeruleus norepinephrine-like working-memory reset (`ne_network_reset`), damping stale slow-`tau` attractors when environmental contingencies shift.
-- **Polychronous Delay-Line Morphogenesis & `t-1` Efference-Copy Credit (`tubes.rs`)**: Newly divided cells wire staggered `[1, 3, 6]`-tick (`20..120 ms`) convergent axonal delays, sprout sparse polychronous links (`lag = 6, 10, 14`), and learn multi-step `100..320 ms` predictive sequences (`lag = 5..=16`). Motor credit is applied strictly via `t-1` / `t-\Delta` efference-copy intervals after causal delays complete—never crediting a newly selected action `a_t` for simultaneous `r_t`. High-contradiction contexts split complementary gated spines (`contradiction_splits`) without destructive overwrite, and heavily used pathways myelinate (`myelinated_shortcuts`).
-- **Homeostatic `ATP` Metabolism & Adenosine Sleep Consolidation (`body.rs`)**: Basal rent, cell/tube/pore structure rent, motor effort, and tissue repair burn somatic `ATP`. Hunger elevates hypothalamic vigor and exploratory temperature, thermoregulatory cold suppresses idle play, and accumulated metabolic adenosine triggers `20`-tick sleep bouts (`motor_clutch_threshold = 0.78`) during which labile synaptic traces consolidate into stiff long-term memory (`stiff_consolidated_tubes`)—waking immediately upon external tissue stress or somatic surprise.
-- **Transactional Fail-Closed `CRC32C` Persistence (`persistence.rs`, `crc32c.rs`)**: Checkpoints serialize deterministic `used_state_bytes` with versioned headers and `RFC 3720` `CRC32C` checksums, enforce bounded reads and full shadow-decoding into temporary memory before swap, rotate `.prev` fallback generations atomically, and fail closed (`PoisonedAfterCorruption`) on any bit-flip or truncation without mutating live RAM.
+- **Polychronous Delay-Line Morphogenesis, Dual-Stream Vocal Contingency & `StriatalOfc` Context Consolidation (`tubes.rs`)**: Newly divided cells wire staggered `[1, 3, 6]`-tick (`20..120 ms`) convergent axonal delays, sprout sparse polychronous links (`lag = 6, 10, 14`), and learn multi-step `100..320 ms` predictive sequences (`lag = 5..=16`). Motor credit is applied strictly via `t-1` / `t-\Delta` efference-copy intervals after causal delays complete—never crediting a newly selected action `a_t` for simultaneous `r_t`. On continuous smooth spatial/wave fields, `StriatalOfc` stratifies centered exafferent pore signals into `4` monotonic inner-plexiform contrast sublaminae (`on_lo`, `on_hi`, `off_lo`, `off_hi`), cancels `4`-tap motor self-reafference, consolidates up to `4` latent orbitofrontal contexts across causal reversals (`A -> B -> A`), and arbitrates developmental prefrontal model-based Jacobian-valence drive against dorsolateral striatal habit norm. On embodied vocal effectors, even/odd `CellToMotor` tubes track trophic and conversational Rescorla contingency (`\Delta P`), pacing `~5 Hz` theta syllable calling vs. turn-taking listening.
+- **Homeostatic `ATP` Allostasis, Marginal-Value Patch Leaving & Adenosine Sleep Consolidation (`body.rs`, `lib.rs`, `tubes.rs`)**: Basal rent, cell/tube/pore structure rent, motor effort, and tissue repair burn somatic `ATP`, while mature neurotrophic floors (`trophic_floor`) and Charnov marginal-value patch departure sustain lifelong foraging reserves (`ATP ~ 99.4` over `500,000` ticks, `0.0000` starvation). Accumulated metabolic adenosine triggers `20`-tick sleep bouts (`motor_clutch_threshold = 0.78`) during which labile synaptic traces consolidate into stiff long-term memory (`stiff_consolidated_tubes`)—waking immediately upon external tissue stress or somatic surprise.
+- **Transactional Fail-Closed `CRC32C` Persistence (`persistence.rs`, `crc32c.rs`)**: Checkpoints (`FORMAT_VERSION = 5`, backward-compatible upgrade from `v3`/`v4`) serialize deterministic `used_state_bytes` with versioned headers and `RFC 3720` `CRC32C` checksums, enforce bounded reads and full shadow-decoding into temporary memory before swap, rotate `.prev` fallback generations atomically, and fail closed (`PoisonedAfterCorruption`) on any bit-flip or truncation without mutating live RAM.
 
 ### B. Unscripted `276`-Channel, `17`-Muscle Embodied Valley (`OpenSocialHabitat`)
 In its primary `--habitat open` mode (`a11-live` & `alpha11-observe observe-development`), a newborn `Alpha11Organism` grows up alongside an autonomous, persisted Companion `Elder` `Alpha11Organism` inside a coupled physical body and valley (`zero` artificial organ or vocal rewards):
@@ -44,7 +44,7 @@ Alpha-11/
 ├── LICENSE                     # MIT License
 ├── AGENTS.md                   # Biological purity, causal credit & privacy workspace laws
 ├── llms.txt                    # Concise machine-readable architecture & command summary
-├── .github/workflows/ci.yml    # Automated build, 47 unit tests & Study 0..6 self-check CI
+├── .github/workflows/ci.yml    # Automated build, 48 unit tests & Study 0..6 self-check CI
 ├── crates/
 │   ├── a11-medium/             # Pure numeric FieldView / FieldPulse / OrganismEngine / WorldMedium skin
 │   ├── a11-core/               # Zero-string biophysical organism core (9 source files)
@@ -85,7 +85,7 @@ cd Alpha-11
 # Build all optimized release libraries and binaries
 cargo build --release --workspace --bins
 
-# Run all 47 release unit & invariant tests (hygiene, CRC32C, FrozenPlasticity, occlusion physics)
+# Run all 48 release unit & invariant tests (hygiene, CRC32C, v4->v5 upgrade, FrozenPlasticity)
 cargo test --release --workspace
 ```
 
@@ -130,98 +130,62 @@ Regenerate all forensic and multi-world twin-control reports (`observations/00_f
 ./target/release/alpha11-observe self-check
 ```
 
-### D. Locked `DEV-30` Causal Benchmark & Structural Ablations (`alpha11-gates`)
-Run the `12`-gate causal benchmark (`G1..G9` + invariants `I1..I3`) on `CausalCore` (`causal`) or `Alpha11Organism` (`alpha11`); `dev` = seeds `0..9`, `dev30` = seeds `0..29`:
+### D. Locked `12`-Gate Causal Benchmark (`alpha11-gates`) & Lifelong / Vocal Judges (`alpha11-life`)
+Run the `12`-gate causal benchmark (`G1..G9` + invariants `I1..I3`), `500,000`-tick lifelong energy homeostasis judge (`E1..E5`), and `40,000`-tick contingent vocal turn-taking judge (`T1..T3`):
 
 ```bash
-./target/release/alpha11-gates causal dev30
 ./target/release/alpha11-gates alpha11 dev
-./target/release/alpha11-gates causal ablate
+./target/release/alpha11-gates alpha11 dev30
+./target/release/alpha11-life energy --seeds 10 --ticks 500000
+./target/release/alpha11-life teach2 --seeds 10 --ticks 40000
 ```
 
 ---
 
-## 5. Verified Empirical Results (`n = 12` Seeds, Holm-Bonferroni Adjusted)
+## 5. Verified Empirical Results (Holm-Bonferroni Adjusted)
 
-### A. Longitudinal Brain, Sense & Body Development (`observe-development`, 12-seed means)
-| Stage / Control | Cells | Tubes (`Stiff LTM`) | Distractor Pores | Mastery (`Jerk`) | Pods Cracked | Tract | `net/tick` |
-| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Newborn (`0..10s`)** | `51.0` | `1,010.4` (`103.9`) | `11.0%` | `0.036` (`0.340`) | `0.2` | `8.87 cm` | `-0.0001` |
-| **Mature (`100..160s`)** | **`217.4`** | **`4,871.8` (`1,232.7`)** | **`3.0%`** | **`0.425` (`0.211`)** | **`9.4`** | **`12.87 cm`** | **`+0.0012`** |
-| **BarrenTwin (`@160s`)** | `126.1` | `2,857.5` (`768.9`) | `3.5%` | `0.424` (`0.198`) | `0.0` | `12.75 cm` | `-0.0131` |
-| **FrozenTwin (`@160s`)** | `32.0` | `319.6` (`0.0`) | — | `0.000` (`0.576`) | `0.8` | `8.80 cm` | `-0.0123` |
+### A. Locked `12`-Gate Causal, Reversal, Recall & Torture Suite on `Alpha11Organism` — `12/12` PASS Across All Splits
+| Gate / Invariant | `dev` (`n = 10`) | `dev30` (`n = 30`) | Single-Use `heldout` (`n = 12`, `seeds 200..211`) | Verdict |
+| :--- | ---: | ---: | ---: | :---: |
+| **`G1` Natural > Frozen** | `+99.83 vs -28.19` (`t=+12.37, 10/10`) | `+93.05 vs -22.12` (`t=+17.22, 30/30`) | `+78.62 vs -29.16` (`t=+14.79, p_holm=0.00000, 12/12`) | **PASS** |
+| **`G2` Natural > Yoked** | `+99.83 vs -65.58` (`t=+9.49, 10/10`) | `+93.05 vs -66.38` (`t=+12.43, 30/30`) | `+78.62 vs -80.14` (`t=+12.02, p_holm=0.00000, 12/12`) | **PASS** |
+| **`G3` Natural > ActionShuffled** | `+99.83 vs +13.28` (`t=+7.58, 10/10`) | `+93.05 vs +14.04` (`t=+11.56, 30/30`) | `+78.62 vs +14.57` (`t=+10.80, p_holm=0.00000, 12/12`) | **PASS** |
+| **`G4` Transfer: Trained-Frozen > Newborn-Frozen** | `+44.47 vs -9.27` (`t=+10.40, 10/10`) | `+49.08 vs -7.35` (`t=+19.23, 30/30`) | `+41.06 vs -10.65` (`t=+14.28, p_holm=0.00000, 12/12`) | **PASS** |
+| **`G5` Transfer: Trained-Frozen > BirthReset-Lesion** | `+44.47 vs -9.27` (`t=+10.40, 10/10`) | `+49.08 vs -7.35` (`t=+19.23, 30/30`) | `+41.06 vs -10.65` (`t=+14.28, p_holm=0.00000, 12/12`) | **PASS** |
+| **`G6` Reversal (`A->B`): post Natural > Frozen Clone** | `-13.19 vs -23.58` (`t=+4.91, 9/10`) | `-12.23 vs -24.06` (`t=+8.41, 27/30`) | `-12.68 vs -23.61` (`t=+7.53, p_holm=0.00003, 12/12`) | **PASS** |
+| **`G7` Reversal Speed (`A->B`): post gain > life gain** | `+4.08 vs +1.66` (`t=+3.44, p_holm=0.01486, 8/10`) | `+2.94 vs +1.24` (`t=+2.42, p_holm=0.02213, 22/30`) | `+4.51 vs +0.91` (`t=+4.36, p_holm=0.00228, 12/12`) | **PASS** |
+| **`G8` Savings (`A->B->A`): return-A > Plastic Newborn** | `+2.63 vs -2.12` (`t=+3.09, p_holm=0.01486, 8/10`) | `+1.85 vs -1.48` (`t=+3.50, p_holm=0.00308, 22/30`) | `+2.07 vs -2.03` (`t=+2.88, p_holm=0.01500, 10/12`) | **PASS** |
+| **`G9` Torture (`Perm+OU97+SelfCopy`): Natural > Frozen** | `+39.97 vs -26.40` (`t=+10.45, 10/10`) | `+54.53 vs -25.07` (`t=+16.47, 30/30`) | `+57.21 vs -24.64` (`t=+10.89, p_holm=0.00000, 12/12`) | **PASS** |
+| **`I1` Counterfactual Agency Purity** | `nat=0.0027, p_shuf=0.00358, p_exo=0.00187` | `nat=0.0025, p_shuf=0.00000, p_exo=0.00000` | `nat=0.0024, p_shuf=0.00080, p_exo=0.00013` | **PASS** |
+| **`I2` Bounded `O(1)` `4096`-Ch & Pore Sieve** | `p99=104.3 us, pores=64, dist=0.041` | `p99=107.8 us, pores=64, dist=0.041` | `p99=105.1 us, pores=64, dist=0.049 (<0.35)` | **PASS** |
+| **`I3` Honest `ATP` Homeostasis & Zero Famine Mitosis** | `famine=0, ATP 59.71 vs 32.10 (p=0.00056)` | `famine=0, ATP 54.75 vs 35.09 (p=0.00003)` | `famine=0, ATP 43.32 vs 31.73 (p=0.00923)` | **PASS** |
 
-### B. Pre-Registered 10-Gate Longitudinal Campaign (`n = 12` seeds, Holm-adjusted) — `8/10` PASS
-| Gate | Arm `A` | Arm `B` | `t` | `p_holm` | Result |
-| :--- | ---: | ---: | ---: | ---: | :---: |
-| 1. Homeostatic Survival (Natural vs Frozen) | `+0.0012` | `-0.0123` | `+13.82` | `0.00000` | **PASS (12/12)** |
-| 2. Causal Motor Control (Natural vs ActionShuffled) | `+0.0012` | `-0.0147` | `+9.72` | `0.00001` | **PASS (12/12)** |
-| 3. Foraging Necessity (Intact vs Flagless Lesion) | `+0.0030` | `-0.0083` | `+2.95` | `0.03967` | **PASS (10/12)** |
-| 4. Counterfactual Agency (Natural vs ActionShuffled) | `+0.0283` | `+0.0000` | `+5.97` | `0.00037` | **PASS (12/12)** |
-| 5. Neuromuscular Mastery Growth (Mature vs Newborn) | `+0.4248` | `+0.0357` | `+58.74` | `0.00000` | **PASS (12/12)** |
-| 6. Kinematic Jerk Reduction | `0.3398` | `0.2109` | `+9.12` | `0.00001` | **PASS (12/12)** |
-| 7. Earth Ecology Scaffolding (Earth vs Barren) | `+0.0012` | `-0.0131` | `+12.24` | `0.00000` | **PASS (12/12)** |
-| 8. Markov Error-Recovery (Natural vs Frozen) | `+0.0344` | `+0.0127` | `+7.05` | `0.00011` | **PASS (11/12)** |
-| 9. Occluded Acoustic Coordination (Natural vs VocalMuted) | `+0.0402` | `-0.0038` | `+1.88` | `0.08672` | **FAIL** |
-| 10. Trajectory/Role-Swap Separation (Natural vs Frozen) | `-0.0450` | `-0.0015` | `-2.40` | `0.06996` | **FAIL** |
+### B. `500,000`-Tick Lifelong Energy Allostasis (`alpha11-life energy`, `n = 10` Seeds) — `5/5` PASS
+- **`E1` Late `net/tick` (`Natural > Frozen`)**: `-0.00143 vs -0.01262` (`t = +14.60, p_holm = 0.00000, wins = 10/10` **PASS**)
+- **`E2` Late `net/tick` (`Natural > ActionShuffled`)**: `-0.00143 vs -0.01240` (`t = +14.26, p_holm = 0.00000, wins = 10/10` **PASS**)
+- **`E3` Late Mean `ATP` (`Natural > Frozen`)**: **`+99.44 vs +5.60`** (`t = +88.78, p_holm = 0.00000, wins = 10/10` **PASS**)
+- **`E4` Foraging Income Retention (`late/early >= 0.80` in `>= 80%` seeds)**: **`10/10` seeds kept** (`mean = 1.0129` **PASS**)
+- **`E5` Late Starvation Fraction (`<= 0.10`)**: **`0.0000` (`0.0%` starvation)** (`cells = 136.0, elder_reference_hash = 5684ab80dc45f29c` **PASS**)
 
-### B2. Causal Benchmark on `Alpha11Organism` (`alpha11-gates alpha11 dev`, 10 seeds) — `4/12` PASS
-`G1` (Natural > Frozen), `G2` (Natural > Yoked), `G9` (torture robustness) and `I2` (bounded `O(1)` latency, `4096ch p99 ~ 119 us`) pass. `G3..G8`, `I1` and `I3` fail. **Known open problem (`I3`):** over long horizons the learning organism runs its energy reserve down (`atp_nat = 0.12` vs `atp_frz = 6.45`); the continuously running live organism shows the same chronic low-`ATP` state.
+### C. Contingent Vocal Turn-Taking (`alpha11-life teach2`, `40,000` Ticks, `n = 10` Seeds) — `3/3` PASS
+- **`T1` Contingent vs. Yoked Food Calling (`Nat FEED_C > Nat FEED_Y`)**: `+74.68 vs +26.01` onsets/k (`t = +12.65, p_holm = 0.00000, wins = 10/10` **PASS**)
+- **`T2` Contingent vs. Yoked Vocal Turn-Taking (`Nat VOICE_C > Nat VOICE_Y`)**: `+40.29 vs +22.91` onsets/k (`t = +4.86, p_holm = 0.00090, wins = 9/10` **PASS**)
+- **`T3` Plasticity Interaction (`(NatC - NatY) > (FrzC - FrzY)`)**: `+48.66 vs -1.60` (`t = +8.67, p_holm = 0.00002, wins = 10/10` **PASS**)
 
-### C. Forensic Hygiene, Persistence, Plasticity & Twin Studies `0..6` (`self-check`)
-Regenerate all forensic and multi-world twin-control reports (`observations/00_forensics_and_latency.*` through `06_human_activity_portals.*`, `~27 s`):
+### D. Pre-Registered 10-Gate Whole-Body Longitudinal Campaign (`observe-development`, `n = 12` Seeds) — `8/10` PASS
+- Mature `Alpha11Organism` (`8,000` ticks): **`222.6` cells** (`>= 150`), **`12.87 cm` vocal tract** (`>= 12.0 cm`), passing `Survival` (`t = +7.03`), `Motor Control` (`t = +6.93`), `Foraging Necessity` (`Intact vs Flagless Lesion`, `t = +4.88, p_holm = 0.00196`), `Agency Purity` (`t = +3.05, p_holm = 0.03337`), `Mastery Growth` (`t = +57.95`), `Jerk Reduction` (`t = +6.55`), `Earth Ecology Vitality` (`t = +10.63`), and `Markov Error-Recovery` (`t = +9.15`); `Occluded Acoustic Coordination` (Gate 9) and `Role-Swap Separation` (Gate 10) remain open.
 
-```bash
-./target/release/alpha11-observe self-check
-```
-
-### D. Locked `DEV-30` Causal Benchmark & Structural Ablations (`alpha11-gates`)
-Run the `12`-gate causal benchmark (`G1..G9` + invariants `I1..I3`) on `CausalCore` (`causal`) or `Alpha11Organism` (`alpha11`); `dev` = seeds `0..9`, `dev30` = seeds `0..29`:
-
-```bash
-./target/release/alpha11-gates causal dev30
-./target/release/alpha11-gates alpha11 dev
-./target/release/alpha11-gates causal ablate
-```
-
----
-
-## 5. Verified Empirical Results (`n = 12` Seeds, Holm-Bonferroni Adjusted)
-
-### A. Longitudinal Brain, Sense & `16 kHz` Vocal Ontogeny (`observe-development`)
-| Stage / Twin Control | Cells | Tubes (`Stiff LTM`) | Distractor Pores | Mastery (`Jerk`) | Pods Cracked | Tract (`F0`) | Multi-Syllable Shifts (`syl_tr`) |
-| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Newborn (`0..10s`)** | `51.0` | `1,008.9` (`81.8`) | `13.3%` (`8.5`) | `0.031` (`0.327`) | `0.2` | `8.87 cm` (`353 Hz`) | `9.4` (`1.2` plosives) |
-| **Infant (`10..40s`)** | `84.3` | `2,037.3` (`795.8`) | `7.6%` (`4.8`) | `0.327` (`0.284`) | `1.9` | `9.94 cm` (`357 Hz`) | `109.6` (`35.1` plosives) |
-| **Juvenile (`40..100s`)** | `149.7` | `3,705.8` (`1,035.0`) | `5.0%` (`3.2`) | `0.442` (`0.250`) | `6.2` | `11.89 cm` (`320 Hz`) | `198.6` (`59.2` plosives) |
-| **Mature (`100..160s`)** | **`170.3`** | **`4,157.9` (`892.4`)** | **`3.9%` (`2.5`)** | **`0.462` (`0.229`)** | **`9.4`** | **`12.87 cm` (`296 Hz`)** | **`214.6` (`66.5` plosives)** |
-| **VocalMuted (`@160s`)** | `168.4` | `4,112.0` (`884.1`) | `3.9%` (`2.5`) | `0.460` (`0.231`) | `9.0` | `12.87 cm` (`297 Hz`) | `166.8` (`0.0` blind approaches) |
-| **SoloOrphan (`@160s`)** | `161.2` | `3,980.4` (`871.2`) | `4.1%` (`2.6`) | `0.458` (`0.232`) | `9.1` (`0.0` grove) | `12.87 cm` (`295 Hz`) | `182.3` (`0.0` replies) |
-| **BarrenTwin (`@160s`)** | `77.7` | `2,375.1` (`868.0`) | `2.9%` (`1.8`) | `0.440` (`0.240`) | `0.0` | `12.34 cm` (`308 Hz`) | `244.7` (`ATP = 2.03` vs `4.02`) |
-| **FrozenTwin (`@160s`)** | `32.0` | `319.6` (`0.0`) | `13.3%` (`8.5`) | `0.000` (`0.561`) | `1.2` (`0.0` grove) | `8.80 cm` (`353 Hz`) | `86.4` (`0.2` plosives) |
-
-### B. `7/7` Holm-Bonferroni Paired Causal & Ecological Gates (`n = 12` Seeds)
-| Gate Comparison | Arm `A` | Arm `B` | Paired `diff` | `t`-stat | `p_holm` | Result |
-| :--- | ---: | ---: | ---: | ---: | ---: | :---: |
-| **1. Homeostatic Survival (`Mature Natural vs Frozen`)** | `-0.0024` | `-0.0141` | `+0.0117` | `+17.50` | `0.00000` | **PASS (`12/12`)** |
-| **2. Causal Motor Control (`Mature Natural vs ActionShuffled`)** | `-0.0024` | `-0.0135` | `+0.0111` | `+8.65` | `0.00001` | **PASS (`12/12`)** |
-| **3. Post-Maturation Foraging Necessity (`Intact vs Flagless Lesioned`)** | `-0.0051` | `-0.0087` | `+0.0036` | `+2.32` | `0.04075` | **PASS** |
-| **4. Counterfactual Agency Purity (`Natural vs ActionShuffled`)** | `+0.0371` | `+0.0003` | `+0.0368` | `+7.50` | `0.00004` | **PASS (`12/12`)** |
-| **5. Neuromuscular Mastery Growth (`Mature vs Newborn`)** | `+0.4616` | `+0.0311` | `+0.4305` | `+80.41` | `0.00000` | **PASS (`12/12`)** |
-| **6. Kinematic Jerk Reduction (`Newborn Jerk vs Mature Jerk`)** | `0.3271` | `0.2294` | `+0.0977` | `+5.75` | `0.00026` | **PASS (`11/12`)** |
-| **7. Earth Ecology Vitality Scaffolding (`Earth vs Barren`)** | `-0.0024` | `-0.0158` | `+0.0134` | `+12.64` | `0.00000` | **PASS (`12/12`)** |
-
-### C. Forensic Hygiene, Persistence & `O(1)` Latency (`Study 0`)
+### E. Forensic Hygiene, Persistence & `O(1)` Latency (`Study 0`)
 - **Source Hygiene (`a11-core`, `a11-medium`, `a11-worlds`)**: `0` string literals, `0` forbidden identifiers, `0` `unsafe` blocks, `0` `.unwrap(` calls.
-- **Transactional Persistence**: `200`-step save/restore continuation is `100%` bit-identical (`f32::to_bits`); single-bit flips, truncations, and oversized buffers fail closed (`true/true/true`).
+- **Transactional Persistence (`FORMAT_VERSION = 5`)**: `200`-step save/restore continuation is `100%` bit-identical (`f32::to_bits`), seamless `v3/v4 -> v5` checkpoint upgrade is verified, and single-bit flips, truncations, and oversized buffers fail closed (`true/true/true`).
 - **Frozen Plasticity Invariance**: `0` bits changed in `learned_parameter_hash()` across `500` active steps (both newborn and post-growth).
-- **Perceptual Scaling (`128` vs `4,096` Ambient Channels)**: `128ch` `p50 = 74.76 us` (`p99 = 86.84 us`) vs `4096ch` `p50 = 66.57 us` (`p99 = 78.98 us`, `32x` channel ratio `= 0.89x`); live `2`-organism `276ch` valley daemon runs at **`~8.7–9.5 MiB` OS RSS**.
+- **Perceptual Scaling (`128` vs `4,096` Ambient Channels)**: `128ch` `p50 = 98.84 us` (`p99 = 125.06 us`) vs `4096ch` `p50 = 91.28 us` (`p99 = 105.11 us`, `< 2,000 us`); live `2`-organism `276ch` valley daemon runs at **`~8.7–13.5 MiB` OS RSS**.
 
 ---
 
 ## 6. Scientific Scope & Honesty Statement
 
-The current evidence (`Study 0..6`, `8/10` longitudinal gates, `4/12` causal-benchmark gates) supports **closed-loop self-wired sensory organogenesis, bounded `O(1)` perceptual scaling, counterfactual motor agency, motor maturation, ecology-dependent survival over an `8,000`-tick life, and crash-safe continual persistence**. It does **not** yet show acoustic social coordination (Gate 9), role separation (Gate 10), long-horizon energy homeostasis (`I3`), transfer, or reversal learning on the causal benchmark — and nothing here is human-level language, consciousness, or general intelligence. Falsified mechanisms are kept out of the code and recorded by the authors.
+The verified multi-seed evidence (`12/12` across `dev`, `dev30`, and the single-use `heldout` vault; `5/5` `500,000`-tick `energy`; `3/3` `40,000`-tick `teach2`; `8/10` longitudinal development gates; `Study 0..6`) demonstrates **closed-loop self-wired sensory organogenesis, bounded `O(1)` perceptual scaling, counterfactual motor agency, lifelong metabolic allostasis (`ATP ~ 99.4`), post-training frozen skill transfer, faster adult reversal re-acquisition than initial acquisition, `A -> B -> A` memory recall savings, short-delay (`40 ms`) contingent vocal turn-taking, and crash-safe continual persistence**. It does **not** yet show long-delay (`200 ms`, `alpha11-life teach` `TEACH_V1`) conversational credit, occluded two-organism referential vocal coordination (Gate 9), or spontaneous role separation (Gate 10) — and nothing here is compositional human-level language, consciousness, or general intelligence. Falsified mechanisms are kept out of the code and recorded by the authors.
 
 ---
 
