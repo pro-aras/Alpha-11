@@ -131,12 +131,13 @@ Regenerate all forensic and multi-world twin-control reports (`observations/00_f
 ```
 
 ### D. Locked `12`-Gate Causal Benchmark (`alpha11-gates`) & Lifelong / Vocal Judges (`alpha11-life`)
-Run the `12`-gate causal benchmark (`G1..G9` + invariants `I1..I3`), `500,000`-tick lifelong energy homeostasis judge (`E1..E5`), and `40,000`-tick contingent vocal turn-taking judge (`T1..T3`):
+Run the `12`-gate causal benchmark (`G1..G9` + invariants `I1..I3`), `500,000`-tick lifelong energy homeostasis judge (`E1..E5`), and `40,000`-tick contingent vocal turn-taking judges (`teach` at `200 ms` delay and `teach2` at `40 ms` delay, `T1..T3`):
 
 ```bash
 ./target/release/alpha11-gates alpha11 dev
 ./target/release/alpha11-gates alpha11 dev30
 ./target/release/alpha11-life energy --seeds 10 --ticks 500000
+./target/release/alpha11-life teach --seeds 10 --ticks 40000
 ./target/release/alpha11-life teach2 --seeds 10 --ticks 40000
 ```
 
@@ -161,16 +162,22 @@ Run the `12`-gate causal benchmark (`G1..G9` + invariants `I1..I3`), `500,000`-t
 | **`I3` Honest `ATP` Homeostasis & Zero Famine Mitosis** | `famine=0, ATP 59.71 vs 32.10 (p=0.00056)` | `famine=0, ATP 54.75 vs 35.09 (p=0.00003)` | `famine=0, ATP 43.32 vs 31.73 (p=0.00923)` | **PASS** |
 
 ### B. `500,000`-Tick Lifelong Energy Allostasis (`alpha11-life energy`, `n = 10` Seeds) — `5/5` PASS
-- **`E1` Late `net/tick` (`Natural > Frozen`)**: `-0.00143 vs -0.01262` (`t = +14.60, p_holm = 0.00000, wins = 10/10` **PASS**)
-- **`E2` Late `net/tick` (`Natural > ActionShuffled`)**: `-0.00143 vs -0.01240` (`t = +14.26, p_holm = 0.00000, wins = 10/10` **PASS**)
-- **`E3` Late Mean `ATP` (`Natural > Frozen`)**: **`+99.44 vs +5.60`** (`t = +88.78, p_holm = 0.00000, wins = 10/10` **PASS**)
-- **`E4` Foraging Income Retention (`late/early >= 0.80` in `>= 80%` seeds)**: **`10/10` seeds kept** (`mean = 1.0129` **PASS**)
+- **`E1` Late `net/tick` (`Natural > Frozen`)**: `-0.00159 vs -0.01262` (`t = +15.00, p_holm = 0.00000, wins = 10/10` **PASS**)
+- **`E2` Late `net/tick` (`Natural > ActionShuffled`)**: `-0.00159 vs -0.01240` (`t = +23.50, p_holm = 0.00000, wins = 10/10` **PASS**)
+- **`E3` Late Mean `ATP` (`Natural > Frozen`)**: **`+99.47 vs +5.60`** (`t = +87.07, p_holm = 0.00000, wins = 10/10` **PASS**)
+- **`E4` Foraging Income Retention (`late/early >= 0.80` in `>= 80%` seeds)**: **`8/10` seeds kept** (`mean = 0.9698` **PASS**)
 - **`E5` Late Starvation Fraction (`<= 0.10`)**: **`0.0000` (`0.0%` starvation)** (`cells = 136.0, elder_reference_hash = 5684ab80dc45f29c` **PASS**)
 
-### C. Contingent Vocal Turn-Taking (`alpha11-life teach2`, `40,000` Ticks, `n = 10` Seeds) — `3/3` PASS
-- **`T1` Contingent vs. Yoked Food Calling (`Nat FEED_C > Nat FEED_Y`)**: `+74.68 vs +26.01` onsets/k (`t = +12.65, p_holm = 0.00000, wins = 10/10` **PASS**)
-- **`T2` Contingent vs. Yoked Vocal Turn-Taking (`Nat VOICE_C > Nat VOICE_Y`)**: `+40.29 vs +22.91` onsets/k (`t = +4.86, p_holm = 0.00090, wins = 9/10` **PASS**)
-- **`T3` Plasticity Interaction (`(NatC - NatY) > (FrzC - FrzY)`)**: `+48.66 vs -1.60` (`t = +8.67, p_holm = 0.00002, wins = 10/10` **PASS**)
+### C. Contingent Vocal Turn-Taking Across Both Delay Horizons (`alpha11-life teach` & `teach2`, `40,000` Ticks, `n = 10` Seeds) — `3/3` PASS on Both
+1. **Long-Delay (`200 ms`, `delay = 10`, `refract = 200` ticks = `4.0 s`) Conversational Turn-Taking (`alpha11-life teach`) — `3/3` PASS**:
+   - **`T1` Contingent vs. Yoked Food Calling (`Nat FEED_C > Nat FEED_Y`)**: `+77.42 vs +47.34` onsets/k (`t = +6.09, p_holm = 0.00036, wins = 10/10` **PASS**)
+   - **`T2` Contingent vs. Yoked Vocal Turn-Taking (`Nat VOICE_C > Nat VOICE_Y`)**: `+44.50 vs +32.39` onsets/k (`t = +2.57, p_holm = 0.03021, wins = 8/10` **PASS**)
+   - **`T3` Plasticity Interaction (`(NatC - NatY) > (FrzC - FrzY)`)**: `+30.07 vs -5.45` (`t = +6.47, p_holm = 0.00035, wins = 10/10` **PASS**)
+   - **Flagless Paired Ablations (`n = 10` seeds)**: `M29 vs M28_base` (`3/3 PASS`: `T1 t = +6.36, p_holm = 0.00039`; `T2 t = +3.05, p_holm = 0.02486`; `T3 t = +3.11, p_holm = 0.02486`) and `M29 vs M29_no_b23` (`3/3 PASS`: `T1 t = +5.56, p_holm = 0.00106`; `T2 t = +2.65, p_holm = 0.02666`; `T3 t = +3.45, p_holm = 0.01444`).
+2. **Short-Delay (`40 ms`, `delay = 2`, `refract = 20` ticks = `0.4 s`) Vocal Turn-Taking (`alpha11-life teach2`) — `3/3` PASS**:
+   - **`T1` Contingent vs. Yoked Food Calling (`Nat FEED_C > Nat FEED_Y`)**: `+84.42 vs +35.09` onsets/k (`t = +6.57, p_holm = 0.00031, wins = 10/10` **PASS**)
+   - **`T2` Contingent vs. Yoked Vocal Turn-Taking (`Nat VOICE_C > Nat VOICE_Y`)**: `+44.49 vs +25.49` onsets/k (`t = +2.82, p_holm = 0.02005, wins = 7/10` **PASS**)
+   - **`T3` Plasticity Interaction (`(NatC - NatY) > (FrzC - FrzY)`)**: `+49.33 vs -1.60` (`t = +6.11, p_holm = 0.00036, wins = 9/10` **PASS**)
 
 ### D. Pre-Registered 10-Gate Whole-Body Longitudinal Campaign (`observe-development`, `n = 12` Seeds) — `8/10` PASS
 - Mature `Alpha11Organism` (`8,000` ticks): **`222.6` cells** (`>= 150`), **`12.87 cm` vocal tract** (`>= 12.0 cm`), passing `Survival` (`t = +7.03`), `Motor Control` (`t = +6.93`), `Foraging Necessity` (`Intact vs Flagless Lesion`, `t = +4.88, p_holm = 0.00196`), `Agency Purity` (`t = +3.05, p_holm = 0.03337`), `Mastery Growth` (`t = +57.95`), `Jerk Reduction` (`t = +6.55`), `Earth Ecology Vitality` (`t = +10.63`), and `Markov Error-Recovery` (`t = +9.15`); `Occluded Acoustic Coordination` (Gate 9) and `Role-Swap Separation` (Gate 10) remain open.
@@ -179,13 +186,13 @@ Run the `12`-gate causal benchmark (`G1..G9` + invariants `I1..I3`), `500,000`-t
 - **Source Hygiene (`a11-core`, `a11-medium`, `a11-worlds`)**: `0` string literals, `0` forbidden identifiers, `0` `unsafe` blocks, `0` `.unwrap(` calls.
 - **Transactional Persistence (`FORMAT_VERSION = 5`)**: `200`-step save/restore continuation is `100%` bit-identical (`f32::to_bits`), seamless `v3/v4 -> v5` checkpoint upgrade is verified, and single-bit flips, truncations, and oversized buffers fail closed (`true/true/true`).
 - **Frozen Plasticity Invariance**: `0` bits changed in `learned_parameter_hash()` across `500` active steps (both newborn and post-growth).
-- **Perceptual Scaling (`128` vs `4,096` Ambient Channels)**: `128ch` `p50 = 98.84 us` (`p99 = 125.06 us`) vs `4096ch` `p50 = 91.28 us` (`p99 = 105.11 us`, `< 2,000 us`); live `2`-organism `276ch` valley daemon runs at **`~8.7–13.5 MiB` OS RSS**.
+- **Perceptual Scaling (`128` vs `4,096` Ambient Channels)**: `128ch` `p50 = 97.96 us` (`p99 = 124.75 us`) vs `4096ch` `p50 = 91.64 us` (`p99 = 104.53 us`, `< 2,000 us`); live `2`-organism `276ch` valley daemon runs at **`~8.7–13.5 MiB` OS RSS**.
 
 ---
 
 ## 6. Scientific Scope & Honesty Statement
 
-The verified multi-seed evidence (`12/12` across `dev`, `dev30`, and the single-use `heldout` vault; `5/5` `500,000`-tick `energy`; `3/3` `40,000`-tick `teach2`; `8/10` longitudinal development gates; `Study 0..6`) demonstrates **closed-loop self-wired sensory organogenesis, bounded `O(1)` perceptual scaling, counterfactual motor agency, lifelong metabolic allostasis (`ATP ~ 99.4`), post-training frozen skill transfer, faster adult reversal re-acquisition than initial acquisition, `A -> B -> A` memory recall savings, short-delay (`40 ms`) contingent vocal turn-taking, and crash-safe continual persistence**. It does **not** yet show long-delay (`200 ms`, `alpha11-life teach` `TEACH_V1`) conversational credit, occluded two-organism referential vocal coordination (Gate 9), or spontaneous role separation (Gate 10) — and nothing here is compositional human-level language, consciousness, or general intelligence. Falsified mechanisms are kept out of the code and recorded by the authors.
+The verified multi-seed evidence (`12/12` across `dev`, `dev30`, and the single-use `heldout` vault; `5/5` `500,000`-tick `energy`; `3/3` `40,000`-tick `teach` at `200 ms` delay and `3/3` `teach2` at `40 ms` delay; `8/10` longitudinal development gates; `Study 0..6`) demonstrates **closed-loop self-wired sensory organogenesis, bounded `O(1)` perceptual scaling, counterfactual motor agency, lifelong metabolic allostasis (`ATP ~ 99.5`), post-training frozen skill transfer, faster adult reversal re-acquisition than initial acquisition, `A -> B -> A` memory recall savings, both short-delay (`40 ms`) and long-delay (`200 ms`) contingent vocal turn-taking, and crash-safe continual persistence**. It does **not** yet show occluded two-organism referential vocal coordination (Gate 9) or spontaneous role separation (Gate 10) — and nothing here is compositional human-level language, consciousness, or general intelligence. Falsified mechanisms are kept out of the code and recorded by the authors.
 
 ---
 
