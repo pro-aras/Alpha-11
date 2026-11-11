@@ -1,0 +1,5 @@
+phase=1A
+judge=crates/a11-observe/src/bin/alpha11-phase1a.rs
+sha256=b83a7a120ac0009a8fc5854c23bceb48c4a679ae5485110368285a1ca2c92b6c
+base=d52130e
+baseline=FAIL(G1b,G3 pass; G1a,G1c,G1d,G2,G4a,G4b,I1,I2,I3 fail)
