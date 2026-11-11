@@ -11,18 +11,22 @@ use crate::OrganismConfig;
 use crate::body::{BodyCore, EXPLORE_CHANNELS};
 use crate::cells::{Cell, CellArena};
 use crate::crc32c::{crc32c, crc32c_update};
-use crate::pores::{ChannelScoutStat, MAX_SCOUT_CHANNELS, MotorPore, PoreMembrane, SensorPore};
+use crate::pores::{
+    ChannelScoutStat, MAX_SCOUT_CHANNELS, MotorPore, PoreMembrane, SCOUT_DWELL_TICKS, SensorPore,
+};
 use crate::rng::{Rng64, sanitize};
 use crate::tubes::{
-    EfferenceEntry, EfferenceRing, OFC_CONTEXTS, PRED_BUCKETS, RING_LEN, STRIATAL_ACTUATORS,
-    STRIATAL_CUES, STRIATAL_FEATS, STRIATAL_FWD_LEN, STRIATAL_PORES, STRIATAL_TAP_DIM,
-    STRIATAL_W_LEN, StriatalOfc, TRACKED_ACTUATORS, Tube, TubeGraph, TubeKind,
+    EfferenceEntry, EfferenceRing, MIN_ACTUATOR_DIM, MIN_CELL_DIM, OFC_CONTEXTS, PRED_BUCKETS,
+    RING_LEN, STRIATAL_ACTUATORS, STRIATAL_CUES, STRIATAL_FEATS, STRIATAL_FWD_LEN, STRIATAL_PORES,
+    STRIATAL_TAP_DIM, STRIATAL_W_LEN, StriatalOfc, Tube, TubeGraph, TubeKind,
 };
 
 pub const FILE_MAGIC: u64 = 0x4131_3143_484B_5031;
-pub const FORMAT_VERSION: u32 = 5;
+pub const FORMAT_VERSION: u32 = 6;
 pub const MIN_COMPAT_FORMAT_VERSION: u32 = 3;
 pub const SLAB_COUNT: u32 = 6;
+/// Upper bound on decoded per-actuator width (fail-closed against corrupt lengths).
+pub const MAX_ACTUATOR_DIM: usize = 4_096;
 
 pub const STRIATAL_SERIALIZED_BYTES: usize = 3
     + OFC_CONTEXTS
@@ -330,6 +334,8 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     for &idx in &org.tubes.free_list {
         tube_w.write_u32(idx);
     }
+    tube_w.write_u32(org.tubes.act_dim() as u32);
+    tube_w.write_u32(org.tubes.cell_dim() as u32);
     for row in &org.tubes.action_sensory_w {
         for &w in row {
             tube_w.write_f32(w)?;
@@ -576,6 +582,7 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
         ring_w.write_u64(e.tick);
         ring_w.write_bool(e.committed);
         ring_w.write_f32(e.motor_norm)?;
+        ring_w.write_u32(e.motor_out.len() as u32);
         for &mv in &e.motor_out {
             ring_w.write_f32(mv)?;
         }
@@ -600,8 +607,9 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
         }
     }
 
-    let mut scot_w = ByteWriter::with_capacity(org.membrane.scout_stats.len() * 44 + 48);
+    let mut scot_w = ByteWriter::with_capacity(org.membrane.scout_stats.len() * 50 + 49);
     scot_w.write_u32(org.membrane.scout_cohort_idx);
+    scot_w.write_u8(org.membrane.scout_cohort_subtick);
     scot_w.write_f32(org.membrane.passive_health_ema)?;
     scot_w.write_f32(org.membrane.motor_env_fast)?;
     scot_w.write_f32(org.membrane.motor_env_mean)?;
@@ -619,6 +627,8 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
         scot_w.write_f32(st.cov_dx_ema)?;
         scot_w.write_f32(st.fourth_ema)?;
         scot_w.write_f32(st.motor_cov_ema)?;
+        scot_w.write_u16(st.samples);
+        scot_w.write_f32(st.alt_ema)?;
     }
 
     let mut slabs_buf = Vec::with_capacity(
@@ -1226,14 +1236,32 @@ pub fn shadow_decode_organism(
         tube_free_list.push(idx);
     }
 
-    let mut action_sensory_w = [[0.0_f32; PRED_BUCKETS]; TRACKED_ACTUATORS];
+    let act_dim = if version >= 6 {
+        let d = tr.read_u32()? as usize;
+        if !(MIN_ACTUATOR_DIM..=MAX_ACTUATOR_DIM).contains(&d) {
+            return Err(PersistError::InvalidTopology);
+        }
+        d
+    } else {
+        MIN_ACTUATOR_DIM
+    };
+    let cell_dim = if version >= 6 {
+        let d = tr.read_u32()? as usize;
+        if !(MIN_CELL_DIM..=config.max_cells.max(MIN_CELL_DIM)).contains(&d) {
+            return Err(PersistError::InvalidTopology);
+        }
+        d
+    } else {
+        MIN_CELL_DIM
+    };
+    let mut action_sensory_w = vec![vec![0.0_f32; cell_dim]; act_dim];
     for row in &mut action_sensory_w {
         for dst in row {
             *dst = tr.read_f32()?;
         }
     }
-    let mut pore_action_w = [[0.0_f32; PRED_BUCKETS]; TRACKED_ACTUATORS];
-    let mut tectal_map_w = [[0.0_f32; PRED_BUCKETS]; TRACKED_ACTUATORS];
+    let mut pore_action_w = vec![[0.0_f32; PRED_BUCKETS]; act_dim];
+    let mut tectal_map_w = vec![[0.0_f32; PRED_BUCKETS]; act_dim];
     if version >= 4 {
         for row in &mut pore_action_w {
             for dst in row {
@@ -1246,7 +1274,7 @@ pub fn shadow_decode_organism(
             }
         }
     }
-    let mut sensory_self_w = [0.0_f32; PRED_BUCKETS];
+    let mut sensory_self_w = vec![0.0_f32; cell_dim];
     for dst in &mut sensory_self_w {
         *dst = tr.read_f32()?;
     }
@@ -1260,9 +1288,9 @@ pub fn shadow_decode_organism(
     let mut social_loom_ema = 0.0_f32;
     let mut spatial_prox_ring = [0.0_f32; RING_LEN];
     let mut spatial_prox_cursor = 0u8;
-    let mut echo_emit_w = [0.0_f32; TRACKED_ACTUATORS];
-    let mut vocal_artic_w = [0.0_f32; TRACKED_ACTUATORS];
-    let mut somatic_limb_w = [0.0_f32; TRACKED_ACTUATORS];
+    let mut echo_emit_w = vec![0.0_f32; act_dim];
+    let mut vocal_artic_w = vec![0.0_f32; act_dim];
+    let mut somatic_limb_w = vec![0.0_f32; act_dim];
     let mut peer_coch_fast = 0.0_f32;
     let mut peer_coch_slow = 0.0_f32;
     let mut peer_echo_fast = 0.0_f32;
@@ -1272,7 +1300,7 @@ pub fn shadow_decode_organism(
     let mut peer_vocal_hold = 0.0_f32;
     let mut peer_coch_age = 255u8;
     let mut peer_echo_age = 255u8;
-    let mut peer_bearing_ema = [0.0_f32; TRACKED_ACTUATORS];
+    let mut peer_bearing_ema = vec![0.0_f32; act_dim];
     if version >= 4 {
         for dst in &mut pore_self_w {
             *dst = tr.read_f32()?.clamp(-2.0, 2.0);
@@ -1325,7 +1353,7 @@ pub fn shadow_decode_organism(
             *dst = tr.read_f32()?.clamp(-1.0, 1.0);
         }
     }
-    let mut act_mean = [0.0_f32; TRACKED_ACTUATORS];
+    let mut act_mean = vec![0.0_f32; act_dim];
     for dst in &mut act_mean {
         *dst = tr.read_f32()?;
     }
@@ -1610,7 +1638,16 @@ pub fn shadow_decode_organism(
         let e_tick = rr.read_u64()?;
         let committed = rr.read_bool()?;
         let motor_norm = rr.read_f32()?;
-        let mut motor_out = [0.0_f32; TRACKED_ACTUATORS];
+        let motor_len = if version >= 6 {
+            let n = rr.read_u32()? as usize;
+            if n > act_dim {
+                return Err(PersistError::InvalidTopology);
+            }
+            n
+        } else {
+            MIN_ACTUATOR_DIM
+        };
+        let mut motor_out = vec![0.0_f32; motor_len];
         for dst in &mut motor_out {
             *dst = rr.read_f32()?;
         }
@@ -1684,6 +1721,11 @@ pub fn shadow_decode_organism(
 
     let mut sr = ByteReader::new(payloads[5]);
     let scout_cohort_idx = sr.read_u32()?;
+    let scout_cohort_subtick = if version >= 6 {
+        sr.read_u8()?.min(SCOUT_DWELL_TICKS - 1)
+    } else {
+        0
+    };
     let passive_health_ema = sr.read_f32()?;
     let motor_env_fast = sr.read_f32()?;
     let motor_env_mean = sr.read_f32()?;
@@ -1706,19 +1748,29 @@ pub fn shadow_decode_organism(
         let cov_dx_ema = sr.read_f32()?;
         let fourth_ema = sr.read_f32()?;
         let motor_cov_ema = sr.read_f32()?;
-        scout_stats.push(ChannelScoutStat {
-            initialized,
-            mean,
-            var_ema,
-            diff_sq_ema,
-            prev_val,
-            ar1_w,
-            ar1_err_ema,
-            prev_dx,
-            cov_dx_ema,
-            fourth_ema,
-            motor_cov_ema,
-        });
+        if version >= 6 {
+            let samples = sr.read_u16()?;
+            let alt_ema = sr.read_f32()?;
+            scout_stats.push(ChannelScoutStat {
+                initialized,
+                mean,
+                var_ema,
+                diff_sq_ema,
+                prev_val,
+                ar1_w,
+                ar1_err_ema,
+                prev_dx,
+                cov_dx_ema,
+                fourth_ema,
+                motor_cov_ema,
+                samples,
+                alt_ema,
+            });
+        } else {
+            // Pre-v6 scout moments were sampled at a cohort stride (dt > 1) without warm-up
+            // bookkeeping; they are discarded and re-learned from contiguous dt = 1 samples.
+            scout_stats.push(ChannelScoutStat::default());
+        }
     }
     if sr.remaining() != 0 {
         return Err(PersistError::InvalidTopology);
@@ -1733,6 +1785,7 @@ pub fn shadow_decode_organism(
         alive_motor_count,
         scout_stats,
         scout_cohort_idx,
+        scout_cohort_subtick,
         passive_health_ema,
         motor_env_fast,
         motor_env_mean,

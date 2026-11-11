@@ -8,8 +8,12 @@ use crate::pores::{ChannelScoutStat, PoreMembrane, SensorPore};
 use crate::rng::{ParamHasher, Rng64, sanitize, sanitize_clamp, smooth_saturate};
 
 pub const RING_LEN: usize = 16;
-pub const TRACKED_ACTUATORS: usize = 32;
+/// Minimum per-actuator storage (legacy v3..v5 layout); grows without bound with the body.
+pub const MIN_ACTUATOR_DIM: usize = 32;
+/// Bounded active sensor-pore slots (k <= 64 per tick).
 pub const PRED_BUCKETS: usize = 64;
+/// Minimum per-cell predictor storage (legacy v3..v5 width).
+pub const MIN_CELL_DIM: usize = 64;
 pub const MAX_OUTGOING_PER_CELL: usize = 72;
 
 pub const STRIATAL_PORES: usize = 64;
@@ -533,7 +537,7 @@ pub struct EfferenceEntry {
     pub tick: u64,
     pub committed: bool,
     pub motor_norm: f32,
-    pub motor_out: [f32; TRACKED_ACTUATORS],
+    pub motor_out: Vec<f32>,
     pub active_cells: Vec<(u32, f32, f32, f32)>,
     pub pred_with_action: Vec<(u32, f32)>,
     pub pred_null_action: Vec<(u32, f32)>,
@@ -548,7 +552,7 @@ impl Default for EfferenceEntry {
             tick: 0,
             committed: false,
             motor_norm: 0.0,
-            motor_out: [0.0; TRACKED_ACTUATORS],
+            motor_out: Vec::new(),
             active_cells: Vec::new(),
             pred_with_action: Vec::new(),
             pred_null_action: Vec::new(),
@@ -559,12 +563,19 @@ impl Default for EfferenceEntry {
 }
 
 impl EfferenceEntry {
+    /// Committed command of actuator `m` (zero for actuators born after this entry).
+    #[inline]
+    #[must_use]
+    pub fn motor(&self, m: usize) -> f32 {
+        self.motor_out.get(m).copied().unwrap_or(0.0)
+    }
+
     #[must_use]
     pub fn logical_bytes(&self) -> usize {
         1 + 8
             + 1
             + 4
-            + 4 * TRACKED_ACTUATORS
+            + 4 * self.motor_out.len()
             + self.active_cells.len() * 16
             + self.pred_with_action.len() * 8
             + self.pred_null_action.len() * 8
@@ -647,10 +658,12 @@ pub struct TubeGraph {
     pub free_list: Vec<u32>,
     pub alive_count: usize,
     pub outgoing_by_cell: Vec<Vec<u32>>,
-    pub action_sensory_w: [[f32; PRED_BUCKETS]; TRACKED_ACTUATORS],
-    pub pore_action_w: [[f32; PRED_BUCKETS]; TRACKED_ACTUATORS],
-    pub tectal_map_w: [[f32; PRED_BUCKETS]; TRACKED_ACTUATORS],
-    pub sensory_self_w: [f32; PRED_BUCKETS],
+    /// Per-actuator, per-cell action-to-sensory Jacobian rows (indexed by cell slot, no aliasing).
+    pub action_sensory_w: Vec<Vec<f32>>,
+    pub pore_action_w: Vec<[f32; PRED_BUCKETS]>,
+    pub tectal_map_w: Vec<[f32; PRED_BUCKETS]>,
+    /// Per-cell sensory self-prediction weights (indexed by cell slot, no aliasing).
+    pub sensory_self_w: Vec<f32>,
     pub pore_self_w: [f32; PRED_BUCKETS],
     pub pore_mean_v: [f32; PRED_BUCKETS],
     pub pore_scale_v: [f32; PRED_BUCKETS],
@@ -661,9 +674,9 @@ pub struct TubeGraph {
     pub social_loom_ema: f32,
     pub spatial_prox_ring: [f32; RING_LEN],
     pub spatial_prox_cursor: u8,
-    pub echo_emit_w: [f32; TRACKED_ACTUATORS],
-    pub vocal_artic_w: [f32; TRACKED_ACTUATORS],
-    pub somatic_limb_w: [f32; TRACKED_ACTUATORS],
+    pub echo_emit_w: Vec<f32>,
+    pub vocal_artic_w: Vec<f32>,
+    pub somatic_limb_w: Vec<f32>,
     pub peer_coch_fast: f32,
     pub peer_coch_slow: f32,
     pub peer_echo_fast: f32,
@@ -673,8 +686,8 @@ pub struct TubeGraph {
     pub peer_vocal_hold: f32,
     pub peer_coch_age: u8,
     pub peer_echo_age: u8,
-    pub peer_bearing_ema: [f32; TRACKED_ACTUATORS],
-    pub act_mean: [f32; TRACKED_ACTUATORS],
+    pub peer_bearing_ema: Vec<f32>,
+    pub act_mean: Vec<f32>,
     pub mean_interventional_agency: f32,
     pub striatal: StriatalOfc,
 }
@@ -702,16 +715,13 @@ impl TubeGraph {
     #[inline]
     fn laryngeal_voiced_lags(ring: &EfferenceRing, mg: usize) -> [bool; 18] {
         let mut voiced = [false; 18];
-        if mg >= TRACKED_ACTUATORS {
-            return voiced;
-        }
         let dt_sub = 0.020_f32 / 16.0_f32;
         let omega = 75.0_f32;
         let omega_sq = omega * omega;
         let damp = 2.0_f32 * 1.05_f32 * omega;
         let mut pos = ring.at_lag(RING_LEN).map_or(0.0_f32, |e| {
             if e.committed {
-                sanitize_clamp(e.motor_out[mg], -1.0, 1.0)
+                sanitize_clamp(e.motor(mg), -1.0, 1.0)
             } else {
                 0.0
             }
@@ -720,7 +730,7 @@ impl TubeGraph {
         for lg in (1..=RING_LEN).rev() {
             let cmd = ring.at_lag(lg).map_or(0.0_f32, |e| {
                 if e.committed {
-                    sanitize_clamp(e.motor_out[mg], -1.0, 1.0)
+                    sanitize_clamp(e.motor(mg), -1.0, 1.0)
                 } else {
                     0.0
                 }
@@ -854,10 +864,10 @@ impl TubeGraph {
             free_list: Vec::new(),
             alive_count: 0,
             outgoing_by_cell: vec![Vec::new(); n_cells],
-            action_sensory_w: [[0.0; PRED_BUCKETS]; TRACKED_ACTUATORS],
-            pore_action_w: [[0.0; PRED_BUCKETS]; TRACKED_ACTUATORS],
-            tectal_map_w: [[0.0; PRED_BUCKETS]; TRACKED_ACTUATORS],
-            sensory_self_w: [0.0; PRED_BUCKETS],
+            action_sensory_w: vec![vec![0.0; n_cells.max(MIN_CELL_DIM)]; MIN_ACTUATOR_DIM],
+            pore_action_w: vec![[0.0; PRED_BUCKETS]; MIN_ACTUATOR_DIM],
+            tectal_map_w: vec![[0.0; PRED_BUCKETS]; MIN_ACTUATOR_DIM],
+            sensory_self_w: vec![0.0; n_cells.max(MIN_CELL_DIM)],
             pore_self_w: [0.0; PRED_BUCKETS],
             pore_mean_v: [0.0; PRED_BUCKETS],
             pore_scale_v: [0.05; PRED_BUCKETS],
@@ -868,9 +878,9 @@ impl TubeGraph {
             social_loom_ema: 0.0,
             spatial_prox_ring: [0.0; RING_LEN],
             spatial_prox_cursor: 0,
-            echo_emit_w: [0.0; TRACKED_ACTUATORS],
-            vocal_artic_w: [0.0; TRACKED_ACTUATORS],
-            somatic_limb_w: [0.0; TRACKED_ACTUATORS],
+            echo_emit_w: vec![0.0; MIN_ACTUATOR_DIM],
+            vocal_artic_w: vec![0.0; MIN_ACTUATOR_DIM],
+            somatic_limb_w: vec![0.0; MIN_ACTUATOR_DIM],
             peer_coch_fast: 0.0,
             peer_coch_slow: 0.0,
             peer_echo_fast: 0.0,
@@ -880,8 +890,8 @@ impl TubeGraph {
             peer_vocal_hold: 0.0,
             peer_coch_age: 255,
             peer_echo_age: 255,
-            peer_bearing_ema: [0.0; TRACKED_ACTUATORS],
-            act_mean: [0.0; TRACKED_ACTUATORS],
+            peer_bearing_ema: vec![0.0; MIN_ACTUATOR_DIM],
+            act_mean: vec![0.0; MIN_ACTUATOR_DIM],
             mean_interventional_agency: 0.0,
             striatal: StriatalOfc::from_seed(rng.s0 ^ rng.s1.rotate_left(17)),
         };
@@ -899,7 +909,7 @@ impl TubeGraph {
                     );
                 }
             }
-            for m in 0..n_motors.min(TRACKED_ACTUATORS) {
+            for m in 0..n_motors {
                 if graph.alive_count < max_tubes {
                     let init_w = 0.012 * rng.next_f32_signed();
                     let _ = graph.add_tube(
@@ -913,14 +923,71 @@ impl TubeGraph {
         graph
     }
 
+    /// Current per-actuator storage width (never below `MIN_ACTUATOR_DIM`).
+    #[inline]
+    #[must_use]
+    pub fn act_dim(&self) -> usize {
+        self.act_mean.len()
+    }
+
+    /// Grows every per-actuator learner to cover `num_actuators` (new actuators start naive).
+    pub fn ensure_actuator_dim(&mut self, num_actuators: usize) {
+        let want = num_actuators.max(MIN_ACTUATOR_DIM);
+        if want <= self.act_dim() {
+            return;
+        }
+        let cd = self.cell_dim();
+        self.action_sensory_w.resize(want, vec![0.0; cd]);
+        self.pore_action_w.resize(want, [0.0; PRED_BUCKETS]);
+        self.tectal_map_w.resize(want, [0.0; PRED_BUCKETS]);
+        self.echo_emit_w.resize(want, 0.0);
+        self.vocal_artic_w.resize(want, 0.0);
+        self.somatic_limb_w.resize(want, 0.0);
+        self.peer_bearing_ema.resize(want, 0.0);
+        self.act_mean.resize(want, 0.0);
+    }
+
+    /// Current per-cell predictor width (never below `MIN_CELL_DIM`).
+    #[inline]
+    #[must_use]
+    pub fn cell_dim(&self) -> usize {
+        self.sensory_self_w.len()
+    }
+
+    /// Grows per-cell predictors to cover every cell slot (new slots start naive).
+    pub fn ensure_cell_dim(&mut self, n_cell_slots: usize) {
+        let want = n_cell_slots.max(MIN_CELL_DIM);
+        if want <= self.cell_dim() {
+            return;
+        }
+        self.sensory_self_w.resize(want, 0.0);
+        for row in &mut self.action_sensory_w {
+            row.resize(want, 0.0);
+        }
+    }
+
+    /// Clears the predictors of a freshly (re)born cell slot so it never inherits a dead cell's model.
+    pub fn reset_cell_predictor(&mut self, c_idx: u32) {
+        let c = c_idx as usize;
+        if let Some(w) = self.sensory_self_w.get_mut(c) {
+            *w = 0.0;
+        }
+        for row in &mut self.action_sensory_w {
+            if let Some(w) = row.get_mut(c) {
+                *w = 0.0;
+            }
+        }
+    }
+
     #[must_use]
     pub fn logical_bytes(&self) -> usize {
         self.slots.len() * Tube::LOGICAL_BYTES
             + self.free_list.len() * 4
-            + 3 * 4 * PRED_BUCKETS * TRACKED_ACTUATORS
-            + 8 * 4 * PRED_BUCKETS
+            + 4 * self.cell_dim() * (self.act_dim() + 1)
+            + 2 * 4 * PRED_BUCKETS * self.act_dim()
+            + 7 * 4 * PRED_BUCKETS
             + 4 * RING_LEN
-            + 5 * 4 * TRACKED_ACTUATORS
+            + 5 * 4 * self.act_dim()
             + StriatalOfc::LOGICAL_BYTES
             + 70
     }
@@ -1069,11 +1136,12 @@ impl TubeGraph {
         membrane: &mut PoreMembrane,
         mode: ControlMode,
     ) {
+        let ad = self.act_dim();
         let Some(prev) = ring.at_lag(1) else {
             return;
         };
 
-        let n_act_ag = membrane.alive_motor_count.clamp(1, TRACKED_ACTUATORS);
+        let n_act_ag = membrane.alive_motor_count.clamp(1, ad);
         if self.striatal.tick == 0 && (!prev.committed || mode != ControlMode::Natural) {
             let idle_ret = if n_act_ag <= 8 { 0.9995 } else { 0.9996 };
             self.mean_interventional_agency =
@@ -1084,7 +1152,7 @@ impl TubeGraph {
             return;
         }
 
-        let mut centered_act = [0.0_f32; TRACKED_ACTUATORS];
+        let mut centered_act = vec![0.0_f32; ad];
         let mut da_norm_sq = 0.0_f32;
         if prev.committed {
             for (m, &a_val) in prev.motor_out.iter().enumerate() {
@@ -1097,10 +1165,10 @@ impl TubeGraph {
         }
         let nlms_scale = 1.0 / (1.0 + 0.18 * da_norm_sq);
 
-        let mut muscle_err_gain = [0.0_f32; TRACKED_ACTUATORS];
-        let mut muscle_null_sq = [0.0_f32; TRACKED_ACTUATORS];
-        let mut muscle_sum_jac = [0.0_f32; TRACKED_ACTUATORS];
-        let mut motor_myelin = [0.0_f32; TRACKED_ACTUATORS];
+        let mut muscle_err_gain = vec![0.0_f32; ad];
+        let mut muscle_null_sq = vec![0.0_f32; ad];
+        let mut muscle_sum_jac = vec![0.0_f32; ad];
+        let mut motor_myelin = vec![0.0_f32; ad];
 
         for &(c_idx, _, _, _) in &prev.active_cells {
             let Some(out_list) = self.outgoing_by_cell.get(c_idx as usize) else {
@@ -1118,7 +1186,7 @@ impl TubeGraph {
                 };
                 if mp.alive {
                     let act_ch = mp.actuator_channel as usize;
-                    if act_ch < TRACKED_ACTUATORS {
+                    if act_ch < ad {
                         motor_myelin[act_ch] =
                             sanitize_clamp(motor_myelin[act_ch] + tube.stiff_strength(), 0.0, 2.0);
                     }
@@ -1127,16 +1195,13 @@ impl TubeGraph {
         }
 
         for &(c_idx, v_past, dv_past, _) in &prev.active_cells {
-            if (c_idx as usize) >= PRED_BUCKETS {
-                continue;
-            }
             let Some(cell_now) = cells.slots.get(c_idx as usize) else {
                 continue;
             };
             if !cell_now.alive || cell_now.sensory_trophic_ema < 0.005 {
                 continue;
             }
-            let b = (c_idx as usize) % PRED_BUCKETS;
+            let b = c_idx as usize;
             let actual_dv = sanitize_clamp(cell_now.v_real - v_past, -2.0, 2.0);
             let self_pred = sanitize(self.sensory_self_w[b] * dv_past);
             let mut act_pred = 0.0_f32;
@@ -1182,7 +1247,7 @@ impl TubeGraph {
 
         let pore_cap = PRED_BUCKETS.min(membrane.sensor_pores.len());
         let n_scout = membrane.scout_stats.len();
-        let mut shuf_act = [0.0_f32; TRACKED_ACTUATORS];
+        let mut shuf_act = vec![0.0_f32; ad];
         if prev.committed
             && let Some(lag9) = ring.at_lag(9)
             && lag9.committed
@@ -1190,8 +1255,7 @@ impl TubeGraph {
         {
             for m in 0..n_act_ag {
                 let src_m = (m + 1) % n_act_ag;
-                shuf_act[m] =
-                    sanitize_clamp(lag9.motor_out[src_m] - self.act_mean[src_m], -2.0, 2.0);
+                shuf_act[m] = sanitize_clamp(lag9.motor(src_m) - self.act_mean[src_m], -2.0, 2.0);
             }
         }
         let mut ag_null_sq = 0.0_f32;
@@ -1201,7 +1265,7 @@ impl TubeGraph {
         let mut ag_eval = 0usize;
         let mut spatial_prox_sum = 0.0_f32;
         let mut spatial_prox_cnt = 0usize;
-        let mut loco_auth = [0.0_f32; TRACKED_ACTUATORS];
+        let mut loco_auth = vec![0.0_f32; ad];
         let mut pore_err1 = [0.0_f32; PRED_BUCKETS];
         let adult_pruned_coch = if n_act_ag > 8
             && cells.slots.len() >= 255
@@ -1226,7 +1290,7 @@ impl TubeGraph {
             let h = sp.hist_head as usize;
             let x_now = sp.history[(h + 15) & 15];
             if sp.age_ticks <= 1 {
-                for m in 0..TRACKED_ACTUATORS {
+                for m in 0..ad {
                     self.pore_action_w[m][p] = 0.0;
                     self.tectal_map_w[m][p] = 0.0;
                 }
@@ -1412,7 +1476,7 @@ impl TubeGraph {
             }
         }
 
-        let mut field_breadth_cal = [0u16; TRACKED_ACTUATORS];
+        let mut field_breadth_cal = vec![0u16; ad];
         for p in 0..pore_cap {
             let sp = &membrane.sensor_pores[p];
             if sp.alive
@@ -1433,9 +1497,9 @@ impl TubeGraph {
                 max_breadth_cal = fb;
             }
         }
-        let mut is_world_loco_cal = [false; TRACKED_ACTUATORS];
+        let mut is_world_loco_cal = vec![false; ad];
         if max_breadth_cal >= 4 {
-            for m in 0..TRACKED_ACTUATORS {
+            for m in 0..ad {
                 if field_breadth_cal[m].saturating_mul(2) >= max_breadth_cal {
                     is_world_loco_cal[m] = true;
                 }
@@ -1452,7 +1516,7 @@ impl TubeGraph {
             } else {
                 let mut loco_w_p = 0.0_f32;
                 let mut nonloco_w_p = 0.0_f32;
-                for m in 0..TRACKED_ACTUATORS {
+                for m in 0..ad {
                     let wa = self.pore_action_w[m][p].abs();
                     if is_world_loco_cal[m] {
                         if wa > loco_w_p {
@@ -1492,16 +1556,16 @@ impl TubeGraph {
                 max_loco_auth = la;
             }
         }
-        let mut max_2_6 = [0.0_f32; TRACKED_ACTUATORS];
-        let mut sum_abs15 = [0.0_f32; TRACKED_ACTUATORS];
+        let mut max_2_6 = vec![0.0_f32; ad];
+        let mut sum_abs15 = vec![0.0_f32; ad];
         let mut committed_15 = 0usize;
         for lag in 1..=15 {
             if let Some(ent) = ring.at_lag(lag)
                 && ent.committed
             {
                 committed_15 += 1;
-                for m in 0..TRACKED_ACTUATORS {
-                    let am = ent.motor_out[m];
+                for m in 0..ad {
+                    let am = ent.motor(m);
                     let a_abs = am.abs();
                     sum_abs15[m] += a_abs;
                     if (2..=6).contains(&lag) && a_abs > max_2_6[m] {
@@ -1516,8 +1580,8 @@ impl TubeGraph {
         let mut top_echo_cal_0 = 0.0_f32;
         let mut top_echo_cal_1 = 0.0_f32;
         let mut min_h_cal = [1.0_f32; PRED_BUCKETS];
-        let mut pos_coch_w = [0.0_f32; TRACKED_ACTUATORS];
-        let mut pos_coch_cnt = [0u16; TRACKED_ACTUATORS];
+        let mut pos_coch_w = vec![0.0_f32; ad];
+        let mut pos_coch_cnt = vec![0u16; ad];
         for p in 0..pore_cap {
             let sp = &membrane.sensor_pores[p];
             let ch_u = sp.channel as usize;
@@ -1560,7 +1624,7 @@ impl TubeGraph {
                 continue;
             }
             if (-0.38..=-0.16).contains(&min_h) && (-0.345..=-0.04).contains(&mean_p) {
-                for m in 0..TRACKED_ACTUATORS {
+                for m in 0..ad {
                     let pw = self.pore_action_w[m][p];
                     if pw >= 0.015 {
                         pos_coch_w[m] += pw;
@@ -1572,7 +1636,7 @@ impl TubeGraph {
 
         let mut mg_opt: Option<usize> = None;
         let mut best_mg_w = 0.05_f32;
-        for m in 0..TRACKED_ACTUATORS {
+        for m in 0..ad {
             if loco_auth[m] < 0.22 * max_loco_auth
                 && pos_coch_cnt[m] >= 2
                 && pos_coch_w[m] > best_mg_w
@@ -1587,8 +1651,8 @@ impl TubeGraph {
         let mut coch_cnt = 0usize;
         let mut canvas_err_sum = 0.0_f32;
         let mut canvas_cnt = 0usize;
-        let mut som_inst = [0.0_f32; TRACKED_ACTUATORS];
-        let mut coch_inst = [0.0_f32; TRACKED_ACTUATORS];
+        let mut som_inst = vec![0.0_f32; ad];
+        let mut coch_inst = vec![0.0_f32; ad];
         for p in 0..pore_cap {
             let sp = &membrane.sensor_pores[p];
             let ch_u = sp.channel as usize;
@@ -1617,7 +1681,7 @@ impl TubeGraph {
                 coch_dx1_sum += (x_now - x_1).abs();
                 coch_dx_prev_sum += (x_1 - x_2).abs();
                 coch_cnt += 1;
-                for m in 0..TRACKED_ACTUATORS {
+                for m in 0..ad {
                     let pwa = self.pore_action_w[m][p].abs();
                     if pwa >= 0.0045 {
                         coch_inst[m] += pwa;
@@ -1634,7 +1698,7 @@ impl TubeGraph {
                         canvas_err_sum += pore_err1[p];
                         canvas_cnt += 1;
                     }
-                    for m in 0..TRACKED_ACTUATORS {
+                    for m in 0..ad {
                         let pwa = self.pore_action_w[m][p].abs();
                         if pwa >= 0.018 {
                             som_inst[m] += pwa;
@@ -1647,7 +1711,7 @@ impl TubeGraph {
         if has_echo_pore && committed_15 >= 8 {
             let inv_c15 = 1.0 / (committed_15 as f32);
             let echo_surp = sanitize_clamp(max_echo_exc, -0.15, 0.45);
-            for m in 0..TRACKED_ACTUATORS {
+            for m in 0..ad {
                 if loco_auth[m] >= 0.22 * max_loco_auth || Some(m) == mg_opt {
                     self.echo_emit_w[m] = sanitize(0.992 * self.echo_emit_w[m]);
                 } else {
@@ -1674,23 +1738,23 @@ impl TubeGraph {
             && e1.committed
             && e2.committed
             && e3.committed
-            && e1.motor_out[mg] > 0.12
-            && e2.motor_out[mg] > 0.12
-            && e3.motor_out[mg] > 0.12
-            && (e1.motor_out[mg] - e2.motor_out[mg]).abs() < 0.10
-            && (e2.motor_out[mg] - e3.motor_out[mg]).abs() < 0.10
+            && e1.motor(mg) > 0.12
+            && e2.motor(mg) > 0.12
+            && e3.motor(mg) > 0.12
+            && (e1.motor(mg) - e2.motor(mg)).abs() < 0.10
+            && (e2.motor(mg) - e3.motor(mg)).abs() < 0.10
         {
             let c_flux_surp = sanitize_clamp(
                 (coch_dx1_sum - coch_dx_prev_sum) / (coch_cnt as f32),
                 -0.25,
                 0.35,
             );
-            for m in 0..TRACKED_ACTUATORS {
+            for m in 0..ad {
                 if loco_auth[m] >= 0.22 * max_loco_auth || m == mg {
                     self.vocal_artic_w[m] = sanitize(0.992 * self.vocal_artic_w[m]);
                 } else {
-                    let step_now = (e1.motor_out[m] - e2.motor_out[m]).abs();
-                    let step_prev = (e2.motor_out[m] - e3.motor_out[m]).abs();
+                    let step_now = (e1.motor(m) - e2.motor(m)).abs();
+                    let step_prev = (e2.motor(m) - e3.motor(m)).abs();
                     let step_surp = sanitize_clamp(step_now - step_prev, -0.6, 0.8);
                     self.vocal_artic_w[m] = sanitize_clamp(
                         0.9985 * self.vocal_artic_w[m] + 0.085 * c_flux_surp * step_surp,
@@ -1728,7 +1792,7 @@ impl TubeGraph {
                     && committed_15 >= 8
                     && let Some(e2) = lag2_ent
                 {
-                    let da2_m = sanitize_clamp(e2.motor_out[m] - self.act_mean[m], -1.0, 1.0);
+                    let da2_m = sanitize_clamp(e2.motor(m) - self.act_mean[m], -1.0, 1.0);
                     w_som += 0.0020 * canvas_err_mean * da2_m;
                 }
                 self.somatic_limb_w[m] = sanitize_clamp(w_som, -0.20, 1.0);
@@ -1750,13 +1814,13 @@ impl TubeGraph {
                 if let Some(ent) = ring.at_lag(lag)
                     && ent.committed
                 {
-                    for m in 0..TRACKED_ACTUATORS {
+                    for m in 0..ad {
                         let is_emit_cand = if let Some(em) = emit_opt {
                             m == em
                         } else {
                             loco_auth[m] < 0.22 * max_loco_auth && Some(m) != mg_opt
                         };
-                        let am = ent.motor_out[m];
+                        let am = ent.motor(m);
                         if is_emit_cand && am.abs() > 0.12 {
                             quiet_echo_before_6 = false;
                             if (8..=13).contains(&lag) && am.abs() > last_emit_pulse.abs() {
@@ -1775,13 +1839,13 @@ impl TubeGraph {
                 if let Some(ent) = ring.at_lag(lag)
                     && ent.committed
                 {
-                    for m in 0..TRACKED_ACTUATORS {
+                    for m in 0..ad {
                         let is_emit_cand = if let Some(em) = emit_opt {
                             m == em
                         } else {
                             loco_auth[m] < 0.22 * max_loco_auth && Some(m) != mg_opt
                         };
-                        if is_emit_cand && ent.motor_out[m].abs() > 0.12 {
+                        if is_emit_cand && ent.motor(m).abs() > 0.12 {
                             quiet_echo_cal_14 = false;
                         }
                     }
@@ -1806,7 +1870,7 @@ impl TubeGraph {
             for (d, ql) in q_cal_lag.iter_mut().enumerate().skip(1) {
                 *ql = ring
                     .at_lag(d)
-                    .is_some_and(|e| !e.committed || e.motor_out[mg] <= -0.05);
+                    .is_some_and(|e| !e.committed || e.motor(mg) <= -0.05);
             }
         }
         let quiet_self_cal_7 = ring_warm_cal
@@ -1887,7 +1951,7 @@ impl TubeGraph {
                     continue;
                 }
                 let mut somatic_other_w = 0.0_f32;
-                for m in 0..TRACKED_ACTUATORS {
+                for m in 0..ad {
                     if loco_auth[m] < 0.22 * max_loco_auth
                         && Some(m) != mg_opt
                         && self.vocal_artic_w[m] < 0.005
@@ -2004,8 +2068,8 @@ impl TubeGraph {
         let d_coch_cal =
             peer_lvl_cal_opt.map_or(0.0, |lvl| (lvl - self.peer_coch_fast).clamp(-0.22, 0.22));
 
-        let mda_over_span = |span: usize| -> ([f32; TRACKED_ACTUATORS], usize, f32) {
-            let mut mda = [0.0_f32; TRACKED_ACTUATORS];
+        let mda_over_span = |span: usize| -> (Vec<f32>, usize, f32) {
+            let mut mda = vec![0.0_f32; ad];
             let mut cnt = 0usize;
             let s_clamped = span.clamp(1, 15);
             let inv_s = 1.0 / (s_clamped as f32);
@@ -2014,8 +2078,8 @@ impl TubeGraph {
                     && ent.committed
                 {
                     cnt += 1;
-                    for m in 0..TRACKED_ACTUATORS {
-                        mda[m] = sanitize(mda[m] + (ent.motor_out[m] - self.act_mean[m]) * inv_s);
+                    for m in 0..ad {
+                        mda[m] = sanitize(mda[m] + (ent.motor(m) - self.act_mean[m]) * inv_s);
                     }
                 }
             }
@@ -2060,7 +2124,7 @@ impl TubeGraph {
                     let is_coch_trough = (-0.36..=-0.33).contains(&mean_p)
                         && mg_opt.is_some_and(|mg| self.pore_action_w[mg][p] < -0.016);
                     let mut somatic_other_w = 0.0_f32;
-                    for m in 0..TRACKED_ACTUATORS {
+                    for m in 0..ad {
                         if loco_auth[m] < 0.22 * max_loco_auth
                             && Some(m) != mg_opt
                             && self.vocal_artic_w[m] < 0.005
@@ -2212,7 +2276,7 @@ impl TubeGraph {
                     continue;
                 }
                 let ch = mp.actuator_channel as usize;
-                if ch >= TRACKED_ACTUATORS {
+                if ch >= ad {
                     continue;
                 }
                 let myelin_m = (motor_myelin[ch] * 1.8).clamp(0.0, 1.0);
@@ -2249,6 +2313,7 @@ impl TubeGraph {
         max_tubes: usize,
         rng: &mut Rng64,
     ) -> (u64, u64, u64) {
+        let ad = self.act_dim();
         let mut splits = 0u64;
         let mut shortcuts = 0u64;
         let mut atrophied = 0u64;
@@ -2273,8 +2338,8 @@ impl TubeGraph {
         if membrane.alive_motor_count > 8 && body.rest_consolidation_ticks >= 480 {
             let pore_cap_cr = PRED_BUCKETS.min(membrane.sensor_pores.len());
             let n_scout_cr = membrane.scout_stats.len();
-            let act_cap_cr = membrane.motor_pores.len().min(TRACKED_ACTUATORS);
-            let mut field_breadth_cr = [0u16; TRACKED_ACTUATORS];
+            let act_cap_cr = membrane.motor_pores.len().min(ad);
+            let mut field_breadth_cr = vec![0u16; ad];
             for p in 0..pore_cap_cr {
                 let sp = &membrane.sensor_pores[p];
                 if sp.alive
@@ -2295,7 +2360,7 @@ impl TubeGraph {
                     max_breadth_cr = fb;
                 }
             }
-            let mut is_world_loco_cr = [false; TRACKED_ACTUATORS];
+            let mut is_world_loco_cr = vec![false; ad];
             if max_breadth_cr >= 4 {
                 for m in 0..act_cap_cr {
                     if field_breadth_cr[m].saturating_mul(2) >= max_breadth_cr {
@@ -2355,12 +2420,12 @@ impl TubeGraph {
                     *gc_flag = true;
                 }
             }
-            let mut max_asw_cr = [0.0_f32; TRACKED_ACTUATORS];
-            let mut tot_reaff_cr = [0.0_f32; TRACKED_ACTUATORS];
-            let mut pos_coch_w_cr = [0.0_f32; TRACKED_ACTUATORS];
-            let mut pos_coch_cnt_cr = [0u16; TRACKED_ACTUATORS];
-            let mut soft_coch_w_cr = [0.0_f32; TRACKED_ACTUATORS];
-            let mut soft_coch_cnt_cr = [0u16; TRACKED_ACTUATORS];
+            let mut max_asw_cr = vec![0.0_f32; ad];
+            let mut tot_reaff_cr = vec![0.0_f32; ad];
+            let mut pos_coch_w_cr = vec![0.0_f32; ad];
+            let mut pos_coch_cnt_cr = vec![0u16; ad];
+            let mut soft_coch_w_cr = vec![0.0_f32; ad];
+            let mut soft_coch_cnt_cr = vec![0u16; ad];
             let mut is_pure_coch_cr = [false; PRED_BUCKETS];
             let mut is_quiet_coch_cr = [false; PRED_BUCKETS];
             let mut min_h_cr = [1.0_f32; PRED_BUCKETS];
@@ -2758,8 +2823,8 @@ impl TubeGraph {
                 && prev_entry.committed
             {
                 let mut dot = 0.0_f32;
-                for m in 0..TRACKED_ACTUATORS {
-                    dot += entry.motor_out[m] * prev_entry.motor_out[m];
+                for m in 0..ad {
+                    dot += entry.motor(m) * prev_entry.motor(m);
                 }
                 if dot.abs() > 0.02 && td_adv.abs() > 0.02 {
                     for mp in &mut membrane.motor_pores {
@@ -2774,14 +2839,14 @@ impl TubeGraph {
                 }
             }
 
-            let mut td_past = [0.0_f32; TRACKED_ACTUATORS];
-            let mut max_reward_jac = [0.0_f32; TRACKED_ACTUATORS];
+            let mut td_past = vec![0.0_f32; ad];
+            let mut max_reward_jac = vec![0.0_f32; ad];
             for &(c_idx, v_past, dv_past, _) in &entry.active_cells {
                 if let Some(cell) = cells.slots.get(c_idx as usize)
                     && cell.alive
                     && (cell.v_homeo.abs() + cell.v_delta_homeo.abs()) > 0.12
                 {
-                    let b = (c_idx as usize) % PRED_BUCKETS;
+                    let b = c_idx as usize;
                     for (m, dst) in max_reward_jac.iter_mut().enumerate() {
                         let j = self.action_sensory_w[m][b].abs();
                         if j > *dst {
@@ -2810,7 +2875,7 @@ impl TubeGraph {
                         continue;
                     }
                     let act_ch = mp.actuator_channel as usize;
-                    if act_ch < TRACKED_ACTUATORS {
+                    if act_ch < ad {
                         let g = tube.effective_g(&cells.slots);
                         td_past[act_ch] = sanitize(td_past[act_ch] + g * pre_sig * mp.conductance);
                     }
@@ -2902,10 +2967,10 @@ impl TubeGraph {
                                 Some(mp) => (mp.actuator_channel as usize, mp.alive),
                                 None => continue,
                             };
-                            if !mp_alive || act_ch >= TRACKED_ACTUATORS {
+                            if !mp_alive || act_ch >= ad {
                                 continue;
                             }
-                            let a_emitted = entry.motor_out[act_ch];
+                            let a_emitted = entry.motor(act_ch);
                             if a_emitted.abs() < 1.0e-3 {
                                 continue;
                             }
@@ -4033,6 +4098,7 @@ impl TubeGraph {
         mode: ControlMode,
         rng: &mut Rng64,
     ) -> RolloutOutcome {
+        let ad = self.act_dim();
         if num_actuators == 0 {
             return RolloutOutcome {
                 pulse: FieldPulse::silent(0),
@@ -4051,8 +4117,8 @@ impl TubeGraph {
         let mut stiff_motor_conf = vec![0.0_f32; num_actuators];
         let mut mastery_by_act = vec![0.0_f32; num_actuators];
         let mut mp_cond_by_act = vec![0.0_f32; num_actuators];
-        let mut pyr_env_sum = [0.0_f32; TRACKED_ACTUATORS];
-        let mut pyr_env_cnt = [0u16; TRACKED_ACTUATORS];
+        let mut pyr_env_sum = vec![0.0_f32; ad];
+        let mut pyr_env_cnt = vec![0u16; ad];
 
         for mp in &membrane.motor_pores {
             if mp.alive {
@@ -4094,7 +4160,7 @@ impl TubeGraph {
                 if act_ch >= num_actuators {
                     continue;
                 }
-                if act_ch < TRACKED_ACTUATORS {
+                if act_ch < ad {
                     pyr_env_sum[act_ch] =
                         sanitize(pyr_env_sum[act_ch] + sig.abs() * mp.conductance);
                     pyr_env_cnt[act_ch] = pyr_env_cnt[act_ch].saturating_add(1);
@@ -4136,8 +4202,8 @@ impl TubeGraph {
         if let Some(p1) = ring.at_lag(1)
             && p1.committed
         {
-            for (m, dst) in prev_act.iter_mut().enumerate().take(TRACKED_ACTUATORS) {
-                *dst = p1.motor_out[m];
+            for (m, dst) in prev_act.iter_mut().enumerate().take(ad) {
+                *dst = p1.motor(m);
             }
             recent_val_delta = sanitize_clamp(
                 body.fast_valence + cells.somatic_value_estimate() - p1.somatic_value_est,
@@ -4178,7 +4244,7 @@ impl TubeGraph {
         let probe_window = atp_surplus > 0.20 && (last_tick & 15) < 3;
         let pore_cap = PRED_BUCKETS.min(membrane.sensor_pores.len());
         let n_scout = membrane.scout_stats.len();
-        let mut field_breadth = [0u16; TRACKED_ACTUATORS];
+        let mut field_breadth = vec![0u16; ad];
         for p in 0..pore_cap {
             let sp = &membrane.sensor_pores[p];
             if sp.alive
@@ -4186,7 +4252,7 @@ impl TubeGraph {
                 && sp.trophic_ema >= 0.025
                 && self.is_retinal_field_pore(p, sp, &membrane.scout_stats)
             {
-                for m in 0..num_actuators.min(TRACKED_ACTUATORS) {
+                for m in 0..num_actuators.min(ad) {
                     if self.pore_action_w[m][p].abs() >= 0.022 {
                         field_breadth[m] = field_breadth[m].saturating_add(1);
                     }
@@ -4194,21 +4260,21 @@ impl TubeGraph {
             }
         }
         let mut max_breadth = 0u16;
-        for &fb in &field_breadth[..num_actuators.min(TRACKED_ACTUATORS)] {
+        for &fb in &field_breadth[..num_actuators.min(ad)] {
             if fb > max_breadth {
                 max_breadth = fb;
             }
         }
-        let mut is_world_loco = [false; TRACKED_ACTUATORS];
+        let mut is_world_loco = vec![false; ad];
         if max_breadth >= 4 {
-            for m in 0..num_actuators.min(TRACKED_ACTUATORS) {
+            for m in 0..num_actuators.min(ad) {
                 if field_breadth[m].saturating_mul(2) >= max_breadth {
                     is_world_loco[m] = true;
                 }
             }
         }
 
-        let act_cap = num_actuators.min(TRACKED_ACTUATORS);
+        let act_cap = num_actuators.min(ad);
         let mut is_world_retina = [false; PRED_BUCKETS];
         for p in 0..pore_cap {
             let sp = &membrane.sensor_pores[p];
@@ -4268,10 +4334,10 @@ impl TubeGraph {
             }
         }
 
-        let mut max_asw_jac = [0.0_f32; TRACKED_ACTUATORS];
-        let mut tot_pore_reaff = [0.0_f32; TRACKED_ACTUATORS];
-        let mut pos_cochlea_w = [0.0_f32; TRACKED_ACTUATORS];
-        let mut pos_cochlea_cnt = [0u16; TRACKED_ACTUATORS];
+        let mut max_asw_jac = vec![0.0_f32; ad];
+        let mut tot_pore_reaff = vec![0.0_f32; ad];
+        let mut pos_cochlea_w = vec![0.0_f32; ad];
+        let mut pos_cochlea_cnt = vec![0u16; ad];
         for m in 0..act_cap {
             for &w in &self.action_sensory_w[m] {
                 let wa = w.abs();
@@ -4333,9 +4399,9 @@ impl TubeGraph {
             };
         }
 
-        let mut somatic_prop_reaff = [0.0_f32; TRACKED_ACTUATORS];
-        let mut abs_cochlea_reaff = [0.0_f32; TRACKED_ACTUATORS];
-        let mut coch_artic_cnt = [0u16; TRACKED_ACTUATORS];
+        let mut somatic_prop_reaff = vec![0.0_f32; ad];
+        let mut abs_cochlea_reaff = vec![0.0_f32; ad];
+        let mut coch_artic_cnt = vec![0u16; ad];
         for m in 0..act_cap {
             for p in 0..pore_cap {
                 let sp = &membrane.sensor_pores[p];
@@ -4377,7 +4443,7 @@ impl TubeGraph {
             for (d, ql) in q_lag.iter_mut().enumerate().skip(1) {
                 *ql = ring
                     .at_lag(d)
-                    .is_some_and(|e| !e.committed || e.motor_out[mg] <= -0.05);
+                    .is_some_and(|e| !e.committed || e.motor(mg) <= -0.05);
             }
             quiet_self_7 =
                 q_lag[1] && q_lag[2] && q_lag[3] && q_lag[4] && q_lag[5] && q_lag[6] && q_lag[7];
@@ -4500,7 +4566,7 @@ impl TubeGraph {
         let mut v_align = vec![0.0_f32; num_actuators];
         let mut epistemic_drive = vec![0.0_f32; num_actuators];
         for &(c_idx, _, _) in &sensory_cells {
-            let b = (c_idx as usize) % PRED_BUCKETS;
+            let b = c_idx as usize;
             let cell = &cells.slots[c_idx as usize];
             let homeo_desire = sanitize(0.45 * cell.v_homeo + 0.85 * cell.v_delta_homeo);
             let valence_mag = cell.v_homeo.abs() + cell.v_delta_homeo.abs();
@@ -4557,7 +4623,7 @@ impl TubeGraph {
                                 && self.vocal_artic_w[m] < 0.005
                                 && Some(m) != m_glottal
                         };
-                        if is_emit_cand && ent.motor_out[m].abs() > 0.12 {
+                        if is_emit_cand && ent.motor(m).abs() > 0.12 {
                             quiet_echo_self = false;
                         }
                     }
@@ -4598,7 +4664,7 @@ impl TubeGraph {
             self.peer_echo_age = 255;
             self.peer_disp_coch = 0.0;
             self.peer_disp_echo = 0.0;
-            self.peer_bearing_ema = [0.0; TRACKED_ACTUATORS];
+            self.peer_bearing_ema.fill(0.0);
         }
         let vis_prox_now = if vis_prox_cnt > 0 {
             sanitize_clamp(vis_prox_sum / (vis_prox_cnt as f32), 0.0, 2.0)
@@ -4606,7 +4672,7 @@ impl TubeGraph {
             0.0
         };
 
-        let mut acoustic_taxis = [0.0_f32; TRACKED_ACTUATORS];
+        let mut acoustic_taxis = vec![0.0_f32; ad];
         let mut top4_coch = [0.0_f32; 4];
         let mut seen_coch_ro = [u32::MAX; PRED_BUCKETS];
         let mut seen_coch_ro_n = 0usize;
@@ -4994,28 +5060,28 @@ impl TubeGraph {
                 }
             }
         }
-        let mut v_inst = [0.0_f32; TRACKED_ACTUATORS];
+        let mut v_inst = vec![0.0_f32; ad];
         if let Some(ent15) = ring.at_lag(15)
             && ent15.committed
         {
             for m in 0..act_cap {
-                v_inst[m] = sanitize(0.84 * ent15.motor_out[m]);
+                v_inst[m] = sanitize(0.84 * ent15.motor(m));
             }
         }
-        let mut v_by_lag = [[0.0_f32; TRACKED_ACTUATORS]; 16];
+        let mut v_by_lag = vec![vec![0.0_f32; ad]; 16];
         for lag in (1..=15).rev() {
             if let Some(ent) = ring.at_lag(lag)
                 && ent.committed
             {
                 for m in 0..act_cap {
-                    v_inst[m] = sanitize((v_inst[m] + 0.185 * ent.motor_out[m]) * 0.82);
+                    v_inst[m] = sanitize((v_inst[m] + 0.185 * ent.motor(m)) * 0.82);
                 }
             } else {
                 for m in 0..act_cap {
                     v_inst[m] = sanitize(v_inst[m] * 0.82);
                 }
             }
-            v_by_lag[lag] = v_inst;
+            v_by_lag[lag].clone_from(&v_inst);
         }
         let v_ego_now = if bear_norm > 0.12 {
             let mut proj = 0.0_f32;
@@ -5190,7 +5256,7 @@ impl TubeGraph {
         };
         let social_drive_mag = 0.64 * vis_occ_gate;
         for m in 0..num_actuators {
-            if m < TRACKED_ACTUATORS {
+            if m < ad {
                 let social_va = if active_peer_hold > 0.25
                     && bear_norm > 0.16
                     && (max_breadth < 4 || is_world_loco[m])
@@ -5223,9 +5289,9 @@ impl TubeGraph {
             && acute_distress < 0.96
             && ring_warm
         {
-            let mut soft_coch_w_ro = [0.0_f32; TRACKED_ACTUATORS];
-            let mut soft_coch_cnt_ro = [0u16; TRACKED_ACTUATORS];
-            let mut sat_coch_cnt_ro = [0u16; TRACKED_ACTUATORS];
+            let mut soft_coch_w_ro = vec![0.0_f32; ad];
+            let mut soft_coch_cnt_ro = vec![0u16; ad];
+            let mut sat_coch_cnt_ro = vec![0u16; ad];
             for p in 0..pore_cap {
                 let sp = &membrane.sensor_pores[p];
                 let ch_u = sp.channel as usize;
@@ -5276,7 +5342,7 @@ impl TubeGraph {
                         && sat_coch_cnt_ro[m] >= 2
                         && (1..=6).all(|d| {
                             ring.at_lag(d)
-                                .is_some_and(|e| e.committed && e.motor_out[m] > 0.05)
+                                .is_some_and(|e| e.committed && e.motor(m) > 0.05)
                         });
                     let (ep, op, _, _, ec_tot, oc_tot, _, om_b) =
                         self.motor_contingency_stats(membrane, m);
@@ -5359,7 +5425,7 @@ impl TubeGraph {
                     for (d, ql) in q_urge.iter_mut().enumerate().skip(1) {
                         *ql = ring
                             .at_lag(d)
-                            .is_some_and(|e| !e.committed || e.motor_out[mg_act] <= -0.05);
+                            .is_some_and(|e| !e.committed || e.motor(mg_act) <= -0.05);
                     }
                     glottal_syl_exp = if long_social_turn {
                         let k_q = if u_odd >= 0.72 { 13 } else { 14 };
@@ -5459,7 +5525,7 @@ impl TubeGraph {
         let mut emit_share_vec = vec![0.0_f32; num_actuators];
         let mut candidates: [Vec<f32>; 5] = std::array::from_fn(|_| vec![0.0_f32; num_actuators]);
         for m in 0..num_actuators {
-            let is_loco_m = m < TRACKED_ACTUATORS && is_world_loco[m];
+            let is_loco_m = m < ad && is_world_loco[m];
             let is_glottal_act =
                 Some(m) == m_glottal || Some(m) == mg_urge_active || Some(m) == mg_listen_active;
             let is_urge_glottal = Some(m) == mg_urge_active;
@@ -5469,7 +5535,7 @@ impl TubeGraph {
                 && Some(m) != mg_listen_active
                 && Some(m) == m_echo_emitter;
             let som_dom = somatic_prop_reaff[m].max(0.5 * self.somatic_limb_w[m]);
-            let is_vocal_artic = m < TRACKED_ACTUATORS
+            let is_vocal_artic = m < ad
                 && !is_loco_m
                 && !is_glottal_act
                 && !is_echo_emitter
@@ -5477,7 +5543,7 @@ impl TubeGraph {
                     || (coch_artic_cnt[m] >= 2
                         && abs_cochlea_reaff[m] >= 0.011
                         && abs_cochlea_reaff[m] > 1.2 * som_dom));
-            let is_somatic_limb = m < TRACKED_ACTUATORS
+            let is_somatic_limb = m < ad
                 && !is_loco_m
                 && !is_glottal_act
                 && !is_echo_emitter
@@ -5645,11 +5711,11 @@ impl TubeGraph {
             }
 
             for &(c_idx, v_now, dv_now) in &sensory_cells {
-                let b = (c_idx as usize) % PRED_BUCKETS;
+                let b = c_idx as usize;
                 let self_dv = self.sensory_self_w[b] * dv_now;
                 let mut act_dv = 0.0_f32;
                 let mut ep_act_dv = 0.0_f32;
-                for (m, &am) in cand.iter().enumerate().take(TRACKED_ACTUATORS) {
+                for (m, &am) in cand.iter().enumerate().take(ad) {
                     let jac = self.action_sensory_w[m][b];
                     let da_m = am - self.act_mean[m];
                     act_dv += jac * da_m;
@@ -5710,7 +5776,7 @@ impl TubeGraph {
             for m in 0..num_actuators {
                 let maturity = (0.65 * mastery_by_act[m] + 0.35 * stiff_motor_conf[m].min(1.0))
                     .clamp(0.0, 1.0);
-                let is_loco_m = m < TRACKED_ACTUATORS && is_world_loco[m];
+                let is_loco_m = m < ad && is_world_loco[m];
                 let ls = limb_share_vec[m];
                 let emit_s = emit_share_vec[m];
                 let social_active = mode == ControlMode::Natural && active_peer_hold > 0.25;
@@ -5747,7 +5813,7 @@ impl TubeGraph {
                     (0.95 - 0.80 * maturity).clamp(0.38, 0.95)
                 };
                 let urge_open_artic = mg_urge_active.is_some()
-                    && m < TRACKED_ACTUATORS
+                    && m < ad
                     && !is_loco_m
                     && !is_glottal_vec[m]
                     && (self.vocal_artic_w[m] >= 0.004 || abs_cochlea_reaff[m] >= 0.008);
@@ -5822,12 +5888,12 @@ impl TubeGraph {
         let mut pred_with = Vec::with_capacity(sensory_cells.len());
         let mut pred_null = Vec::with_capacity(sensory_cells.len());
         for &(c_idx, v_now, dv_now) in &sensory_cells {
-            let b = (c_idx as usize) % PRED_BUCKETS;
+            let b = c_idx as usize;
             let base_dv = self.sensory_self_w[b] * dv_now;
             let p_null = smooth_saturate(v_now + base_dv);
             let mut act_dv = 0.0_f32;
             if committed {
-                for (m, &am) in final_out.iter().enumerate().take(TRACKED_ACTUATORS) {
+                for (m, &am) in final_out.iter().enumerate().take(ad) {
                     let w_mb = self.action_sensory_w[m][b];
                     if w_mb.abs() >= 0.022 {
                         act_dv += w_mb * (am - self.act_mean[m]);
@@ -5885,6 +5951,7 @@ impl TubeGraph {
         final_out: &[f32],
         committed: bool,
     ) -> (Vec<(u32, f32)>, Vec<(u32, f32)>) {
+        let ad = self.act_dim();
         let mut sensory_cells: Vec<(u32, f32, f32)> = Vec::with_capacity(32);
         for &c_idx in &cells.active_indices {
             if sensory_cells.len() >= 32 {
@@ -5900,12 +5967,12 @@ impl TubeGraph {
         let mut pred_with = Vec::with_capacity(sensory_cells.len());
         let mut pred_null = Vec::with_capacity(sensory_cells.len());
         for &(c_idx, v_now, dv_now) in &sensory_cells {
-            let b = (c_idx as usize) % PRED_BUCKETS;
+            let b = c_idx as usize;
             let base_dv = self.sensory_self_w[b] * dv_now;
             let p_null = smooth_saturate(v_now + base_dv);
             let mut act_dv = 0.0_f32;
             if committed {
-                for (m, &am) in final_out.iter().enumerate().take(TRACKED_ACTUATORS) {
+                for (m, &am) in final_out.iter().enumerate().take(ad) {
                     let w_mb = self.action_sensory_w[m][b];
                     if w_mb.abs() >= 0.022 {
                         act_dv += w_mb * (am - self.act_mean[m]);
@@ -6694,10 +6761,16 @@ impl TubeGraph {
             t.chain_score = 0.0;
             t.myelin_plasticity_accum = 0.0;
         }
-        self.action_sensory_w = [[0.0; PRED_BUCKETS]; TRACKED_ACTUATORS];
-        self.pore_action_w = [[0.0; PRED_BUCKETS]; TRACKED_ACTUATORS];
-        self.tectal_map_w = [[0.0; PRED_BUCKETS]; TRACKED_ACTUATORS];
-        self.sensory_self_w = [0.0; PRED_BUCKETS];
+        for row in &mut self.action_sensory_w {
+            row.fill(0.0);
+        }
+        for row in &mut self.pore_action_w {
+            *row = [0.0; PRED_BUCKETS];
+        }
+        for row in &mut self.tectal_map_w {
+            *row = [0.0; PRED_BUCKETS];
+        }
+        self.sensory_self_w.fill(0.0);
         self.pore_self_w = [0.0; PRED_BUCKETS];
         self.pore_mean_v = [0.0; PRED_BUCKETS];
         self.pore_scale_v = [0.05; PRED_BUCKETS];
@@ -6708,9 +6781,9 @@ impl TubeGraph {
         self.social_loom_ema = 0.0;
         self.spatial_prox_ring = [0.0; RING_LEN];
         self.spatial_prox_cursor = 0;
-        self.echo_emit_w = [0.0; TRACKED_ACTUATORS];
-        self.vocal_artic_w = [0.0; TRACKED_ACTUATORS];
-        self.somatic_limb_w = [0.0; TRACKED_ACTUATORS];
+        self.echo_emit_w.fill(0.0);
+        self.vocal_artic_w.fill(0.0);
+        self.somatic_limb_w.fill(0.0);
         self.peer_coch_fast = 0.0;
         self.peer_coch_slow = 0.0;
         self.peer_echo_fast = 0.0;
@@ -6720,8 +6793,8 @@ impl TubeGraph {
         self.peer_vocal_hold = 0.0;
         self.peer_coch_age = 255;
         self.peer_echo_age = 255;
-        self.peer_bearing_ema = [0.0; TRACKED_ACTUATORS];
-        self.act_mean = [0.0; TRACKED_ACTUATORS];
+        self.peer_bearing_ema.fill(0.0);
+        self.act_mean.fill(0.0);
         self.mean_interventional_agency = 0.0;
         self.striatal.reset_learned_keep_birth();
     }

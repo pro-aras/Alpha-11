@@ -22,9 +22,7 @@ use crate::persistence::{
 };
 use crate::pores::PoreMembrane;
 use crate::rng::{ParamHasher, Rng64, sanitize, sanitize_clamp};
-use crate::tubes::{
-    EfferenceEntry, EfferenceRing, StriatalOfc, TRACKED_ACTUATORS, Tube, TubeGraph, TubeKind,
-};
+use crate::tubes::{EfferenceEntry, EfferenceRing, StriatalOfc, Tube, TubeGraph, TubeKind};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OrganismConfig {
@@ -223,6 +221,8 @@ impl Alpha11Organism {
     }
 
     fn wire_mitosis_family(&mut self, child_idx: u32, parent_idx: u32) {
+        self.tubes.ensure_cell_dim(self.cells.slots.len());
+        self.tubes.reset_cell_predictor(parent_idx);
         self.tubes.ensure_cell_capacity(self.cells.slots.len());
         let mut up_tube = Tube::newborn(TubeKind::CellToCell, child_idx, parent_idx, 1, 0.30);
         up_tube.w_pred = 0.20;
@@ -259,7 +259,7 @@ impl Alpha11Organism {
         down_tube.w_pred = 0.32;
         let _ = self.tubes.add_tube(down_tube, self.config.max_tubes);
 
-        for m_slot in 0..self.membrane.motor_pores.len().min(TRACKED_ACTUATORS) {
+        for m_slot in 0..self.membrane.motor_pores.len() {
             if !self.membrane.motor_pores[m_slot].alive {
                 continue;
             }
@@ -287,6 +287,9 @@ impl OrganismEngine for Alpha11Organism {
             );
             self.wire_new_motor_pores(prev_motors);
         }
+
+        self.tubes.ensure_actuator_dim(view.num_actuators);
+        self.tubes.ensure_cell_dim(self.cells.slots.len());
 
         self.membrane.prepare_scout_cycle(
             view.ambient_in.len(),
@@ -521,7 +524,7 @@ impl OrganismEngine for Alpha11Organism {
             }
         }
 
-        let mut motor_arr = [0.0_f32; TRACKED_ACTUATORS];
+        let mut motor_arr = vec![0.0_f32; self.tubes.act_dim()];
         let mut norm_sq = 0.0_f32;
         for (i, dst) in motor_arr.iter_mut().enumerate() {
             let v = pulse.actuator_out.get(i).copied().unwrap_or(0.0);
@@ -737,6 +740,7 @@ impl OrganismEngine for Alpha11Organism {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tubes::MIN_ACTUATOR_DIM;
     use std::fs;
     use std::path::PathBuf;
 
@@ -1073,17 +1077,17 @@ mod tests {
                         at += slot_v4;
                     }
                     let tfree = rd(&src, at) as usize;
-                    let w_bytes = TRACKED_ACTUATORS * PRED_BUCKETS * 4;
+                    let w_bytes = MIN_ACTUATOR_DIM * PRED_BUCKETS * 4;
                     let keep_end = at + 4 + 4 * tfree + w_bytes;
                     q.extend_from_slice(&src[at..keep_end]);
                     let self_w_start = keep_end + 2 * w_bytes;
                     q.extend_from_slice(&src[self_w_start..self_w_start + PRED_BUCKETS * 4]);
-                    let tail = TRACKED_ACTUATORS * 4 + 4;
+                    let tail = MIN_ACTUATOR_DIM * 4 + 4;
                     q.extend_from_slice(&src[src.len() - tail..]);
                     q
                 }
                 TAG_RING => {
-                    let fixed = 1 + 8 + 1 + 4 + TRACKED_ACTUATORS * 4 + 4 + 4;
+                    let fixed = 1 + 8 + 1 + 4 + MIN_ACTUATOR_DIM * 4 + 4 + 4;
                     let mut q = src[..4].to_vec();
                     let mut at = 4usize;
                     for _ in 0..RING_LEN {

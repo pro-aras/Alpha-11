@@ -536,9 +536,10 @@ impl CausalCore {
                         );
                     }
                     for t_idx in 0..tap_len {
-                        g_slice[t_idx] =
-                            sanitize(0.999 * g_slice[t_idx] + eta_g * x_tilde * self.da_ring[t_idx])
-                                .clamp(-2.0, 2.0);
+                        g_slice[t_idx] = sanitize(
+                            0.999 * g_slice[t_idx] + eta_g * x_tilde * self.da_ring[t_idx],
+                        )
+                        .clamp(-2.0, 2.0);
                     }
                     self.mon_age[idx] = age.saturating_add(1);
                     self.mon_prev_xt[idx] = x_tilde;
@@ -700,14 +701,13 @@ impl OrganismEngine for CausalCore {
                         sanitize((1.0 - beta_v) * self.fwd_var_act[j] + beta_v * e_act * e_act);
                     self.fwd_b[j] = sanitize(self.fwd_b[j] + 0.02 * e_null).clamp(-1.0, 1.0);
                     let denom_p = pdf * pdf + 0.01;
-                    self.fwd_alpha[j] =
-                        sanitize(self.fwd_alpha[j] + 0.04 * e_null * pdf / denom_p)
-                            .clamp(-0.98, 0.98);
+                    self.fwd_alpha[j] = sanitize(self.fwd_alpha[j] + 0.04 * e_null * pdf / denom_p)
+                        .clamp(-0.98, 0.98);
                     if !no_fwd {
                         let row_j = &mut self.fwd_j[j * n_act..(j + 1) * n_act];
                         for m in 0..n_act {
-                            row_j[m] =
-                                sanitize(0.9995 * row_j[m] + eta_j * e_act * da[m]).clamp(-2.0, 2.0);
+                            row_j[m] = sanitize(0.9995 * row_j[m] + eta_j * e_act * da[m])
+                                .clamp(-2.0, 2.0);
                         }
                     }
                 }
@@ -715,8 +715,8 @@ impl OrganismEngine for CausalCore {
             }
             if is_plastic {
                 for m in 0..n_act {
-                    self.act_mean[m] =
-                        sanitize(0.99 * self.act_mean[m] + 0.01 * self.prev_act[m]).clamp(-1.0, 1.0);
+                    self.act_mean[m] = sanitize(0.99 * self.act_mean[m] + 0.01 * self.prev_act[m])
+                        .clamp(-1.0, 1.0);
                 }
             }
         }
@@ -873,7 +873,8 @@ impl OrganismEngine for CausalCore {
                     .iter_mut()
                     .zip(self.elig_critic.iter())
                 {
-                    *vi = sanitize(*vi + self.params.eta_critic * delta * ei).clamp(-W_CLAMP, W_CLAMP);
+                    *vi = sanitize(*vi + self.params.eta_critic * delta * ei)
+                        .clamp(-W_CLAMP, W_CLAMP);
                 }
             }
             let rhat_q = self.outcome_pred_live_on(act_c, &self.prev_critic_feat);
@@ -1317,7 +1318,10 @@ struct Reader<'a> {
 
 impl Reader<'_> {
     fn take(&mut self, n: usize) -> Result<&[u8], PersistError> {
-        let end = self.pos.checked_add(n).ok_or(PersistError::TruncatedInput)?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or(PersistError::TruncatedInput)?;
         if end > self.d.len() {
             return Err(PersistError::TruncatedInput);
         }
@@ -1643,7 +1647,8 @@ mod tests {
         newborn.step(view(&x, 0.0, 0.0)).unwrap();
         newborn.zero_learned_conductances();
         for t in 0..300 {
-            org.step(view(&x, if t % 3 == 0 { 0.4 } else { 0.0 }, 0.0)).unwrap();
+            org.step(view(&x, if t % 3 == 0 { 0.4 } else { 0.0 }, 0.0))
+                .unwrap();
         }
         assert_ne!(org.w_ctx, newborn.w_ctx);
         org.zero_learned_conductances();

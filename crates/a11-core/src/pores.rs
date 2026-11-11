@@ -6,6 +6,11 @@ use a11_medium::ControlMode;
 use crate::rng::{ParamHasher, Rng64, sanitize, sanitize_clamp};
 
 pub const SCOUT_COHORT_WIDTH: usize = 32;
+/// Consecutive ticks the scout membrane dwells on one cohort: sub-tick 0 re-bases the
+/// derivative reference, sub-ticks `1..SCOUT_DWELL_TICKS` accumulate exact `dt = 1` statistics.
+pub const SCOUT_DWELL_TICKS: u8 = 8;
+/// Minimum contiguous samples before any scout statistic is trusted (moment warm-up).
+pub const SCOUT_WARM_SAMPLES: u16 = 12;
 pub const MAX_SCOUT_CHANNELS: usize = 16_384;
 pub const MAX_ACTIVE_SENSOR_PORES_PER_TICK: usize = 64;
 
@@ -96,21 +101,59 @@ pub struct ChannelScoutStat {
     pub cov_dx_ema: f32,
     pub fourth_ema: f32,
     pub motor_cov_ema: f32,
+    /// Contiguous `dt = 1` samples absorbed since (re)initialization (saturating).
+    pub samples: u16,
+    /// EMA of `max(0, -(x_t - mu)(x_{t-1} - mu))`: lag-1 sign-alternation energy.
+    pub alt_ema: f32,
 }
 
 impl ChannelScoutStat {
-    pub const LOGICAL_BYTES: usize = 1 + 4 * 10;
+    pub const LOGICAL_BYTES: usize = 1 + 4 * 11 + 2;
+
+    /// Moments are trusted only after `SCOUT_WARM_SAMPLES` contiguous samples.
+    #[inline]
+    #[must_use]
+    pub fn is_warm(&self) -> bool {
+        self.initialized && self.samples >= SCOUT_WARM_SAMPLES
+    }
+
+    /// Lag-1 alternation ratio. Any envelope-modulated symmetric white process `f_t * eta_t`
+    /// gives `(3/8) E[f_t f_(t-1)] / E[f_t^2]` (about 0.30..0.375) regardless of `f_t`, whereas
+    /// inertial waves, filtered organ responses, and isolated echo arrivals stay far below.
+    #[inline]
+    #[must_use]
+    pub fn alternation_ratio(&self) -> f32 {
+        self.alt_ema / self.var_ema.max(1.0e-8)
+    }
+
+    /// Bias-corrected kurtosis: zero-initialized EMAs (`0.93` second, `0.95` fourth moment)
+    /// are de-biased by their exact `1 - rho^n` warm-up factors.
+    #[inline]
+    #[must_use]
+    pub fn kurtosis(&self) -> f32 {
+        let n = i32::from(self.samples.min(256));
+        let c2 = (1.0 - 0.93_f32.powi(n)).max(1.0e-3);
+        let c4 = (1.0 - 0.95_f32.powi(n)).max(1.0e-3);
+        let v = self.var_ema / c2;
+        (self.fourth_ema / c4) / (v * v).max(1.0e-10)
+    }
+
+    #[inline]
+    #[must_use]
+    fn is_structured(&self) -> bool {
+        self.is_warm() && self.var_ema >= 4.0e-6 && self.alternation_ratio() < 0.21
+    }
 
     #[inline]
     #[must_use]
     pub fn passive_quality(&self) -> f32 {
-        if !self.initialized || self.var_ema < 4.0e-6 {
+        if !self.is_structured() {
             return 0.0;
         }
         let roughness = self.diff_sq_ema / self.var_ema.max(1.0e-8);
         let ar1_ratio = self.ar1_err_ema / self.var_ema.max(1.0e-8);
         let vel_corr = self.cov_dx_ema / self.diff_sq_ema.max(1.0e-8);
-        let kurtosis = self.fourth_ema / (self.var_ema * self.var_ema).max(1.0e-10);
+        let kurtosis = self.kurtosis();
         let motor_r = self.motor_cov_ema.abs();
 
         // Stationary 1st-order OU(rho) drift has vel_corr = -(1 - rho)/2 <= 0, kurtosis ~ 2.95,
@@ -160,23 +203,19 @@ impl ChannelScoutStat {
     #[inline]
     #[must_use]
     pub fn is_sparse_impulse(&self) -> bool {
-        if !self.initialized
-            || self.var_ema < 4.0e-6
-            || self.var_ema >= 0.050
-            || self.is_smooth_spatial_field()
-        {
+        if !self.is_structured() || self.var_ema >= 0.050 || self.is_smooth_spatial_field() {
             return false;
         }
         let roughness = self.diff_sq_ema / self.var_ema.max(1.0e-8);
         let vel_corr = self.cov_dx_ema / self.diff_sq_ema.max(1.0e-8);
-        let kurtosis = self.fourth_ema / (self.var_ema * self.var_ema).max(1.0e-10);
+        let kurtosis = self.kurtosis();
         roughness > 0.72 && roughness < 2.25 && vel_corr < 0.06 && kurtosis > 4.5
     }
 
     #[inline]
     #[must_use]
     pub fn is_smooth_spatial_field(&self) -> bool {
-        if !self.initialized || self.var_ema < 4.0e-6 {
+        if !self.is_structured() {
             return false;
         }
         let roughness = self.diff_sq_ema / self.var_ema.max(1.0e-8);
@@ -196,6 +235,7 @@ pub struct PoreMembrane {
     pub alive_motor_count: usize,
     pub scout_stats: Vec<ChannelScoutStat>,
     pub scout_cohort_idx: u32,
+    pub scout_cohort_subtick: u8,
     pub passive_health_ema: f32,
     pub motor_env_fast: f32,
     pub motor_env_mean: f32,
@@ -239,6 +279,7 @@ impl PoreMembrane {
             alive_motor_count: init_motors,
             scout_stats: Vec::new(),
             scout_cohort_idx: 0,
+            scout_cohort_subtick: 0,
             passive_health_ema: 0.28,
             motor_env_fast: 0.0,
             motor_env_mean: 0.0,
@@ -253,7 +294,7 @@ impl PoreMembrane {
             + self.motor_pores.len() * MotorPore::LOGICAL_BYTES
             + self.motor_free_list.len() * 4
             + self.scout_stats.len() * ChannelScoutStat::LOGICAL_BYTES
-            + 36
+            + 37
     }
 
     #[must_use]
@@ -270,7 +311,7 @@ impl PoreMembrane {
         if mode != ControlMode::Natural {
             return;
         }
-        let target = num_actuators.min(32);
+        let target = num_actuators.min(max_pores / 2);
         for act in 0..target {
             let exists = self
                 .motor_pores
@@ -336,7 +377,16 @@ impl PoreMembrane {
             return;
         }
         let num_cohorts = capped_ambient.div_ceil(SCOUT_COHORT_WIDTH).max(1) as u32;
-        self.scout_cohort_idx = (self.scout_cohort_idx + 1) % num_cohorts;
+        if self.scout_cohort_idx >= num_cohorts {
+            self.scout_cohort_idx = 0;
+            self.scout_cohort_subtick = 0;
+            return;
+        }
+        self.scout_cohort_subtick = self.scout_cohort_subtick.saturating_add(1);
+        if self.scout_cohort_subtick >= SCOUT_DWELL_TICKS {
+            self.scout_cohort_subtick = 0;
+            self.scout_cohort_idx = (self.scout_cohort_idx + 1) % num_cohorts;
+        }
     }
 
     pub fn absorb_and_scout(
@@ -354,10 +404,23 @@ impl PoreMembrane {
         if mode == ControlMode::Natural && capped_amb > 0 {
             let start = ((self.scout_cohort_idx as usize) * SCOUT_COHORT_WIDTH).min(capped_amb);
             let end = (start + SCOUT_COHORT_WIDTH).min(capped_amb);
-            for (offset, st) in self.scout_stats[start..end].iter_mut().enumerate() {
-                let c = start + offset;
+            // On dwell entry, channels not sampled last tick only re-base their derivative
+            // reference, so every accumulated statistic uses an exact dt = 1 step.
+            let multi_cohort = capped_amb > SCOUT_COHORT_WIDTH;
+            let entering = multi_cohort && self.scout_cohort_subtick == 0;
+            for c in start..end {
                 let x = sanitize_clamp(ambient_in[c], -4.0, 4.0);
-                update_channel_stat(st, x, motor_dev, motor_std);
+                let contiguous = !entering
+                    || self
+                        .sensor_pores
+                        .iter()
+                        .any(|sp| sp.alive && sp.channel as usize == c);
+                let st = &mut self.scout_stats[c];
+                if contiguous {
+                    update_channel_stat(st, x, motor_dev, motor_std);
+                } else {
+                    rebase_channel_stat(st, x);
+                }
             }
         }
 
@@ -419,13 +482,18 @@ impl PoreMembrane {
             }
 
             if mode == ControlMode::Natural {
-                let (q_pass, is_sparse_imp) = if c < capped_amb {
+                let (q_pass, is_sparse_imp, warming) = if c < capped_amb {
                     let st = &self.scout_stats[c];
-                    (st.passive_quality(), st.is_sparse_impulse())
+                    (st.passive_quality(), st.is_sparse_impulse(), !st.is_warm())
                 } else {
-                    (0.0, false)
+                    (0.0, false, false)
                 };
                 passive_sum += q_pass;
+
+                if warming {
+                    // Receptor statistics are still warming up: hold trophic state unchanged.
+                    continue;
+                }
 
                 let trophic_in = if is_sparse_imp && raw_x.abs() >= 0.015 {
                     2.25 * q_pass + 0.55 * raw_x.abs()
@@ -651,6 +719,7 @@ impl PoreMembrane {
             hasher.write_bool(st.initialized);
             if st.initialized {
                 hasher.write_f32(st.ar1_w);
+                hasher.write_f32(st.alt_ema);
             }
         }
     }
@@ -662,14 +731,27 @@ fn in_current_cohort(channel: usize, cohort_idx: usize) -> bool {
     channel >= start && channel < start + SCOUT_COHORT_WIDTH
 }
 
+/// Re-anchors the derivative reference after a sampling gap without touching any moment.
+fn rebase_channel_stat(st: &mut ChannelScoutStat, x: f32) {
+    if !st.initialized {
+        st.initialized = true;
+        st.mean = x;
+        st.samples = 0;
+    }
+    st.prev_val = x;
+    st.prev_dx = 0.0;
+}
+
 fn update_channel_stat(st: &mut ChannelScoutStat, x: f32, motor_dev: f32, motor_std: f32) {
     if !st.initialized {
         st.initialized = true;
         st.mean = x;
         st.prev_val = x;
         st.prev_dx = 0.0;
+        st.samples = 0;
         return;
     }
+    st.samples = st.samples.saturating_add(1);
 
     let step_diff = sanitize(x - st.prev_val);
     st.cov_dx_ema = sanitize_clamp(
@@ -695,6 +777,8 @@ fn update_channel_stat(st: &mut ChannelScoutStat, x: f32, motor_dev: f32, motor_
     st.ar1_err_ema = sanitize_clamp(0.93 * st.ar1_err_ema + 0.07 * err2, 0.0, 16.0);
     st.var_ema = sanitize_clamp(0.93 * st.var_ema + 0.07 * dx2, 0.0, 16.0);
     st.fourth_ema = sanitize_clamp(0.95 * st.fourth_ema + 0.05 * dx4, 0.0, 256.0);
+    let alt_inst = sanitize_clamp(-(dx * dx_prev), 0.0, 16.0);
+    st.alt_ema = sanitize_clamp(0.93 * st.alt_ema + 0.07 * alt_inst, 0.0, 16.0);
 
     let x_std = st.var_ema.max(1.0e-5).sqrt();
     let norm_excursion = sanitize_clamp((dx.abs() - 0.7 * x_std) / x_std, -3.0, 3.0);
