@@ -16,9 +16,9 @@ use crate::pores::{
 };
 use crate::rng::{Rng64, sanitize};
 use crate::tubes::{
-    EfferenceEntry, EfferenceRing, MIN_ACTUATOR_DIM, MIN_CELL_DIM, OFC_CONTEXTS, PRED_BUCKETS,
-    RING_LEN, STRIATAL_ACTUATORS, STRIATAL_CUES, STRIATAL_FEATS, STRIATAL_FWD_LEN, STRIATAL_PORES,
-    STRIATAL_TAP_DIM, STRIATAL_W_LEN, StriatalOfc, Tube, TubeGraph, TubeKind,
+    EfferenceEntry, EfferenceRing, MIN_ACTUATOR_DIM, MIN_CELL_DIM, MIN_STRIATAL_ACT, OFC_CONTEXTS,
+    PRED_BUCKETS, RING_LEN, STRIATAL_CUES, STRIATAL_FEATS, STRIATAL_PORES, STRIATAL_TAPS,
+    StriatalOfc, Tube, TubeGraph, TubeKind,
 };
 
 pub const FILE_MAGIC: u64 = 0x4131_3143_484B_5031;
@@ -28,30 +28,39 @@ pub const SLAB_COUNT: u32 = 6;
 /// Upper bound on decoded per-actuator width (fail-closed against corrupt lengths).
 pub const MAX_ACTUATOR_DIM: usize = 4_096;
 
-pub const STRIATAL_SERIALIZED_BYTES: usize = 3
-    + OFC_CONTEXTS
-    + 3 * 4 * OFC_CONTEXTS
-    + 5 * 4 * STRIATAL_PORES
-    + 4 * STRIATAL_PORES * STRIATAL_TAP_DIM
-    + 4 * STRIATAL_W_LEN
-    + 2 * 4 * OFC_CONTEXTS * STRIATAL_W_LEN
-    + 2 * 4 * OFC_CONTEXTS * STRIATAL_FEATS
-    + 2 * 4 * OFC_CONTEXTS * STRIATAL_CUES
-    + 4 * 4 * STRIATAL_CUES
-    + (1 + 2 * OFC_CONTEXTS) * 4 * STRIATAL_FWD_LEN
-    + 2 * 4 * OFC_CONTEXTS
-    + 4 * STRIATAL_ACTUATORS
-    + 8
-    + 4 * OFC_CONTEXTS
-    + 12
-    + 4 * STRIATAL_TAP_DIM
-    + 4 * STRIATAL_W_LEN
-    + 3 * 4 * STRIATAL_FEATS
-    + 2 * 4 * STRIATAL_CUES
-    + 2 * 4 * STRIATAL_ACTUATORS
-    + 4
-    + 1
-    + 24;
+/// Exact serialized striatal block size for `na` actuator columns (v5 layout: `na = 8`, no header).
+#[must_use]
+pub const fn striatal_serialized_bytes(na: usize) -> usize {
+    let tap_dim = STRIATAL_TAPS * na;
+    let w_len = na * STRIATAL_CUES;
+    let fwd_len = STRIATAL_CUES * na;
+    3 + OFC_CONTEXTS
+        + 3 * 4 * OFC_CONTEXTS
+        + 5 * 4 * STRIATAL_PORES
+        + 4 * STRIATAL_PORES * tap_dim
+        + 4 * w_len
+        + 2 * 4 * OFC_CONTEXTS * w_len
+        + 2 * 4 * OFC_CONTEXTS * STRIATAL_FEATS
+        + 2 * 4 * OFC_CONTEXTS * STRIATAL_CUES
+        + 4 * 4 * STRIATAL_CUES
+        + (1 + 2 * OFC_CONTEXTS) * 4 * fwd_len
+        + 2 * 4 * OFC_CONTEXTS
+        + 4 * na
+        + 8
+        + 4 * OFC_CONTEXTS
+        + 12
+        + 4 * tap_dim
+        + 4 * w_len
+        + 3 * 4 * STRIATAL_FEATS
+        + 2 * 4 * STRIATAL_CUES
+        + 2 * 4 * na
+        + 4
+        + 1
+        + 24
+}
+
+/// Legacy (v5) striatal block size, kept for downgrade fixtures.
+pub const STRIATAL_SERIALIZED_BYTES: usize = striatal_serialized_bytes(MIN_STRIATAL_ACT);
 
 pub const TAG_BODY: u32 = 0x424F_4459;
 pub const TAG_CELL: u32 = 0x4345_4C4C;
@@ -298,8 +307,9 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     cell_w.write_f32(org.cells.theta_phase)?;
     cell_w.write_f32(org.cells.error_reversal_gate)?;
 
-    let mut tube_w =
-        ByteWriter::with_capacity(org.tubes.slots.len() * 64 + 9600 + STRIATAL_SERIALIZED_BYTES);
+    let mut tube_w = ByteWriter::with_capacity(
+        org.tubes.slots.len() * 64 + 9600 + striatal_serialized_bytes(org.tubes.striatal.n_act),
+    );
     tube_w.write_u32(org.tubes.slots.len() as u32);
     tube_w.write_u32(org.tubes.alive_count as u32);
     for t in &org.tubes.slots {
@@ -405,8 +415,9 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
         tube_w.write_f32(am)?;
     }
     tube_w.write_f32(org.tubes.mean_interventional_agency)?;
-    let before_striatal = tube_w.buf.len();
     let st = &org.tubes.striatal;
+    tube_w.write_u32(st.n_act as u32);
+    let before_striatal = tube_w.buf.len();
     tube_w.write_u8(st.num_ctx);
     tube_w.write_u8(st.active_ctx);
     tube_w.write_u8(st.impact_refrac);
@@ -531,7 +542,7 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     tube_w.write_u64(st.tick);
     tube_w.write_u64(st.rng.s0);
     tube_w.write_u64(st.rng.s1);
-    if tube_w.buf.len().saturating_sub(before_striatal) != STRIATAL_SERIALIZED_BYTES {
+    if tube_w.buf.len().saturating_sub(before_striatal) != striatal_serialized_bytes(st.n_act) {
         return Err(PersistError::InvalidTopology);
     }
 
@@ -1359,6 +1370,20 @@ pub fn shadow_decode_organism(
     }
     let mean_interventional_agency = tr.read_f32()?;
     let striatal = if version >= 5 {
+        let s_na = if version >= 6 {
+            let n = tr.read_u32()? as usize;
+            if !(MIN_STRIATAL_ACT..=MAX_ACTUATOR_DIM).contains(&n) {
+                return Err(PersistError::InvalidTopology);
+            }
+            n
+        } else {
+            MIN_STRIATAL_ACT
+        };
+        let (s_tap, s_wl, s_fl) = (
+            STRIATAL_TAPS * s_na,
+            s_na * STRIATAL_CUES,
+            STRIATAL_CUES * s_na,
+        );
         let num_ctx = tr.read_u8()?;
         let active_ctx = tr.read_u8()?;
         let impact_refrac = tr.read_u8()?;
@@ -1405,19 +1430,19 @@ pub fn shadow_decode_organism(
         for dst in &mut pore_var_exaff {
             *dst = tr.read_f32()?;
         }
-        let mut canc_g = vec![0.0_f32; STRIATAL_PORES * STRIATAL_TAP_DIM];
+        let mut canc_g = vec![0.0_f32; STRIATAL_PORES * s_tap];
         for dst in &mut canc_g {
             *dst = tr.read_f32()?;
         }
-        let mut w_birth = vec![0.0_f32; STRIATAL_W_LEN];
+        let mut w_birth = vec![0.0_f32; s_wl];
         for dst in &mut w_birth {
             *dst = tr.read_f32()?;
         }
-        let mut w_ctx = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_W_LEN];
+        let mut w_ctx = vec![0.0_f32; OFC_CONTEXTS * s_wl];
         for dst in &mut w_ctx {
             *dst = tr.read_f32()?;
         }
-        let mut w_cons = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_W_LEN];
+        let mut w_cons = vec![0.0_f32; OFC_CONTEXTS * s_wl];
         for dst in &mut w_cons {
             *dst = tr.read_f32()?;
         }
@@ -1445,15 +1470,15 @@ pub fn shadow_decode_organism(
         for dst in &mut fwd_alpha {
             *dst = tr.read_f32()?;
         }
-        let mut fwd_j = vec![0.0_f32; STRIATAL_FWD_LEN];
+        let mut fwd_j = vec![0.0_f32; s_fl];
         for dst in &mut fwd_j {
             *dst = tr.read_f32()?;
         }
-        let mut fwd_j_ctx = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_FWD_LEN];
+        let mut fwd_j_ctx = vec![0.0_f32; OFC_CONTEXTS * s_fl];
         for dst in &mut fwd_j_ctx {
             *dst = tr.read_f32()?;
         }
-        let mut fwd_j_cons = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_FWD_LEN];
+        let mut fwd_j_cons = vec![0.0_f32; OFC_CONTEXTS * s_fl];
         for dst in &mut fwd_j_cons {
             *dst = tr.read_f32()?;
         }
@@ -1473,7 +1498,7 @@ pub fn shadow_decode_organism(
         for dst in &mut fwd_den {
             *dst = tr.read_f32()?;
         }
-        let mut s_act_mean = [0.0_f32; STRIATAL_ACTUATORS];
+        let mut s_act_mean = vec![0.0_f32; s_na];
         for dst in &mut s_act_mean {
             *dst = tr.read_f32()?;
         }
@@ -1486,11 +1511,11 @@ pub fn shadow_decode_organism(
         let r_fast_ema = tr.read_f32()?;
         let r_med200 = tr.read_f32()?;
         let valence_flip_ema = tr.read_f32()?;
-        let mut da_ring = [0.0_f32; STRIATAL_TAP_DIM];
+        let mut da_ring = vec![0.0_f32; s_tap];
         for dst in &mut da_ring {
             *dst = tr.read_f32()?;
         }
-        let mut elig_actor = vec![0.0_f32; STRIATAL_W_LEN];
+        let mut elig_actor = vec![0.0_f32; s_wl];
         for dst in &mut elig_actor {
             *dst = tr.read_f32()?;
         }
@@ -1514,11 +1539,11 @@ pub fn shadow_decode_organism(
         for dst in &mut prev_df {
             *dst = tr.read_f32()?;
         }
-        let mut prev_act = [0.0_f32; STRIATAL_ACTUATORS];
+        let mut prev_act = vec![0.0_f32; s_na];
         for dst in &mut prev_act {
             *dst = tr.read_f32()?;
         }
-        let mut noise = [0.0_f32; STRIATAL_ACTUATORS];
+        let mut noise = vec![0.0_f32; s_na];
         for dst in &mut noise {
             *dst = tr.read_f32()?;
         }
@@ -1531,6 +1556,7 @@ pub fn shadow_decode_organism(
             return Err(PersistError::InvalidTopology);
         }
         StriatalOfc {
+            n_act: s_na,
             num_ctx,
             active_ctx,
             impact_refrac,

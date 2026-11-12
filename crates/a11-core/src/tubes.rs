@@ -20,12 +20,10 @@ pub const STRIATAL_PORES: usize = 64;
 pub const STRIATAL_STRATA: usize = 4;
 pub const STRIATAL_CUES: usize = STRIATAL_STRATA * STRIATAL_PORES;
 pub const STRIATAL_FEATS: usize = STRIATAL_CUES + 1;
-pub const STRIATAL_ACTUATORS: usize = 8;
+/// Minimum striatal actuator columns (legacy v5 layout); grows with the body.
+pub const MIN_STRIATAL_ACT: usize = 8;
 pub const OFC_CONTEXTS: usize = 4;
 pub const STRIATAL_TAPS: usize = 4;
-pub const STRIATAL_TAP_DIM: usize = STRIATAL_TAPS * STRIATAL_ACTUATORS;
-pub const STRIATAL_W_LEN: usize = STRIATAL_ACTUATORS * STRIATAL_CUES;
-pub const STRIATAL_FWD_LEN: usize = STRIATAL_CUES * STRIATAL_ACTUATORS;
 
 const STRIATAL_W_CLAMP: f32 = 4.0;
 const STRIATAL_ROW_NORM_CAP: f32 = 3.2;
@@ -34,6 +32,8 @@ const STRIATAL_BIRTH_SALT: u64 = 0x5781_A7A1_0FC0_5EED;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StriatalOfc {
+    /// Actuator columns currently allocated in every actuator-strided table.
+    pub n_act: usize,
     pub num_ctx: u8,
     pub active_ctx: u8,
     pub impact_refrac: u8,
@@ -63,22 +63,22 @@ pub struct StriatalOfc {
     pub fwd_var_act: [f32; STRIATAL_CUES],
     pub fwd_num: [f32; OFC_CONTEXTS],
     pub fwd_den: [f32; OFC_CONTEXTS],
-    pub act_mean: [f32; STRIATAL_ACTUATORS],
+    pub act_mean: Vec<f32>,
     pub ctx_cooldown: u32,
     pub ctx_out_events: u32,
     pub ctx_out_err: [f32; OFC_CONTEXTS],
     pub r_fast_ema: f32,
     pub r_med200: f32,
     pub valence_flip_ema: f32,
-    pub da_ring: [f32; STRIATAL_TAP_DIM],
+    pub da_ring: Vec<f32>,
     pub elig_actor: Vec<f32>,
     pub elig_critic: [f32; STRIATAL_FEATS],
     pub feat: [f32; STRIATAL_FEATS],
     pub prev_critic_feat: [f32; STRIATAL_FEATS],
     pub prev_feat: [f32; STRIATAL_CUES],
     pub prev_df: [f32; STRIATAL_CUES],
-    pub prev_act: [f32; STRIATAL_ACTUATORS],
-    pub noise: [f32; STRIATAL_ACTUATORS],
+    pub prev_act: Vec<f32>,
+    pub noise: Vec<f32>,
     pub v_prev: f32,
     pub has_prev: bool,
     pub tick: u64,
@@ -86,37 +86,112 @@ pub struct StriatalOfc {
 }
 
 impl StriatalOfc {
-    pub const LOGICAL_BYTES: usize = 3
-        + OFC_CONTEXTS
-        + 6 * 4 * OFC_CONTEXTS
-        + 5 * 4 * STRIATAL_PORES
-        + 4 * STRIATAL_PORES * STRIATAL_TAP_DIM
-        + 4 * STRIATAL_W_LEN
-        + 2 * 4 * OFC_CONTEXTS * STRIATAL_W_LEN
-        + 2 * 4 * OFC_CONTEXTS * STRIATAL_FEATS
-        + 2 * 4 * OFC_CONTEXTS * STRIATAL_CUES
-        + 4 * 4 * STRIATAL_CUES
-        + (1 + 2 * OFC_CONTEXTS) * 4 * STRIATAL_FWD_LEN
-        + 3 * 4 * STRIATAL_ACTUATORS
-        + 4 * STRIATAL_TAP_DIM
-        + 4 * STRIATAL_W_LEN
-        + 3 * 4 * STRIATAL_FEATS
-        + 2 * 4 * STRIATAL_CUES
-        + 64;
+    /// `(actuator columns, tap ring width, actor row-block length, forward-model length)`.
+    #[inline]
+    #[must_use]
+    pub fn dims(&self) -> (usize, usize, usize, usize) {
+        let na = self.n_act;
+        (
+            na,
+            STRIATAL_TAPS * na,
+            na * STRIATAL_CUES,
+            STRIATAL_CUES * na,
+        )
+    }
+
+    #[must_use]
+    pub fn logical_bytes(&self) -> usize {
+        let (na, tap_dim, w_len, fwd_len) = self.dims();
+        3 + OFC_CONTEXTS
+            + 6 * 4 * OFC_CONTEXTS
+            + 5 * 4 * STRIATAL_PORES
+            + 4 * STRIATAL_PORES * tap_dim
+            + 4 * w_len
+            + 2 * 4 * OFC_CONTEXTS * w_len
+            + 2 * 4 * OFC_CONTEXTS * STRIATAL_FEATS
+            + 2 * 4 * OFC_CONTEXTS * STRIATAL_CUES
+            + 4 * 4 * STRIATAL_CUES
+            + (1 + 2 * OFC_CONTEXTS) * 4 * fwd_len
+            + 3 * 4 * na
+            + 4 * tap_dim
+            + 4 * w_len
+            + 3 * 4 * STRIATAL_FEATS
+            + 2 * 4 * STRIATAL_CUES
+            + 72
+    }
+
+    /// Grows every actuator-strided table to `num_actuators` columns. Existing columns keep
+    /// their learned values exactly; new actor rows are drawn from the circuit's own birth
+    /// distribution (continuing its RNG stream), new forward/cancellation columns start at zero.
+    pub fn ensure_actuators(&mut self, num_actuators: usize) {
+        let (old_na, _, old_w_len, old_fwd_len) = self.dims();
+        let new_na = num_actuators.max(old_na);
+        if new_na == old_na {
+            return;
+        }
+        let scale = 0.10 / (STRIATAL_FEATS as f32).sqrt();
+        let extra_rows = (new_na - old_na) * STRIATAL_CUES;
+        let mut new_birth = Vec::with_capacity(extra_rows);
+        for _ in 0..extra_rows {
+            new_birth.push(sanitize(scale * self.rng.next_f32_signed()));
+        }
+        self.w_birth.extend_from_slice(&new_birth);
+        let new_w_len = new_na * STRIATAL_CUES;
+        for table in [&mut self.w_ctx, &mut self.w_cons] {
+            let mut grown = Vec::with_capacity(OFC_CONTEXTS * new_w_len);
+            for c in 0..OFC_CONTEXTS {
+                grown.extend_from_slice(&table[c * old_w_len..(c + 1) * old_w_len]);
+                grown.extend_from_slice(&new_birth);
+            }
+            *table = grown;
+        }
+        self.elig_actor.resize(new_w_len, 0.0);
+        let restride = |src: &[f32], rows: usize, old_c: usize, new_c: usize| -> Vec<f32> {
+            let mut out = vec![0.0_f32; rows * new_c];
+            for r in 0..rows {
+                out[r * new_c..r * new_c + old_c].copy_from_slice(&src[r * old_c..(r + 1) * old_c]);
+            }
+            out
+        };
+        self.fwd_j = restride(&self.fwd_j, STRIATAL_CUES, old_na, new_na);
+        self.fwd_j_ctx = restride(
+            &self.fwd_j_ctx,
+            OFC_CONTEXTS * STRIATAL_CUES,
+            old_na,
+            new_na,
+        );
+        self.fwd_j_cons = restride(
+            &self.fwd_j_cons,
+            OFC_CONTEXTS * STRIATAL_CUES,
+            old_na,
+            new_na,
+        );
+        self.canc_g = restride(&self.canc_g, STRIATAL_PORES * STRIATAL_TAPS, old_na, new_na);
+        self.da_ring = restride(&self.da_ring, STRIATAL_TAPS, old_na, new_na);
+        self.act_mean.resize(new_na, 0.0);
+        self.prev_act.resize(new_na, 0.0);
+        self.noise.resize(new_na, 0.0);
+        debug_assert_eq!(old_fwd_len, STRIATAL_CUES * old_na);
+        self.n_act = new_na;
+    }
 
     #[must_use]
     pub fn from_seed(seed: u64) -> Self {
+        let na = MIN_STRIATAL_ACT;
+        let (tap_dim, w_len, fwd_len) =
+            (STRIATAL_TAPS * na, na * STRIATAL_CUES, STRIATAL_CUES * na);
         let mut birth_rng = Rng64::from_seed(seed ^ STRIATAL_BIRTH_SALT);
         let scale = 0.10 / (STRIATAL_FEATS as f32).sqrt();
-        let w_birth: Vec<f32> = (0..STRIATAL_W_LEN)
+        let w_birth: Vec<f32> = (0..w_len)
             .map(|_| sanitize(scale * birth_rng.next_f32_signed()))
             .collect();
-        let mut w_ctx = Vec::with_capacity(OFC_CONTEXTS * STRIATAL_W_LEN);
+        let mut w_ctx = Vec::with_capacity(OFC_CONTEXTS * w_len);
         for _ in 0..OFC_CONTEXTS {
             w_ctx.extend_from_slice(&w_birth);
         }
         let w_cons = w_ctx.clone();
         Self {
+            n_act: na,
             num_ctx: 1,
             active_ctx: 0,
             impact_refrac: 0,
@@ -129,7 +204,7 @@ impl StriatalOfc {
             pore_mean: [0.0; STRIATAL_PORES],
             pore_var_raw: [1.0e-4; STRIATAL_PORES],
             pore_var_exaff: [1.0e-4; STRIATAL_PORES],
-            canc_g: vec![0.0; STRIATAL_PORES * STRIATAL_TAP_DIM],
+            canc_g: vec![0.0; STRIATAL_PORES * tap_dim],
             w_birth,
             w_ctx,
             w_cons,
@@ -139,29 +214,29 @@ impl StriatalOfc {
             q_cons: vec![0.0; OFC_CONTEXTS * STRIATAL_CUES],
             fwd_b: [0.0; STRIATAL_CUES],
             fwd_alpha: [0.0; STRIATAL_CUES],
-            fwd_j: vec![0.0; STRIATAL_FWD_LEN],
-            fwd_j_ctx: vec![0.0; OFC_CONTEXTS * STRIATAL_FWD_LEN],
-            fwd_j_cons: vec![0.0; OFC_CONTEXTS * STRIATAL_FWD_LEN],
+            fwd_j: vec![0.0; fwd_len],
+            fwd_j_ctx: vec![0.0; OFC_CONTEXTS * fwd_len],
+            fwd_j_cons: vec![0.0; OFC_CONTEXTS * fwd_len],
             fwd_var_null: [1.0e-6; STRIATAL_CUES],
             fwd_var_act: [1.0e-6; STRIATAL_CUES],
             fwd_num: [0.0; OFC_CONTEXTS],
             fwd_den: [0.0; OFC_CONTEXTS],
-            act_mean: [0.0; STRIATAL_ACTUATORS],
+            act_mean: vec![0.0; na],
             ctx_cooldown: 0,
             ctx_out_events: 0,
             ctx_out_err: [0.0; OFC_CONTEXTS],
             r_fast_ema: 0.0,
             r_med200: 0.0,
             valence_flip_ema: 0.0,
-            da_ring: [0.0; STRIATAL_TAP_DIM],
-            elig_actor: vec![0.0; STRIATAL_W_LEN],
+            da_ring: vec![0.0; tap_dim],
+            elig_actor: vec![0.0; w_len],
             elig_critic: [0.0; STRIATAL_FEATS],
             feat: [0.0; STRIATAL_FEATS],
             prev_critic_feat: [0.0; STRIATAL_FEATS],
             prev_feat: [0.0; STRIATAL_CUES],
             prev_df: [0.0; STRIATAL_CUES],
-            prev_act: [0.0; STRIATAL_ACTUATORS],
-            noise: [0.0; STRIATAL_ACTUATORS],
+            prev_act: vec![0.0; na],
+            noise: vec![0.0; na],
             v_prev: 0.0,
             has_prev: false,
             tick: 0,
@@ -170,10 +245,11 @@ impl StriatalOfc {
     }
 
     pub fn reset_learned_keep_birth(&mut self) {
+        let (na, tap_dim, w_len, _) = self.dims();
         for c in 0..OFC_CONTEXTS {
-            let off = c * STRIATAL_W_LEN;
-            self.w_ctx[off..off + STRIATAL_W_LEN].copy_from_slice(&self.w_birth);
-            self.w_cons[off..off + STRIATAL_W_LEN].copy_from_slice(&self.w_birth);
+            let off = c * w_len;
+            self.w_ctx[off..off + w_len].copy_from_slice(&self.w_birth);
+            self.w_cons[off..off + w_len].copy_from_slice(&self.w_birth);
         }
         self.v_ctx.fill(0.0);
         self.v_cons.fill(0.0);
@@ -201,22 +277,22 @@ impl StriatalOfc {
         self.fwd_var_act = [1.0e-6; STRIATAL_CUES];
         self.fwd_num = [0.0; OFC_CONTEXTS];
         self.fwd_den = [0.0; OFC_CONTEXTS];
-        self.act_mean = [0.0; STRIATAL_ACTUATORS];
+        self.act_mean = vec![0.0; na];
         self.ctx_cooldown = 0;
         self.ctx_out_events = 0;
         self.ctx_out_err = [0.0; OFC_CONTEXTS];
         self.r_fast_ema = 0.0;
         self.r_med200 = 0.0;
         self.valence_flip_ema = 0.0;
-        self.da_ring = [0.0; STRIATAL_TAP_DIM];
+        self.da_ring = vec![0.0; tap_dim];
         self.elig_actor.fill(0.0);
         self.elig_critic = [0.0; STRIATAL_FEATS];
         self.feat = [0.0; STRIATAL_FEATS];
         self.prev_critic_feat = [0.0; STRIATAL_FEATS];
         self.prev_feat = [0.0; STRIATAL_CUES];
         self.prev_df = [0.0; STRIATAL_CUES];
-        self.prev_act = [0.0; STRIATAL_ACTUATORS];
-        self.noise = [0.0; STRIATAL_ACTUATORS];
+        self.prev_act = vec![0.0; na];
+        self.noise = vec![0.0; na];
         self.v_prev = 0.0;
         self.has_prev = false;
         self.tick = 0;
@@ -232,18 +308,19 @@ impl StriatalOfc {
     }
 
     fn reset_pore_slot(&mut self, p: usize, new_ch: u32) {
+        let (na, tap_dim, w_len, fwd_len) = self.dims();
         self.pore_ch[p] = new_ch;
         self.pore_age[p] = 0;
         self.pore_mean[p] = 0.0;
         self.pore_var_raw[p] = 1.0e-4;
         self.pore_var_exaff[p] = 1.0e-4;
-        let g_off = p * STRIATAL_TAP_DIM;
-        self.canc_g[g_off..g_off + STRIATAL_TAP_DIM].fill(0.0);
+        let g_off = p * tap_dim;
+        self.canc_g[g_off..g_off + tap_dim].fill(0.0);
         for st in 0..STRIATAL_STRATA {
             let fi = st * STRIATAL_PORES + p;
             for c in 0..OFC_CONTEXTS {
-                let w_off = c * STRIATAL_W_LEN;
-                for m in 0..STRIATAL_ACTUATORS {
+                let w_off = c * w_len;
+                for m in 0..na {
                     let row = m * STRIATAL_CUES;
                     let wb = self.w_birth[row + fi];
                     self.w_ctx[w_off + row + fi] = wb;
@@ -255,11 +332,11 @@ impl StriatalOfc {
                 let q_off = c * STRIATAL_CUES;
                 self.q_ctx[q_off + fi] = 0.0;
                 self.q_cons[q_off + fi] = 0.0;
-                let j_off = c * STRIATAL_FWD_LEN + fi * STRIATAL_ACTUATORS;
-                self.fwd_j_ctx[j_off..j_off + STRIATAL_ACTUATORS].fill(0.0);
-                self.fwd_j_cons[j_off..j_off + STRIATAL_ACTUATORS].fill(0.0);
+                let j_off = c * fwd_len + fi * na;
+                self.fwd_j_ctx[j_off..j_off + na].fill(0.0);
+                self.fwd_j_cons[j_off..j_off + na].fill(0.0);
             }
-            for m in 0..STRIATAL_ACTUATORS {
+            for m in 0..na {
                 self.elig_actor[m * STRIATAL_CUES + fi] = 0.0;
             }
             self.elig_critic[fi] = 0.0;
@@ -269,8 +346,8 @@ impl StriatalOfc {
             self.fwd_alpha[fi] = 0.0;
             self.fwd_var_null[fi] = 1.0e-6;
             self.fwd_var_act[fi] = 1.0e-6;
-            let j_off = fi * STRIATAL_ACTUATORS;
-            self.fwd_j[j_off..j_off + STRIATAL_ACTUATORS].fill(0.0);
+            let j_off = fi * na;
+            self.fwd_j[j_off..j_off + na].fill(0.0);
         }
     }
 
@@ -311,30 +388,32 @@ impl StriatalOfc {
     }
 
     fn consolidate_active_context(&mut self) {
+        let (_, _, w_len, fwd_len) = self.dims();
         let c = self.active_ctx as usize;
-        self.w_cons[c * STRIATAL_W_LEN..(c + 1) * STRIATAL_W_LEN]
-            .copy_from_slice(&self.w_ctx[c * STRIATAL_W_LEN..(c + 1) * STRIATAL_W_LEN]);
+        self.w_cons[c * w_len..(c + 1) * w_len]
+            .copy_from_slice(&self.w_ctx[c * w_len..(c + 1) * w_len]);
         self.v_cons[c * STRIATAL_FEATS..(c + 1) * STRIATAL_FEATS]
             .copy_from_slice(&self.v_ctx[c * STRIATAL_FEATS..(c + 1) * STRIATAL_FEATS]);
         self.q_cons[c * STRIATAL_CUES..(c + 1) * STRIATAL_CUES]
             .copy_from_slice(&self.q_ctx[c * STRIATAL_CUES..(c + 1) * STRIATAL_CUES]);
-        self.fwd_j_cons[c * STRIATAL_FWD_LEN..(c + 1) * STRIATAL_FWD_LEN]
-            .copy_from_slice(&self.fwd_j_ctx[c * STRIATAL_FWD_LEN..(c + 1) * STRIATAL_FWD_LEN]);
+        self.fwd_j_cons[c * fwd_len..(c + 1) * fwd_len]
+            .copy_from_slice(&self.fwd_j_ctx[c * fwd_len..(c + 1) * fwd_len]);
         self.ctx_has_cons[c] = 1;
     }
 
     fn restore_consolidated_context(&mut self, c: usize) {
+        let (_, _, w_len, fwd_len) = self.dims();
         if self.ctx_has_cons[c] == 0 {
             return;
         }
-        self.w_ctx[c * STRIATAL_W_LEN..(c + 1) * STRIATAL_W_LEN]
-            .copy_from_slice(&self.w_cons[c * STRIATAL_W_LEN..(c + 1) * STRIATAL_W_LEN]);
+        self.w_ctx[c * w_len..(c + 1) * w_len]
+            .copy_from_slice(&self.w_cons[c * w_len..(c + 1) * w_len]);
         self.v_ctx[c * STRIATAL_FEATS..(c + 1) * STRIATAL_FEATS]
             .copy_from_slice(&self.v_cons[c * STRIATAL_FEATS..(c + 1) * STRIATAL_FEATS]);
         self.q_ctx[c * STRIATAL_CUES..(c + 1) * STRIATAL_CUES]
             .copy_from_slice(&self.q_cons[c * STRIATAL_CUES..(c + 1) * STRIATAL_CUES]);
-        self.fwd_j_ctx[c * STRIATAL_FWD_LEN..(c + 1) * STRIATAL_FWD_LEN]
-            .copy_from_slice(&self.fwd_j_cons[c * STRIATAL_FWD_LEN..(c + 1) * STRIATAL_FWD_LEN]);
+        self.fwd_j_ctx[c * fwd_len..(c + 1) * fwd_len]
+            .copy_from_slice(&self.fwd_j_cons[c * fwd_len..(c + 1) * fwd_len]);
     }
 
     #[must_use]
@@ -988,7 +1067,7 @@ impl TubeGraph {
             + 7 * 4 * PRED_BUCKETS
             + 4 * RING_LEN
             + 5 * 4 * self.act_dim()
-            + StriatalOfc::LOGICAL_BYTES
+            + self.striatal.logical_bytes()
             + 70
     }
 
@@ -5995,9 +6074,13 @@ impl TubeGraph {
         membrane: &mut PoreMembrane,
         mode: ControlMode,
     ) -> (Option<Vec<f32>>, u64) {
-        if num_actuators == 0 || num_actuators > STRIATAL_ACTUATORS {
+        // UNRESOLVED SPLIT-BRAIN (M30): two count-free arbitration rules were falsified
+        // (S1 striatal-everywhere: teach 0/3; S2 discovered-field routing: gates G7/G8 collapse).
+        if num_actuators == 0 || num_actuators > MIN_STRIATAL_ACT {
             return (None, 0);
         }
+        self.striatal.ensure_actuators(num_actuators);
+        let (na, tap_dim, w_len, fwd_len) = self.striatal.dims();
         let is_plastic = mode == ControlMode::Natural;
         let reward = sanitize(metabolic_influx).max(0.0) - sanitize(tissue_stress).max(0.0);
 
@@ -6035,11 +6118,11 @@ impl TubeGraph {
                 0.0
             };
             let xc = raw_x - mean_x;
-            let g_off = p * STRIATAL_TAP_DIM;
+            let g_off = p * tap_dim;
             let mut reaff = 0.0_f32;
             if matched {
                 for tap in 0..STRIATAL_TAPS {
-                    let r_off = tap * STRIATAL_ACTUATORS;
+                    let r_off = tap * na;
                     for m in 0..num_actuators {
                         reaff += self.striatal.canc_g[g_off + r_off + m]
                             * self.striatal.da_ring[r_off + m];
@@ -6058,7 +6141,7 @@ impl TubeGraph {
                     (1.0 - beta_m) * self.striatal.pore_var_exaff[p] + beta_m * x_tilde * x_tilde,
                 );
                 for tap in 0..STRIATAL_TAPS {
-                    let r_off = tap * STRIATAL_ACTUATORS;
+                    let r_off = tap * na;
                     for m in 0..num_actuators {
                         let idx = g_off + r_off + m;
                         self.striatal.canc_g[idx] = sanitize_clamp(
@@ -6153,7 +6236,7 @@ impl TubeGraph {
         if self.striatal.has_prev {
             let act_c = self.striatal.active_ctx as usize;
             let num_c = self.striatal.num_ctx as usize;
-            let mut da = [0.0_f32; STRIATAL_ACTUATORS];
+            let mut da = vec![0.0_f32; na];
             let mut da_norm_sq = 0.0_f32;
             for m in 0..num_actuators {
                 let d = self.striatal.prev_act[m] - self.striatal.act_mean[m];
@@ -6170,10 +6253,10 @@ impl TubeGraph {
                 let pdf = self.striatal.prev_df[j];
                 let pred_null = self.striatal.fwd_b[j] + self.striatal.fwd_alpha[j] * pdf;
                 let e_null = df - pred_null;
-                let j_off = j * STRIATAL_ACTUATORS;
+                let j_off = j * na;
                 if is_plastic && sp_alive[p_slot] && self.striatal.pore_age[p_slot] >= 8 {
                     for c in 0..num_c {
-                        let c_base = c * STRIATAL_FWD_LEN + j_off;
+                        let c_base = c * fwd_len + j_off;
                         let mut yh = 0.0_f32;
                         if self.striatal.ctx_has_cons[c] != 0 {
                             for m in 0..num_actuators {
@@ -6216,7 +6299,7 @@ impl TubeGraph {
                             2.0,
                         );
                     }
-                    let live_base = act_c * STRIATAL_FWD_LEN + j_off;
+                    let live_base = act_c * fwd_len + j_off;
                     let mut ctx_pred = 0.0_f32;
                     for m in 0..num_actuators {
                         ctx_pred += self.striatal.fwd_j_ctx[live_base + m] * da[m];
@@ -6355,9 +6438,9 @@ impl TubeGraph {
                 && beta_act > 0.55
                 && (self.striatal.ctx_ticks[act_c] & 63) == 0
             {
-                let f_off = act_c * STRIATAL_FWD_LEN;
-                self.striatal.fwd_j_cons[f_off..f_off + STRIATAL_FWD_LEN]
-                    .copy_from_slice(&self.striatal.fwd_j_ctx[f_off..f_off + STRIATAL_FWD_LEN]);
+                let f_off = act_c * fwd_len;
+                self.striatal.fwd_j_cons[f_off..f_off + fwd_len]
+                    .copy_from_slice(&self.striatal.fwd_j_ctx[f_off..f_off + fwd_len]);
             }
 
             if self.striatal.ctx_cooldown == 0 && self.striatal.ctx_ticks[act_c] >= 220 {
@@ -6434,8 +6517,8 @@ impl TubeGraph {
                     if self.striatal.ctx_has_cons[target_ctx] == 0
                         && self.striatal.ctx_has_cons[act_c] != 0
                     {
-                        let dst_off = target_ctx * STRIATAL_W_LEN;
-                        for m in 0..STRIATAL_ACTUATORS {
+                        let dst_off = target_ctx * w_len;
+                        for m in 0..na {
                             let row = m * STRIATAL_CUES;
                             for st in 0..STRIATAL_STRATA {
                                 let st_base = row + st * STRIATAL_PORES;
@@ -6457,21 +6540,20 @@ impl TubeGraph {
                         self.striatal.v_ctx[v_dst..v_dst + STRIATAL_FEATS].fill(0.0);
                         let q_dst = target_ctx * STRIATAL_CUES;
                         self.striatal.q_ctx[q_dst..q_dst + STRIATAL_CUES].fill(0.0);
-                        let fj_src = act_c * STRIATAL_FWD_LEN;
-                        let fj_dst = target_ctx * STRIATAL_FWD_LEN;
+                        let fj_src = act_c * fwd_len;
+                        let fj_dst = target_ctx * fwd_len;
                         if has_fwd_act && beta_act < -0.20 {
-                            for k in 0..STRIATAL_FWD_LEN {
+                            for k in 0..fwd_len {
                                 let inv_j = sanitize(-self.striatal.fwd_j_cons[fj_src + k]);
                                 self.striatal.fwd_j_ctx[fj_dst + k] = inv_j;
                                 self.striatal.fwd_j[k] = inv_j;
                             }
                         } else if has_fwd_act && beta_act > 0.20 {
-                            self.striatal.fwd_j_ctx[fj_dst..fj_dst + STRIATAL_FWD_LEN]
-                                .copy_from_slice(
-                                    &self.striatal.fwd_j_cons[fj_src..fj_src + STRIATAL_FWD_LEN],
-                                );
+                            self.striatal.fwd_j_ctx[fj_dst..fj_dst + fwd_len].copy_from_slice(
+                                &self.striatal.fwd_j_cons[fj_src..fj_src + fwd_len],
+                            );
                         } else {
-                            self.striatal.fwd_j_ctx[fj_dst..fj_dst + STRIATAL_FWD_LEN].fill(0.0);
+                            self.striatal.fwd_j_ctx[fj_dst..fj_dst + fwd_len].fill(0.0);
                         }
                     }
                     if self.striatal.ctx_has_cons[act_c] != 0 {
@@ -6479,10 +6561,10 @@ impl TubeGraph {
                     }
                     if self.striatal.ctx_has_cons[target_ctx] != 0 {
                         self.striatal.restore_consolidated_context(target_ctx);
-                        let fj_dst = target_ctx * STRIATAL_FWD_LEN;
-                        self.striatal.fwd_j.copy_from_slice(
-                            &self.striatal.fwd_j_cons[fj_dst..fj_dst + STRIATAL_FWD_LEN],
-                        );
+                        let fj_dst = target_ctx * fwd_len;
+                        self.striatal
+                            .fwd_j
+                            .copy_from_slice(&self.striatal.fwd_j_cons[fj_dst..fj_dst + fwd_len]);
                     }
                     self.striatal.active_ctx = target_ctx as u8;
                     self.striatal.impact_refrac = 0;
@@ -6543,7 +6625,7 @@ impl TubeGraph {
                     STRIATAL_W_CLAMP,
                 );
             }
-            let w_off = act_c * STRIATAL_W_LEN;
+            let w_off = act_c * w_len;
             for m in 0..num_actuators {
                 let row = m * STRIATAL_CUES;
                 let row_slice = &mut self.striatal.w_ctx[w_off + row..w_off + row + STRIATAL_CUES];
@@ -6600,10 +6682,10 @@ impl TubeGraph {
             act_c
         };
         let use_cons_w = !is_plastic && read_c != act_c && self.striatal.ctx_has_cons[read_c] != 0;
-        let w_off = read_c * STRIATAL_W_LEN;
+        let w_off = read_c * w_len;
         let v_read_off = read_c * STRIATAL_FEATS;
         let q_read_off = read_c * STRIATAL_CUES;
-        let fj_read_off = read_c * STRIATAL_FWD_LEN;
+        let fj_read_off = read_c * fwd_len;
         let v_slice = if use_cons_w {
             &self.striatal.v_cons[v_read_off..v_read_off + STRIATAL_CUES]
         } else {
@@ -6615,9 +6697,9 @@ impl TubeGraph {
             &self.striatal.q_ctx[q_read_off..q_read_off + STRIATAL_CUES]
         };
         let j_slice = if use_cons_w {
-            &self.striatal.fwd_j_cons[fj_read_off..fj_read_off + STRIATAL_FWD_LEN]
+            &self.striatal.fwd_j_cons[fj_read_off..fj_read_off + fwd_len]
         } else {
-            &self.striatal.fwd_j_ctx[fj_read_off..fj_read_off + STRIATAL_FWD_LEN]
+            &self.striatal.fwd_j_ctx[fj_read_off..fj_read_off + fwd_len]
         };
 
         let mut habit_norm_sum = 0.0_f32;
@@ -6641,7 +6723,7 @@ impl TubeGraph {
         } else {
             0.0
         };
-        let mut mb_drive = [0.0_f32; STRIATAL_ACTUATORS];
+        let mut mb_drive = vec![0.0_f32; na];
         if mb_gate > 1.0e-3 {
             let mut pool_st = [0.0_f32; STRIATAL_STRATA];
             let mut v_mean_st = [0.0_f32; STRIATAL_STRATA];
@@ -6667,7 +6749,7 @@ impl TubeGraph {
                     let st_base = st * STRIATAL_PORES;
                     let mut mean_j = 0.0_f32;
                     for p in 0..STRIATAL_PORES {
-                        mean_j += j_slice[(st_base + p) * STRIATAL_ACTUATORS + m];
+                        mean_j += j_slice[(st_base + p) * na + m];
                     }
                     mean_j *= 1.0 / (STRIATAL_PORES as f32);
                     let app = pool_st[st];
@@ -6675,7 +6757,7 @@ impl TubeGraph {
                     for p in 0..STRIATAL_PORES {
                         let idx = st_base + p;
                         let f_v = feat_now[idx];
-                        let j_v = j_slice[idx * STRIATAL_ACTUATORS + m] - mean_j;
+                        let j_v = j_slice[idx * na + m] - mean_j;
                         let val_v = 1.6 * q_slice[idx] + 0.25 * (v_slice[idx] - vm) + app;
                         gm += f_v * val_v * j_v;
                         jf_norm_sq += (f_v * j_v) * (f_v * j_v);
@@ -6734,8 +6816,8 @@ impl TubeGraph {
             }
         }
         for tap in (1..STRIATAL_TAPS).rev() {
-            let dst_off = tap * STRIATAL_ACTUATORS;
-            let src_off = (tap - 1) * STRIATAL_ACTUATORS;
+            let dst_off = tap * na;
+            let src_off = (tap - 1) * na;
             for m in 0..num_actuators {
                 self.striatal.da_ring[dst_off + m] = self.striatal.da_ring[src_off + m];
             }
