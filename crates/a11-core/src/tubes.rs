@@ -796,6 +796,12 @@ pub struct TubeGraph {
     pub vocal_blk_sum: [f32; 4],
     pub vocal_s_acc: [f32; 4],
     pub vocal_v_acc: [f32; 4],
+    pub even_tick_cnt: u32,
+    pub even_y_ema: f32,
+    pub even_f_ema: [f32; 4],
+    pub even_blk_sum: [f32; 4],
+    pub even_s_acc: [f32; 4],
+    pub even_v_acc: [f32; 4],
     pub social_loom_ema: f32,
     pub spatial_prox_ring: [f32; RING_LEN],
     pub spatial_prox_cursor: u8,
@@ -1301,6 +1307,12 @@ impl TubeGraph {
             vocal_blk_sum: [0.0; 4],
             vocal_s_acc: [0.0; 4],
             vocal_v_acc: [0.0; 4],
+            even_tick_cnt: 0,
+            even_y_ema: 0.0,
+            even_f_ema: [0.0; 4],
+            even_blk_sum: [0.0; 4],
+            even_s_acc: [0.0; 4],
+            even_v_acc: [0.0; 4],
             social_loom_ema: 0.0,
             spatial_prox_ring: [0.0; RING_LEN],
             spatial_prox_cursor: 0,
@@ -1417,7 +1429,7 @@ impl TubeGraph {
             + 4 * RING_LEN
             + 6 * 4 * self.act_dim()
             + self.striatal.logical_bytes()
-            + 191
+            + 263
     }
 
     pub fn ensure_cell_capacity(&mut self, cell_slots_len: usize) {
@@ -3980,6 +3992,12 @@ impl TubeGraph {
                     self.vocal_blk_sum = [0.0; 4];
                     self.vocal_s_acc = [0.0; 4];
                     self.vocal_v_acc = [0.0; 4];
+                    self.even_tick_cnt = 0;
+                    self.even_y_ema = 0.0;
+                    self.even_f_ema = [0.0; 4];
+                    self.even_blk_sum = [0.0; 4];
+                    self.even_s_acc = [0.0; 4];
+                    self.even_v_acc = [0.0; 4];
                     self.pore_vocal_reaff = [0.0; PRED_BUCKETS];
                     self.vocal_eff_s1 = 0.0;
                     self.vocal_eff_s2 = 0.0;
@@ -4008,7 +4026,7 @@ impl TubeGraph {
                             ((self.vocal_onset_hist << 1) | u32::from(o_now)) & 0x03FF_FFFF;
                     }
                     for tube in &mut self.slots {
-                        if tube.alive && tube.kind == TubeKind::CellToMotor && (tube.pre & 1) != 0 {
+                        if tube.alive && tube.kind == TubeKind::CellToMotor {
                             tube.myelin_plasticity_accum = 0.0;
                         }
                     }
@@ -4176,29 +4194,6 @@ impl TubeGraph {
             }
         }
 
-        let mut even_sensitive_open = body.rest_consolidation_ticks < 9_000;
-        if !even_sensitive_open && self.has_tonotopic_bank() {
-            if let Some(mg) = embodied_m_glottal {
-                let (e_peak, _, _, _, _, _, _, _) = self.motor_contingency_stats(membrane, mg);
-                if e_peak >= 0.72 {
-                    even_sensitive_open = true;
-                }
-            }
-            if !even_sensitive_open {
-                for tube in &mut self.slots {
-                    if tube.alive
-                        && tube.kind == TubeKind::CellToMotor
-                        && (tube.pre & 1) == 0
-                        && tube.myelin_plasticity_accum != 0.0
-                    {
-                        let decayed = sanitize(0.99 * tube.myelin_plasticity_accum);
-                        tube.myelin_plasticity_accum =
-                            if decayed.abs() < 1.0e-3 { 0.0 } else { decayed };
-                    }
-                }
-            }
-        }
-
         if let Some(mg) = embodied_m_glottal.or(locked_mg_cr)
             && ring.at_lag(16).is_some_and(|e| e.tick > 0)
         {
@@ -4207,46 +4202,113 @@ impl TubeGraph {
             let eff_v = Self::motor_efference_active_lags(ring, mg);
             let fwd_on = |lg: usize| -> bool { eff_v[lg] && !eff_v[lg + 1] };
 
-            let val_prev1 = ring
-                .at_lag(1)
-                .map_or(raw_somatic_valence, |e| e.raw_valence_at_commit);
-            let val_prev2 = ring
-                .at_lag(2)
-                .map_or(val_prev1, |e| e.raw_valence_at_commit);
-            let d_val_1 = raw_somatic_valence - val_prev1;
-            let level_jump = raw_somatic_valence - body.baseline_valence_ema;
-            let rim_reentry = raw_somatic_valence < 0.24
-                && (3..=15).any(|d| {
-                    ring.at_lag(d)
-                        .is_some_and(|e| e.raw_valence_at_commit > 0.16)
-                });
-            let trophic_burst = if even_sensitive_open
-                && !rim_reentry
-                && ((level_jump > 0.032 && d_val_1 > 0.042)
-                    || (raw_somatic_valence > 0.18 && d_val_1 > 0.068))
-                && (val_prev1 >= -0.025 || (raw_somatic_valence > 0.055 && d_val_1 > 0.085))
-                && val_prev2 < raw_somatic_valence - 0.042
-            {
-                sanitize_clamp(9.2 * d_val_1, 0.0, 1.0)
-            } else {
-                0.0
-            };
+            if !body.is_resting() && ring.at_lag(16).is_some_and(|e| e.tick >= 64) {
+                let val_prev1 = ring
+                    .at_lag(1)
+                    .map_or(raw_somatic_valence, |e| e.raw_valence_at_commit);
+                let val_prev2 = ring
+                    .at_lag(2)
+                    .map_or(val_prev1, |e| e.raw_valence_at_commit);
+                let d_val_1 = raw_somatic_valence - val_prev1;
+                let level_jump = raw_somatic_valence - body.baseline_valence_ema;
+                let rim_reentry = raw_somatic_valence < 0.24
+                    && (3..=15).any(|d| {
+                        ring.at_lag(d)
+                            .is_some_and(|e| e.raw_valence_at_commit > 0.16)
+                    });
+                let trophic_burst = if !rim_reentry
+                    && ((level_jump > 0.032 && d_val_1 > 0.042)
+                        || (raw_somatic_valence > 0.18 && d_val_1 > 0.068))
+                    && (val_prev1 >= -0.025 || (raw_somatic_valence > 0.055 && d_val_1 > 0.085))
+                    && val_prev2 < raw_somatic_valence - 0.042
+                {
+                    sanitize_clamp(9.2 * d_val_1, 0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let y_even = if trophic_burst > 0.05 { 1.0_f32 } else { 0.0_f32 };
 
-            if trophic_burst > 0.05 {
-                let mut even_delta = [0.0_f32; 4];
                 let mut even_hit_lag: [Option<usize>; 4] = [None; 4];
-                let mut any_even_upd = false;
-                for b in 0..4 {
-                    if let Some(lag_on) = (EVEN_LO[b]..=EVEN_HI[b]).find(|&lg| fwd_on(lg)) {
-                        even_delta[b] = 0.150 * trophic_burst;
-                        even_hit_lag[b] = Some(lag_on);
-                        any_even_upd = true;
-                    } else if !((EVEN_LO[b] - 1)..=(EVEN_HI[b] + 1)).any(&fwd_on) {
-                        even_delta[b] = -0.072 * trophic_burst;
-                        any_even_upd = true;
+                if self.even_tick_cnt >= 64 {
+                    let y_tilde = y_even - self.even_y_ema;
+                    for b in 0..4 {
+                        let hit_lg = (EVEN_LO[b]..=EVEN_HI[b]).find(|&lg| fwd_on(lg));
+                        if y_even > 0.5 {
+                            even_hit_lag[b] = hit_lg;
+                        }
+                        let x_b = if hit_lg.is_some() { 1.0_f32 } else { 0.0_f32 };
+                        let x_tilde = x_b - self.even_f_ema[b];
+                        self.even_blk_sum[b] = sanitize_clamp(
+                            self.even_blk_sum[b] + y_tilde * x_tilde,
+                            -64.0,
+                            64.0,
+                        );
+                        self.even_f_ema[b] = sanitize_clamp(
+                            0.985 * self.even_f_ema[b] + 0.015 * x_b,
+                            0.0,
+                            1.0,
+                        );
+                    }
+                    self.even_y_ema =
+                        sanitize_clamp(0.985 * self.even_y_ema + 0.015 * y_even, 0.0, 1.0);
+
+                    if (self.even_tick_cnt & 63) == 63 {
+                        for b in 0..4 {
+                            let bs = self.even_blk_sum[b];
+                            self.even_blk_sum[b] = 0.0;
+                            self.even_s_acc[b] = sanitize_clamp(
+                                0.9994 * self.even_s_acc[b] + bs,
+                                -5_000.0,
+                                5_000.0,
+                            );
+                            self.even_v_acc[b] = sanitize_clamp(
+                                0.9994 * self.even_v_acc[b] + bs * bs,
+                                0.0,
+                                50_000.0,
+                            );
+                        }
+                    }
+                } else {
+                    self.even_y_ema =
+                        sanitize_clamp(0.92 * self.even_y_ema + 0.08 * y_even, 0.0, 1.0);
+                    for b in 0..4 {
+                        let x_b = if (EVEN_LO[b]..=EVEN_HI[b]).any(&fwd_on) {
+                            1.0_f32
+                        } else {
+                            0.0_f32
+                        };
+                        self.even_f_ema[b] = sanitize_clamp(
+                            0.92 * self.even_f_ema[b] + 0.08 * x_b,
+                            0.0,
+                            1.0,
+                        );
                     }
                 }
-                if any_even_upd {
+                let step_myelin = (self.even_tick_cnt & 3) == 3;
+                self.even_tick_cnt = self.even_tick_cnt.saturating_add(1);
+
+                if self.even_tick_cnt >= 768 && (step_myelin || y_even > 0.5) {
+                    let mut z_even = [0.0_f32; 4];
+                    let mut band_contingent = [false; 4];
+                    let mut any_even_contingent = false;
+                    for b in 0..4 {
+                        let zb = self.even_s_acc[b] / (self.even_v_acc[b] + 0.16).sqrt();
+                        z_even[b] = zb;
+                        if self.even_v_acc[b] >= 1.0 && zb > 3.55 {
+                            band_contingent[b] = true;
+                            any_even_contingent = true;
+                        }
+                    }
+                    let max_ze = z_even[0].max(z_even[1]).max(z_even[2]).max(z_even[3]);
+                    let max_fe = self.even_f_ema[0]
+                        .max(self.even_f_ema[1])
+                        .max(self.even_f_ema[2])
+                        .max(self.even_f_ema[3]);
+                    let habituate_even = !any_even_contingent
+                        && self.even_tick_cnt >= 6_000
+                        && max_ze < 1.80
+                        && max_fe >= 0.008;
+
                     let mut es_b = [0.0_f32; 4];
                     let mut ec_b = [0usize; 4];
                     for tube in &mut self.slots {
@@ -4260,70 +4322,84 @@ impl TubeGraph {
                             .is_some_and(|mp| mp.alive && mp.actuator_channel as usize == mg)
                         {
                             let b = ((tube.pre >> 1) & 3) as usize;
-                            if even_delta[b] != 0.0 {
-                                tube.myelin_plasticity_accum = sanitize_clamp(
-                                    tube.myelin_plasticity_accum + even_delta[b],
-                                    -0.30,
-                                    1.0,
-                                );
+                            if step_myelin {
+                                let cur = tube.myelin_plasticity_accum;
+                                let next_m = if band_contingent[b] {
+                                    let target_em =
+                                        (0.76 + 0.14 * (z_even[b] - 3.55)).clamp(0.0, 1.0);
+                                    0.985 * cur + 0.015 * target_em
+                                } else if habituate_even {
+                                    0.996 * cur + 0.004 * (-0.28)
+                                } else if cur < 0.0 && max_ze >= 2.15 {
+                                    0.95 * cur
+                                } else {
+                                    let decayed = 0.9985 * cur;
+                                    if decayed.abs() < 1.0e-3 { 0.0 } else { decayed }
+                                };
+                                tube.myelin_plasticity_accum = sanitize_clamp(next_m, -0.30, 1.0);
                             }
                             es_b[b] += tube.myelin_plasticity_accum;
                             ec_b[b] += 1;
                         }
                     }
-                    let mut best_even_hit: Option<usize> = None;
-                    let mut best_em_b = 0.14_f32;
-                    for b in 0..4 {
-                        let em_b = if ec_b[b] > 0 {
-                            es_b[b] / (ec_b[b] as f32)
-                        } else {
-                            0.0
-                        };
-                        if em_b > best_em_b
-                            && let Some(lag_on) = even_hit_lag[b]
-                        {
-                            best_em_b = em_b;
-                            best_even_hit = Some(lag_on);
+
+                    if y_even > 0.5 && any_even_contingent {
+                        let mut best_even_hit: Option<usize> = None;
+                        let mut best_em_b = 0.14_f32;
+                        for b in 0..4 {
+                            let em_b = if ec_b[b] > 0 {
+                                es_b[b] / (ec_b[b] as f32)
+                            } else {
+                                0.0
+                            };
+                            if em_b > best_em_b
+                                && let Some(lag_on) = even_hit_lag[b]
+                            {
+                                best_em_b = em_b;
+                                best_even_hit = Some(lag_on);
+                            }
                         }
-                    }
-                    if let Some(lag_on) = best_even_hit
-                        && let Some(on_entry) = ring.at_lag(lag_on)
-                    {
-                        for &(c_idx, v_past, dv_past, pre_attn) in &on_entry.active_cells {
-                            if (c_idx & 1) != 0 {
-                                continue;
-                            }
-                            let pre_sig = sanitize(v_past + 0.25 * dv_past);
-                            if pre_sig <= 0.02 {
-                                continue;
-                            }
-                            let attn = sanitize_clamp(pre_attn, 0.35, 1.85);
-                            let out_len = self
-                                .outgoing_by_cell
-                                .get(c_idx as usize)
-                                .map_or(0, Vec::len);
-                            for k in 0..out_len {
-                                let t_idx = self.outgoing_by_cell[c_idx as usize][k];
-                                let Some(tube) = self.slots.get_mut(t_idx as usize) else {
-                                    continue;
-                                };
-                                if !tube.alive || tube.kind != TubeKind::CellToMotor {
+                        if let Some(lag_on) = best_even_hit
+                            && let Some(on_entry) = ring.at_lag(lag_on)
+                        {
+                            for &(c_idx, v_past, dv_past, pre_attn) in &on_entry.active_cells {
+                                if (c_idx & 1) != 0 {
                                     continue;
                                 }
-                                let is_mg =
-                                    membrane.motor_pores.get(tube.post as usize).is_some_and(
-                                        |mp| mp.alive && mp.actuator_channel as usize == mg,
+                                let pre_sig = sanitize(v_past + 0.25 * dv_past);
+                                if pre_sig <= 0.02 {
+                                    continue;
+                                }
+                                let attn = sanitize_clamp(pre_attn, 0.35, 1.85);
+                                let out_len = self
+                                    .outgoing_by_cell
+                                    .get(c_idx as usize)
+                                    .map_or(0, Vec::len);
+                                for k in 0..out_len {
+                                    let t_idx = self.outgoing_by_cell[c_idx as usize][k];
+                                    let Some(tube) = self.slots.get_mut(t_idx as usize) else {
+                                        continue;
+                                    };
+                                    if !tube.alive || tube.kind != TubeKind::CellToMotor {
+                                        continue;
+                                    }
+                                    let is_mg =
+                                        membrane.motor_pores.get(tube.post as usize).is_some_and(
+                                            |mp| mp.alive && mp.actuator_channel as usize == mg,
+                                        );
+                                    if !is_mg {
+                                        continue;
+                                    }
+                                    let du =
+                                        0.055 * attn * trophic_burst * pre_sig - 0.070 * tube.u[0];
+                                    tube.apply_benna_fusi_impulse(du, 1.0);
+                                    tube.w_pred = sanitize_clamp(
+                                        0.95 * tube.w_pred
+                                            + 0.065 * attn * trophic_burst * pre_sig,
+                                        -1.5,
+                                        1.5,
                                     );
-                                if !is_mg {
-                                    continue;
                                 }
-                                let du = 0.055 * attn * trophic_burst * pre_sig - 0.070 * tube.u[0];
-                                tube.apply_benna_fusi_impulse(du, 1.0);
-                                tube.w_pred = sanitize_clamp(
-                                    0.95 * tube.w_pred + 0.065 * attn * trophic_burst * pre_sig,
-                                    -1.5,
-                                    1.5,
-                                );
                             }
                         }
                     }
@@ -6203,7 +6279,7 @@ impl TubeGraph {
                 let u_even = e_peak.max(0.0);
                 let u_odd = o_peak.max(0.0);
                 let vocal_sensitive_ro =
-                    body.rest_consolidation_ticks < 9_000 || u_even >= 0.72 || u_odd >= 0.55;
+                    body.rest_consolidation_ticks < 9_000 || u_even >= 0.55 || u_odd >= 0.55;
                 let contingent_urge = if vocal_sensitive_ro {
                     u_even.max(u_odd).clamp(0.0, 1.0)
                 } else {
@@ -7838,6 +7914,12 @@ impl TubeGraph {
         self.vocal_blk_sum = [0.0; 4];
         self.vocal_s_acc = [0.0; 4];
         self.vocal_v_acc = [0.0; 4];
+        self.even_tick_cnt = 0;
+        self.even_y_ema = 0.0;
+        self.even_f_ema = [0.0; 4];
+        self.even_blk_sum = [0.0; 4];
+        self.even_s_acc = [0.0; 4];
+        self.even_v_acc = [0.0; 4];
         self.social_loom_ema = 0.0;
         self.spatial_prox_ring = [0.0; RING_LEN];
         self.spatial_prox_cursor = 0;
@@ -7961,6 +8043,20 @@ impl TubeGraph {
         }
         for &vva in &self.vocal_v_acc {
             hasher.write_f32(vva);
+        }
+        hasher.write_u32(self.even_tick_cnt);
+        hasher.write_f32(self.even_y_ema);
+        for &ef in &self.even_f_ema {
+            hasher.write_f32(ef);
+        }
+        for &ebs in &self.even_blk_sum {
+            hasher.write_f32(ebs);
+        }
+        for &esa in &self.even_s_acc {
+            hasher.write_f32(esa);
+        }
+        for &eva in &self.even_v_acc {
+            hasher.write_f32(eva);
         }
         hasher.write_f32(self.social_loom_ema);
         for &spv in &self.spatial_prox_ring {
