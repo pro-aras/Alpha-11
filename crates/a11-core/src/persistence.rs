@@ -308,7 +308,7 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     cell_w.write_f32(org.cells.error_reversal_gate)?;
 
     let mut tube_w = ByteWriter::with_capacity(
-        org.tubes.slots.len() * 64 + 9600 + striatal_serialized_bytes(org.tubes.striatal.n_act),
+        org.tubes.slots.len() * 64 + 11_200 + striatal_serialized_bytes(org.tubes.striatal.n_act),
     );
     tube_w.write_u32(org.tubes.slots.len() as u32);
     tube_w.write_u32(org.tubes.alive_count as u32);
@@ -544,6 +544,50 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     tube_w.write_u64(st.rng.s1);
     if tube_w.buf.len().saturating_sub(before_striatal) != striatal_serialized_bytes(st.n_act) {
         return Err(PersistError::InvalidTopology);
+    }
+    for &pfv in &org.tubes.pore_floor_v {
+        tube_w.write_f32(pfv)?;
+    }
+    for &a1 in &org.tubes.pore_ar1_w {
+        tube_w.write_f32(a1)?;
+    }
+    for &a2 in &org.tubes.pore_ar2_w {
+        tube_w.write_f32(a2)?;
+    }
+    for &ql in &org.tubes.pore_q5_lvl {
+        tube_w.write_f32(ql)?;
+    }
+    for &qex in &org.tubes.pore_q5_exaff {
+        tube_w.write_f32(qex)?;
+    }
+    for &pvr in &org.tubes.pore_vocal_reaff {
+        tube_w.write_f32(pvr)?;
+    }
+    for &vgw in &org.tubes.vocal_glottal_w {
+        tube_w.write_f32(vgw)?;
+    }
+    tube_w.write_f32(org.tubes.tonotopic_floor_ema)?;
+    tube_w.write_f32(org.tubes.tonotopic_conf_ema)?;
+    tube_w.write_f32(org.tubes.acoustic_env_ema)?;
+    tube_w.write_f32(org.tubes.agency_signed_ema)?;
+    tube_w.write_f32(org.tubes.vocal_eff_s1)?;
+    tube_w.write_f32(org.tubes.vocal_eff_s2)?;
+    tube_w.write_u32(org.tubes.vocal_eff_hist);
+    tube_w.write_u32(org.tubes.vocal_onset_hist);
+    tube_w.write_u8(org.tubes.vocal_last_mg);
+    tube_w.write_u32(org.tubes.vocal_q5_cnt);
+    tube_w.write_f32(org.tubes.vocal_y_ema)?;
+    for &vf in &org.tubes.vocal_f_ema {
+        tube_w.write_f32(vf)?;
+    }
+    for &vbs in &org.tubes.vocal_blk_sum {
+        tube_w.write_f32(vbs)?;
+    }
+    for &vsa in &org.tubes.vocal_s_acc {
+        tube_w.write_f32(vsa)?;
+    }
+    for &vva in &org.tubes.vocal_v_acc {
+        tube_w.write_f32(vva)?;
     }
 
     let mut pore_w = ByteWriter::with_capacity(org.membrane.sensor_pores.len() * 112 + 512);
@@ -1610,6 +1654,85 @@ pub fn shadow_decode_organism(
     } else {
         StriatalOfc::from_seed(seed)
     };
+    let mut pore_floor_v = [0.0_f32; PRED_BUCKETS];
+    let mut pore_ar1_w = [0.59_f32; PRED_BUCKETS];
+    let mut pore_ar2_w = [0.0_f32; PRED_BUCKETS];
+    let mut pore_q5_lvl = [1.0_f32; PRED_BUCKETS];
+    let mut pore_q5_exaff = [0.0_f32; PRED_BUCKETS];
+    let mut pore_vocal_reaff = [0.0_f32; PRED_BUCKETS];
+    let mut vocal_glottal_w = vec![0.0_f32; act_dim];
+    let mut vocal_eff_s1 = 0.0_f32;
+    let mut vocal_eff_s2 = 0.0_f32;
+    let mut vocal_eff_hist = 0_u32;
+    let mut vocal_onset_hist = 0_u32;
+    let mut vocal_last_mg = u8::MAX;
+    let mut vocal_q5_cnt = 0_u32;
+    let mut vocal_y_ema = 0.0_f32;
+    let mut vocal_f_ema = [0.0_f32; 4];
+    let mut vocal_blk_sum = [0.0_f32; 4];
+    let mut vocal_s_acc = [0.0_f32; 4];
+    let mut vocal_v_acc = [0.0_f32; 4];
+    let (tonotopic_floor_ema, tonotopic_conf_ema, acoustic_env_ema, agency_signed_ema) =
+        if version >= 6 {
+            for dst in &mut pore_floor_v {
+                *dst = tr.read_f32()?.clamp(-1.0, 1.0);
+            }
+            for dst in &mut pore_ar1_w {
+                *dst = tr.read_f32()?.clamp(0.0, 1.85);
+            }
+            for dst in &mut pore_ar2_w {
+                *dst = tr.read_f32()?.clamp(-0.88, 0.20);
+            }
+            for dst in &mut pore_q5_lvl {
+                *dst = tr.read_f32()?.clamp(-1.0, 1.65);
+            }
+            for dst in &mut pore_q5_exaff {
+                *dst = tr.read_f32()?.clamp(0.0, 1.65);
+            }
+            for dst in &mut pore_vocal_reaff {
+                *dst = tr.read_f32()?.clamp(-0.50, 1.65);
+            }
+            for dst in &mut vocal_glottal_w {
+                *dst = tr.read_f32()?.clamp(0.0, 1.0);
+            }
+            let t_fl = tr.read_f32()?.clamp(-1.0, 1.0);
+            let t_cf = tr.read_f32()?.clamp(0.0, 1.0);
+            let ac_env = tr.read_f32()?.clamp(0.0, 1.20);
+            let ag_sig = tr.read_f32()?.clamp(-0.20, 1.0);
+            vocal_eff_s1 = tr.read_f32()?.clamp(-0.36, 1.0);
+            vocal_eff_s2 = tr.read_f32()?.clamp(-0.36, 1.0);
+            vocal_eff_hist = tr.read_u32()?;
+            vocal_onset_hist = tr.read_u32()?;
+            vocal_last_mg = tr.read_u8()?;
+            vocal_q5_cnt = tr.read_u32()?;
+            vocal_y_ema = tr.read_f32()?.clamp(0.0, 1.0);
+            for dst in &mut vocal_f_ema {
+                *dst = tr.read_f32()?.clamp(0.0, 1.0);
+            }
+            for dst in &mut vocal_blk_sum {
+                *dst = tr.read_f32()?.clamp(-16.0, 16.0);
+            }
+            for dst in &mut vocal_s_acc {
+                *dst = tr.read_f32()?.clamp(-5_000.0, 5_000.0);
+            }
+            for dst in &mut vocal_v_acc {
+                *dst = tr.read_f32()?.clamp(0.0, 50_000.0);
+            }
+            (t_fl, t_cf, ac_env, ag_sig)
+        } else {
+            for (p, sp) in sensor_pores.iter().enumerate().take(PRED_BUCKETS) {
+                if sp.alive {
+                    let mut min_hv = sp.history[0];
+                    for &hv in &sp.history[1..] {
+                        if hv < min_hv {
+                            min_hv = hv;
+                        }
+                    }
+                    pore_floor_v[p] = min_hv.clamp(-1.0, 1.0);
+                }
+            }
+            (0.0, 0.0, 0.0, mean_interventional_agency.clamp(-0.20, 1.0))
+        };
     if tr.remaining() != 0 {
         return Err(PersistError::InvalidTopology);
     }
@@ -1630,12 +1753,34 @@ pub fn shadow_decode_organism(
         pore_dsq_ema,
         pore_var_ema,
         pore_bg_ild,
+        pore_floor_v,
+        pore_ar1_w,
+        pore_ar2_w,
+        pore_q5_lvl,
+        pore_q5_exaff,
+        pore_vocal_reaff,
+        tonotopic_floor_ema,
+        tonotopic_conf_ema,
+        acoustic_env_ema,
+        agency_signed_ema,
+        vocal_eff_s1,
+        vocal_eff_s2,
+        vocal_eff_hist,
+        vocal_onset_hist,
+        vocal_last_mg,
+        vocal_q5_cnt,
+        vocal_y_ema,
+        vocal_f_ema,
+        vocal_blk_sum,
+        vocal_s_acc,
+        vocal_v_acc,
         social_loom_ema,
         spatial_prox_ring,
         spatial_prox_cursor,
         echo_emit_w,
         vocal_artic_w,
         somatic_limb_w,
+        vocal_glottal_w,
         peer_coch_fast,
         peer_coch_slow,
         peer_echo_fast,
@@ -1793,13 +1938,37 @@ pub fn shadow_decode_organism(
                 alt_ema,
             });
         } else {
-            // Pre-v6 scout moments were sampled at a cohort stride (dt > 1) without warm-up
-            // bookkeeping; they are discarded and re-learned from contiguous dt = 1 samples.
-            scout_stats.push(ChannelScoutStat::default());
+            scout_stats.push(ChannelScoutStat {
+                initialized,
+                mean,
+                var_ema,
+                diff_sq_ema,
+                prev_val,
+                ar1_w,
+                ar1_err_ema,
+                prev_dx,
+                cov_dx_ema,
+                fourth_ema,
+                motor_cov_ema,
+                samples: if initialized { 256 } else { 0 },
+                alt_ema: 0.0,
+            });
         }
     }
     if sr.remaining() != 0 {
         return Err(PersistError::InvalidTopology);
+    }
+    if version < 6 && !scout_stats.is_empty() {
+        let mut prev_vals = Vec::with_capacity(scout_stats.len().min(320));
+        for st in scout_stats.iter().take(320) {
+            if st.initialized {
+                prev_vals.push(st.prev_val);
+            }
+        }
+        if let Some(fl) = TubeGraph::detect_tonotopic_bank_floor(&prev_vals) {
+            tubes.tonotopic_floor_ema = fl;
+            tubes.tonotopic_conf_ema = 1.0;
+        }
     }
 
     let membrane = PoreMembrane {

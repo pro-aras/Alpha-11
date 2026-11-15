@@ -286,10 +286,9 @@ impl OrganismEngine for Alpha11Organism {
                 self.mode,
             );
             self.wire_new_motor_pores(prev_motors);
+            self.tubes.ensure_actuator_dim(view.num_actuators);
+            self.tubes.ensure_cell_dim(self.cells.slots.len());
         }
-
-        self.tubes.ensure_actuator_dim(view.num_actuators);
-        self.tubes.ensure_cell_dim(self.cells.slots.len());
 
         self.membrane.prepare_scout_cycle(
             view.ambient_in.len(),
@@ -345,11 +344,13 @@ impl OrganismEngine for Alpha11Organism {
             self.mode,
         );
 
+        let emb_eco = self.tubes.observe_ambient_bank(view.ambient_in, self.mode);
         self.tubes
             .evaluate_interventional_agency_and_update_predictors(
                 &self.ring,
                 &self.cells,
                 &mut self.membrane,
+                emb_eco,
                 self.mode,
             );
 
@@ -370,6 +371,7 @@ impl OrganismEngine for Alpha11Organism {
             view.metabolic_influx,
             view.tissue_stress,
             view.num_actuators,
+            emb_eco,
             &mut self.membrane,
             self.mode,
         );
@@ -415,7 +417,7 @@ impl OrganismEngine for Alpha11Organism {
             }
 
             let m_organs = self.membrane.alive_motor_count.max(1);
-            let (dev_tier1, dev_tier2, adult_phase, tau_grace_mode) = if m_organs <= 8 {
+            let (dev_tier1, dev_tier2, adult_phase, tau_grace_mode) = if !emb_eco {
                 (12u64, 20u64, true, true)
             } else {
                 let t1 = (15 * m_organs) as u64;
@@ -423,7 +425,7 @@ impl OrganismEngine for Alpha11Organism {
                 (t1, t2, self.mitosis_births >= t1, false)
             };
             let anabolic_floor = if self.mitosis_births < dev_tier1 {
-                if m_organs <= 8 {
+                if !emb_eco {
                     (0.50 * self.body.initial_atp).max(3.2)
                 } else {
                     3.2
@@ -452,7 +454,7 @@ impl OrganismEngine for Alpha11Organism {
 
             if (self.tick & 31) == 0 {
                 let trophic_floor =
-                    if m_organs > 8 && self.mitosis_births >= dev_tier1 && self.body.atp > 22.0 {
+                    if emb_eco && self.mitosis_births >= dev_tier1 && self.body.atp > 22.0 {
                         (8 * m_organs).min(self.config.max_cells)
                     } else {
                         self.cells.min_cells_floor
@@ -477,6 +479,7 @@ impl OrganismEngine for Alpha11Organism {
             } else {
                 let outcome = self.tubes.rollout_and_select_pulse(
                     view.num_actuators,
+                    emb_eco,
                     &self.cells,
                     &self.membrane,
                     &mut self.body,
@@ -1166,6 +1169,98 @@ mod tests {
         full
     }
 
+    fn downgrade_v6_checkpoint_to_v5(v6: &[u8]) -> Vec<u8> {
+        use crate::persistence::{STRIATAL_SERIALIZED_BYTES, TAG_RING, TAG_SCOT, TAG_TUBE};
+        use crate::tubes::{MIN_ACTUATOR_DIM, MIN_CELL_DIM, PRED_BUCKETS, RING_LEN};
+        let rd = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        let payload_end = v6.len() - 4;
+        let mut slabs: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut pos = 24usize;
+        while pos < payload_end {
+            let tag = rd(v6, pos);
+            let len = rd(v6, pos + 4) as usize;
+            let src = &v6[pos + 8..pos + 8 + len];
+            let payload = match tag {
+                TAG_TUBE => {
+                    let n_slots = rd(src, 0) as usize;
+                    let at = 8 + n_slots * 61;
+                    let tfree = rd(src, at) as usize;
+                    let before_dims = at + 4 + 4 * tfree;
+                    assert_eq!(rd(src, before_dims) as usize, MIN_ACTUATOR_DIM);
+                    assert_eq!(rd(src, before_dims + 4) as usize, MIN_CELL_DIM);
+                    let v6_tail = 6 * PRED_BUCKETS * 4 + MIN_ACTUATOR_DIM * 4 + 105;
+                    let striatal_start = src.len() - v6_tail - STRIATAL_SERIALIZED_BYTES;
+                    let st_n_act_pos = striatal_start - 4;
+                    assert_eq!(rd(src, st_n_act_pos), 8);
+                    let mut q = src[..before_dims].to_vec();
+                    q.extend_from_slice(&src[before_dims + 8..st_n_act_pos]);
+                    q.extend_from_slice(&src[striatal_start..src.len() - v6_tail]);
+                    q
+                }
+                TAG_RING => {
+                    let mut q = src[..4].to_vec();
+                    let mut at = 4usize;
+                    for _ in 0..RING_LEN {
+                        q.extend_from_slice(&src[at..at + 14]);
+                        let motor_len = rd(src, at + 14) as usize;
+                        assert!(motor_len <= MIN_ACTUATOR_DIM);
+                        at += 18;
+                        q.extend_from_slice(&src[at..at + 4 * motor_len]);
+                        for _ in motor_len..MIN_ACTUATOR_DIM {
+                            q.extend_from_slice(&0.0_f32.to_le_bytes());
+                        }
+                        at += 4 * motor_len;
+                        q.extend_from_slice(&src[at..at + 8]);
+                        at += 8;
+                        let act_n = rd(src, at) as usize;
+                        q.extend_from_slice(&src[at..at + 4 + 16 * act_n]);
+                        at += 4 + 16 * act_n;
+                        for _ in 0..2 {
+                            let n = rd(src, at) as usize;
+                            q.extend_from_slice(&src[at..at + 4 + 8 * n]);
+                            at += 4 + 8 * n;
+                        }
+                    }
+                    assert_eq!(at, src.len());
+                    q
+                }
+                TAG_SCOT => {
+                    let mut q = src[..4].to_vec();
+                    q.extend_from_slice(&src[5..25]);
+                    let stats_len = rd(src, 21) as usize;
+                    let mut at = 25usize;
+                    for _ in 0..stats_len {
+                        q.extend_from_slice(&src[at..at + 41]);
+                        at += 47;
+                    }
+                    assert_eq!(at, src.len());
+                    q
+                }
+                _ => src.to_vec(),
+            };
+            slabs.push((tag, payload));
+            pos += 8 + len + 4;
+        }
+        assert_eq!(slabs.len(), 6);
+        let mut slabs_buf = Vec::new();
+        for (tag, p) in &slabs {
+            let start = slabs_buf.len();
+            slabs_buf.extend_from_slice(&tag.to_le_bytes());
+            slabs_buf.extend_from_slice(&(p.len() as u32).to_le_bytes());
+            slabs_buf.extend_from_slice(p);
+            let scrc = crc32c(&slabs_buf[start..]);
+            slabs_buf.extend_from_slice(&scrc.to_le_bytes());
+        }
+        let mut full = v6[..8].to_vec();
+        full.extend_from_slice(&5u32.to_le_bytes());
+        full.extend_from_slice(&v6[12..16]);
+        full.extend_from_slice(&(slabs_buf.len() as u64).to_le_bytes());
+        full.extend_from_slice(&slabs_buf);
+        let fcrc = crc32c(&full);
+        full.extend_from_slice(&fcrc.to_le_bytes());
+        full
+    }
+
     #[test]
     fn v3_checkpoint_upgrades_to_v4_and_keeps_stepping() {
         let cfg = OrganismConfig::default();
@@ -1191,14 +1286,21 @@ mod tests {
         for t in 0..150u64 {
             let _ = drive(&mut org, t, &mut ambient);
         }
-        let v5 = org.encode_checkpoint().expect("encode v5");
+        let v6 = org.encode_checkpoint().expect("encode v6");
+        assert_eq!(u32::from_le_bytes([v6[8], v6[9], v6[10], v6[11]]), 6);
+        let v5 = downgrade_v6_checkpoint_to_v5(&v6);
         assert_eq!(u32::from_le_bytes([v5[8], v5[9], v5[10], v5[11]]), 5);
+        assert!(v5.len() < v6.len());
         let v4 = downgrade_v5_checkpoint_to_v4(&v5);
         assert_eq!(u32::from_le_bytes([v4[8], v4[9], v4[10], v4[11]]), 4);
         assert!(v4.len() < v5.len());
         let v3 = downgrade_v4_checkpoint_to_v3(&v4);
         assert_eq!(u32::from_le_bytes([v3[8], v3[9], v3[10], v3[11]]), 3);
         assert!(v3.len() < v4.len());
+
+        let mut upgraded_v5 = Alpha11Organism::new(1, cfg);
+        upgraded_v5.restore_checkpoint(&v5).expect("v5 restore");
+        assert!(!upgraded_v5.is_poisoned());
 
         let mut upgraded_v4 = Alpha11Organism::new(1, cfg);
         upgraded_v4.restore_checkpoint(&v4).expect("v4 restore");
@@ -1214,7 +1316,7 @@ mod tests {
         assert_eq!(a.tube_count, b.tube_count);
 
         let re = upgraded.encode_checkpoint().expect("re-encode");
-        assert_eq!(u32::from_le_bytes([re[8], re[9], re[10], re[11]]), 5);
+        assert_eq!(u32::from_le_bytes([re[8], re[9], re[10], re[11]]), 6);
         let mut corrupt = v3.clone();
         let mid = corrupt.len() / 2;
         corrupt[mid] ^= 0x01;
