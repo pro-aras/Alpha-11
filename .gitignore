@@ -12,4 +12,5 @@
 /.purged_staged_exams
 /.judge_locked
 /.vault_authorized
+/.vault_authorized_next
 .DS_Store
