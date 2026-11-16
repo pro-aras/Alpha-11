@@ -589,20 +589,6 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     for &vva in &org.tubes.vocal_v_acc {
         tube_w.write_f32(vva)?;
     }
-    tube_w.write_u32(org.tubes.even_tick_cnt);
-    tube_w.write_f32(org.tubes.even_y_ema)?;
-    for &ef in &org.tubes.even_f_ema {
-        tube_w.write_f32(ef)?;
-    }
-    for &ebs in &org.tubes.even_blk_sum {
-        tube_w.write_f32(ebs)?;
-    }
-    for &esa in &org.tubes.even_s_acc {
-        tube_w.write_f32(esa)?;
-    }
-    for &eva in &org.tubes.even_v_acc {
-        tube_w.write_f32(eva)?;
-    }
 
     let mut pore_w = ByteWriter::with_capacity(org.membrane.sensor_pores.len() * 112 + 512);
     pore_w.write_u32(org.membrane.sensor_pores.len() as u32);
@@ -1686,12 +1672,6 @@ pub fn shadow_decode_organism(
     let mut vocal_blk_sum = [0.0_f32; 4];
     let mut vocal_s_acc = [0.0_f32; 4];
     let mut vocal_v_acc = [0.0_f32; 4];
-    let mut even_tick_cnt = 0_u32;
-    let mut even_y_ema = 0.0_f32;
-    let mut even_f_ema = [0.0_f32; 4];
-    let mut even_blk_sum = [0.0_f32; 4];
-    let mut even_s_acc = [0.0_f32; 4];
-    let mut even_v_acc = [0.0_f32; 4];
     let (tonotopic_floor_ema, tonotopic_conf_ema, acoustic_env_ema, agency_signed_ema) =
         if version >= 6 {
             for dst in &mut pore_floor_v {
@@ -1730,26 +1710,12 @@ pub fn shadow_decode_organism(
                 *dst = tr.read_f32()?.clamp(0.0, 1.0);
             }
             for dst in &mut vocal_blk_sum {
-                *dst = tr.read_f32()?.clamp(-64.0, 64.0);
+                *dst = tr.read_f32()?.clamp(-16.0, 16.0);
             }
             for dst in &mut vocal_s_acc {
                 *dst = tr.read_f32()?.clamp(-5_000.0, 5_000.0);
             }
             for dst in &mut vocal_v_acc {
-                *dst = tr.read_f32()?.clamp(0.0, 50_000.0);
-            }
-            even_tick_cnt = tr.read_u32()?;
-            even_y_ema = tr.read_f32()?.clamp(0.0, 1.0);
-            for dst in &mut even_f_ema {
-                *dst = tr.read_f32()?.clamp(0.0, 1.0);
-            }
-            for dst in &mut even_blk_sum {
-                *dst = tr.read_f32()?.clamp(-64.0, 64.0);
-            }
-            for dst in &mut even_s_acc {
-                *dst = tr.read_f32()?.clamp(-5_000.0, 5_000.0);
-            }
-            for dst in &mut even_v_acc {
                 *dst = tr.read_f32()?.clamp(0.0, 50_000.0);
             }
             (t_fl, t_cf, ac_env, ag_sig)
@@ -1808,12 +1774,6 @@ pub fn shadow_decode_organism(
         vocal_blk_sum,
         vocal_s_acc,
         vocal_v_acc,
-        even_tick_cnt,
-        even_y_ema,
-        even_f_ema,
-        even_blk_sum,
-        even_s_acc,
-        even_v_acc,
         social_loom_ema,
         spatial_prox_ring,
         spatial_prox_cursor,

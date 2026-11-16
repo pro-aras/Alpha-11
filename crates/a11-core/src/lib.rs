@@ -1188,7 +1188,7 @@ mod tests {
                     let before_dims = at + 4 + 4 * tfree;
                     assert_eq!(rd(src, before_dims) as usize, MIN_ACTUATOR_DIM);
                     assert_eq!(rd(src, before_dims + 4) as usize, MIN_CELL_DIM);
-                    let v6_tail = 6 * PRED_BUCKETS * 4 + MIN_ACTUATOR_DIM * 4 + 177;
+                    let v6_tail = 6 * PRED_BUCKETS * 4 + MIN_ACTUATOR_DIM * 4 + 105;
                     let striatal_start = src.len() - v6_tail - STRIATAL_SERIALIZED_BYTES;
                     let st_n_act_pos = striatal_start - 4;
                     assert_eq!(rd(src, st_n_act_pos), 8);
