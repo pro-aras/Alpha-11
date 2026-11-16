@@ -1,9 +1,10 @@
 //! Directed Benna-Fusi cascade tubes, 16-tick efference ring, agency, and rollout clutch.
 
-use a11_medium::{ControlMode, FieldPulse};
+use a11_medium::{ControlMode, FieldPulse, PersistError};
 
 use crate::body::BodyCore;
 use crate::cells::{Cell, CellArena};
+use crate::crc32c::crc32c;
 use crate::pores::{ChannelScoutStat, PoreMembrane, SensorPore};
 use crate::rng::{ParamHasher, Rng64, sanitize, sanitize_clamp, smooth_saturate};
 
@@ -30,6 +31,427 @@ const STRIATAL_ROW_NORM_CAP: f32 = 3.2;
 const STRIATAL_TD_CLAMP: f32 = 2.0;
 const STRIATAL_BIRTH_SALT: u64 = 0x5781_A7A1_0FC0_5EED;
 
+/// Binary magic header on every paged cortical column `.slab` file (`A11CSLAB` LE).
+pub const COL_SLAB_MAGIC: u64 = 0x4131_3143_534C_4142;
+pub const CORTICAL_SLAB_VERSION: u32 = 7;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PagedColumnEntry {
+    pub col_id: u32,
+    pub r_peak: f32,
+    pub dend_ch: [u32; STRIATAL_PORES],
+    pub dend_env: [u8; STRIATAL_PORES],
+    pub dend_key: [f32; STRIATAL_PORES],
+    pub slab_crc32c: u32,
+    pub slab_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecodedColumnSlab {
+    pub col_id: u32,
+    pub na: usize,
+    pub ticks: u32,
+    pub r_peak: f32,
+    pub r_bar: f32,
+    pub dend_ch: [u32; STRIATAL_PORES],
+    pub dend_env: [u8; STRIATAL_PORES],
+    pub dend_key: [f32; STRIATAL_PORES],
+    pub w_cons: Vec<f32>,
+    pub v_cons: [f32; STRIATAL_FEATS],
+    pub q_cons: [f32; STRIATAL_CUES],
+    pub fwd_j_cons: Vec<f32>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_column_slab(
+    col_id: u32,
+    na: usize,
+    ticks: u32,
+    r_peak: f32,
+    r_bar: f32,
+    dend_ch: &[u32; STRIATAL_PORES],
+    dend_env: &[u8; STRIATAL_PORES],
+    dend_key: &[f32; STRIATAL_PORES],
+    w_cons: &[f32],
+    v_cons: &[f32],
+    q_cons: &[f32],
+    fwd_j_cons: &[f32],
+) -> Result<(Vec<u8>, u32), PersistError> {
+    let w_len = na * STRIATAL_CUES;
+    let fwd_len = STRIATAL_CUES * na;
+    if w_cons.len() != w_len
+        || v_cons.len() != STRIATAL_FEATS
+        || q_cons.len() != STRIATAL_CUES
+        || fwd_j_cons.len() != fwd_len
+    {
+        return Err(PersistError::InvalidTopology);
+    }
+    let payload_len = 16
+        + STRIATAL_PORES * 4
+        + STRIATAL_PORES
+        + STRIATAL_PORES * 4
+        + w_len * 4
+        + STRIATAL_FEATS * 4
+        + STRIATAL_CUES * 4
+        + fwd_len * 4;
+    let mut buf = Vec::with_capacity(24 + payload_len);
+    buf.extend_from_slice(&COL_SLAB_MAGIC.to_le_bytes());
+    buf.extend_from_slice(&CORTICAL_SLAB_VERSION.to_le_bytes());
+    buf.extend_from_slice(&col_id.to_le_bytes());
+    buf.extend_from_slice(&(payload_len as u32).to_le_bytes());
+
+    let push_f32 = |dst: &mut Vec<u8>, v: f32| -> Result<(), PersistError> {
+        if !v.is_finite() {
+            return Err(PersistError::NonFiniteState);
+        }
+        dst.extend_from_slice(&sanitize(v).to_bits().to_le_bytes());
+        Ok(())
+    };
+
+    buf.extend_from_slice(&(na as u32).to_le_bytes());
+    buf.extend_from_slice(&ticks.to_le_bytes());
+    push_f32(&mut buf, r_peak)?;
+    push_f32(&mut buf, r_bar)?;
+    for &ch in dend_ch {
+        buf.extend_from_slice(&ch.to_le_bytes());
+    }
+    buf.extend_from_slice(dend_env);
+    for &kv in dend_key {
+        push_f32(&mut buf, kv)?;
+    }
+    for &wv in w_cons {
+        push_f32(&mut buf, wv)?;
+    }
+    for &vv in v_cons {
+        push_f32(&mut buf, vv)?;
+    }
+    for &qv in q_cons {
+        push_f32(&mut buf, qv)?;
+    }
+    for &jv in fwd_j_cons {
+        push_f32(&mut buf, jv)?;
+    }
+    let crc = crc32c(&buf);
+    buf.extend_from_slice(&crc.to_le_bytes());
+    Ok((buf, crc))
+}
+
+pub fn decode_column_slab(bytes: &[u8]) -> Result<DecodedColumnSlab, PersistError> {
+    if bytes.len() < 24 {
+        return Err(PersistError::TruncatedInput);
+    }
+    let magic = u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]);
+    let ver = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    if magic != COL_SLAB_MAGIC || ver != CORTICAL_SLAB_VERSION {
+        return Err(PersistError::BadMagicOrVersion);
+    }
+    let col_id = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+    let payload_len = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as usize;
+    let total_expected = 24usize
+        .checked_add(payload_len)
+        .ok_or(PersistError::OversizedInput)?;
+    if bytes.len() < total_expected {
+        return Err(PersistError::TruncatedInput);
+    }
+    if bytes.len() > total_expected {
+        return Err(PersistError::InvalidTopology);
+    }
+    let crc_pos = total_expected - 4;
+    let stored_crc = u32::from_le_bytes([
+        bytes[crc_pos],
+        bytes[crc_pos + 1],
+        bytes[crc_pos + 2],
+        bytes[crc_pos + 3],
+    ]);
+    let actual_crc = crc32c(&bytes[..crc_pos]);
+    if actual_crc != stored_crc {
+        return Err(PersistError::ChecksumMismatch);
+    }
+
+    let mut pos = 20usize;
+    let rd_u32 = |b: &[u8], at: &mut usize| -> Result<u32, PersistError> {
+        let end = (*at).checked_add(4).ok_or(PersistError::TruncatedInput)?;
+        if end > crc_pos {
+            return Err(PersistError::TruncatedInput);
+        }
+        let v = u32::from_le_bytes([b[*at], b[*at + 1], b[*at + 2], b[*at + 3]]);
+        *at = end;
+        Ok(v)
+    };
+    let rd_f32 = |b: &[u8], at: &mut usize| -> Result<f32, PersistError> {
+        let bits = rd_u32(b, at)?;
+        let v = f32::from_bits(bits);
+        if !v.is_finite() {
+            return Err(PersistError::NonFiniteState);
+        }
+        Ok(sanitize(v))
+    };
+
+    let na = rd_u32(bytes, &mut pos)? as usize;
+    if !(MIN_STRIATAL_ACT..=4_096).contains(&na) {
+        return Err(PersistError::InvalidTopology);
+    }
+    let w_len = na * STRIATAL_CUES;
+    let fwd_len = STRIATAL_CUES * na;
+    let exact_payload = 16
+        + STRIATAL_PORES * 4
+        + STRIATAL_PORES
+        + STRIATAL_PORES * 4
+        + w_len * 4
+        + STRIATAL_FEATS * 4
+        + STRIATAL_CUES * 4
+        + fwd_len * 4;
+    if payload_len != exact_payload {
+        return Err(PersistError::InvalidTopology);
+    }
+
+    let ticks = rd_u32(bytes, &mut pos)?;
+    let r_peak = rd_f32(bytes, &mut pos)?;
+    let r_bar = rd_f32(bytes, &mut pos)?;
+    let mut dend_ch = [u32::MAX; STRIATAL_PORES];
+    for dst in &mut dend_ch {
+        *dst = rd_u32(bytes, &mut pos)?;
+    }
+    let mut dend_env = [0u8; STRIATAL_PORES];
+    for dst in &mut dend_env {
+        let b = bytes[pos];
+        pos += 1;
+        if b > 3 {
+            return Err(PersistError::InvalidTopology);
+        }
+        *dst = b;
+    }
+    let mut dend_key = [0.0_f32; STRIATAL_PORES];
+    for dst in &mut dend_key {
+        *dst = rd_f32(bytes, &mut pos)?;
+    }
+    let mut w_cons = vec![0.0_f32; w_len];
+    for dst in &mut w_cons {
+        *dst = rd_f32(bytes, &mut pos)?;
+    }
+    let mut v_cons = [0.0_f32; STRIATAL_FEATS];
+    for dst in &mut v_cons {
+        *dst = rd_f32(bytes, &mut pos)?;
+    }
+    let mut q_cons = [0.0_f32; STRIATAL_CUES];
+    for dst in &mut q_cons {
+        *dst = rd_f32(bytes, &mut pos)?;
+    }
+    let mut fwd_j_cons = vec![0.0_f32; fwd_len];
+    for dst in &mut fwd_j_cons {
+        *dst = rd_f32(bytes, &mut pos)?;
+    }
+    if pos != crc_pos {
+        return Err(PersistError::InvalidTopology);
+    }
+
+    Ok(DecodedColumnSlab {
+        col_id,
+        na,
+        ticks,
+        r_peak,
+        r_bar,
+        dend_ch,
+        dend_env,
+        dend_key,
+        w_cons,
+        v_cons,
+        q_cons,
+        fwd_j_cons,
+    })
+}
+
+#[inline]
+fn try_prony_stride(
+    history: &[f32; 16],
+    h: usize,
+    stride: usize,
+    n_win: usize,
+    max_c: f32,
+) -> Option<f32> {
+    if n_win < 2 {
+        return None;
+    }
+    let mut num_c = 0.0_f32;
+    let mut den_c = 0.0_f32;
+    for k in 0..n_win {
+        let y0 = history[(h + 15 - k) & 15];
+        let y1 = history[(h + 15 - k - stride) & 15];
+        let y2 = history[(h + 15 - k - 2 * stride) & 15];
+        let y3 = history[(h + 15 - k - 3 * stride) & 15];
+        let d0 = y0 - y1;
+        let d1 = y1 - y2;
+        let d2 = y2 - y3;
+        num_c += (d0 + d2) * d1;
+        den_c += 2.0 * d1 * d1;
+    }
+    if den_c <= 1.0e-7 {
+        return None;
+    }
+    let c = num_c / den_c;
+    if !(0.25..=max_c).contains(&c) {
+        return None;
+    }
+    let mut fit_err_sq = 0.0_f32;
+    let mut sum_mu = 0.0_f32;
+    let mut mus = [0.0_f32; 16];
+    let n_cap = n_win.min(16);
+    let denom_mu = 2.0 * (1.0 - c);
+    for (k, mu_slot) in mus.iter_mut().enumerate().take(n_cap) {
+        let y0 = history[(h + 15 - k) & 15];
+        let y1 = history[(h + 15 - k - stride) & 15];
+        let y2 = history[(h + 15 - k - 2 * stride) & 15];
+        let y3 = history[(h + 15 - k - 3 * stride) & 15];
+        let d0 = y0 - y1;
+        let d1 = y1 - y2;
+        let d2 = y2 - y3;
+        let r = d0 + d2 - 2.0 * c * d1;
+        fit_err_sq += r * r;
+        let mk = (y0 + y2 - 2.0 * c * y1) / denom_mu;
+        *mu_slot = mk;
+        sum_mu += mk;
+    }
+    if fit_err_sq > 0.0015 * den_c {
+        return None;
+    }
+    let mu = sum_mu / (n_cap as f32);
+    for &mk in &mus[..n_cap] {
+        if (mk - mu).abs() > 0.012 {
+            return None;
+        }
+    }
+    if (-1.05..=1.05).contains(&mu) {
+        Some(sanitize_clamp(mu, -1.0, 1.0))
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn try_post_jump_prony(history: &[f32; 16], h: usize, m_jump: usize) -> Option<f32> {
+    let post_len = m_jump + 1;
+    if post_len < 6 {
+        return None;
+    }
+    let mut sub_sum = 0.0_f32;
+    let mut sub_max = 0.0_f32;
+    for m in 0..m_jump {
+        let dy = history[(h + 15 - m) & 15] - history[(h + 14 - m) & 15];
+        let sq = dy * dy;
+        sub_sum += sq;
+        if sq > sub_max {
+            sub_max = sq;
+        }
+    }
+    if sub_sum <= 1.0e-8 || sub_max > 0.55 * sub_sum {
+        return None;
+    }
+    if post_len >= 8
+        && let Some(mu) = try_prony_stride(history, h, 2, (post_len - 6).min(3), 0.9985)
+    {
+        return Some(mu);
+    }
+    try_prony_stride(history, h, 1, (post_len - 3).min(3), 0.9990)
+}
+
+#[inline]
+#[must_use]
+pub fn harmonic_dc_from_history(history: &[f32; 16], hist_head: u8, age_ticks: u32) -> (f32, bool) {
+    let h = (hist_head as usize) & 15;
+    let x_now = sanitize_clamp(history[(h + 15) & 15], -1.0, 1.0);
+    if age_ticks < 8 {
+        return (x_now, false);
+    }
+    let n_steps = ((age_ticks as usize) - 1).min(15);
+    let mut dy = [0.0_f32; 15];
+    let mut sum_step_sq = 0.0_f32;
+    let mut max_step_sq = 0.0_f32;
+    let mut m_jump = 0usize;
+    for (m, dy_slot) in dy.iter_mut().enumerate().take(n_steps) {
+        let d = history[(h + 15 - m) & 15] - history[(h + 14 - m) & 15];
+        *dy_slot = d;
+        let sq = d * d;
+        sum_step_sq += sq;
+        if sq > max_step_sq {
+            max_step_sq = sq;
+            m_jump = m;
+        }
+    }
+    if sum_step_sq <= 1.0e-8 {
+        return (x_now, false);
+    }
+    let cap_frac = if n_steps >= 12 { 0.25 } else { 0.50 };
+    let mut has_jump = max_step_sq > cap_frac * sum_step_sq;
+    if n_steps >= 12 {
+        let n_d2 = n_steps - 1;
+        let mut s2 = 0.0_f32;
+        let mut max_d2_sq = 0.0_f32;
+        let mut max_d2_m = 0usize;
+        for m in 0..n_d2 {
+            let d2 = dy[m] - dy[m + 1];
+            let sq = d2 * d2;
+            s2 += sq;
+            if sq > max_d2_sq {
+                max_d2_sq = sq;
+                max_d2_m = m;
+            }
+        }
+        let n_d3 = n_steps - 2;
+        let mut s3 = 0.0_f32;
+        let mut max_d3_sq = 0.0_f32;
+        let mut max_d3_m = 0usize;
+        for m in 0..n_d3 {
+            let d3 = dy[m] - 2.0 * dy[m + 1] + dy[m + 2];
+            let sq = d3 * d3;
+            s3 += sq;
+            if sq > max_d3_sq {
+                max_d3_sq = sq;
+                max_d3_m = m;
+            }
+        }
+        if s3 > 1.0e-11 && max_d3_sq > 0.32 * s3 {
+            has_jump = true;
+            m_jump = max_d3_m + 1;
+        } else if s2 > 1.0e-10 && max_d2_sq > 0.28 * s2 {
+            has_jump = true;
+            if ! (max_step_sq > cap_frac * sum_step_sq) {
+                m_jump = max_d2_m;
+            }
+        }
+    }
+    if has_jump {
+        if let Some(mu) = try_post_jump_prony(history, h, m_jump) {
+            return (mu, true);
+        }
+        return (x_now, false);
+    }
+    let mu2 = try_prony_stride(history, h, 2, 2, 0.9985);
+    if age_ticks >= 16
+        && let Some(mu4) = try_prony_stride(history, h, 4, 4, 0.994)
+    {
+        if let Some(m2) = mu2
+            && (mu4 - m2).abs() > 0.015
+        {
+            return (m2, true);
+        }
+        return (mu4, true);
+    }
+    if let Some(m2) = mu2 {
+        return (m2, true);
+    }
+    if let Some(mu1) = try_prony_stride(history, h, 1, 3, 0.9990) {
+        return (mu1, true);
+    }
+    if m_jump >= 5
+        && let Some(mu_pj) = try_post_jump_prony(history, h, m_jump)
+    {
+        return (mu_pj, true);
+    }
+    (x_now, false)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StriatalOfc {
     /// Actuator columns currently allocated in every actuator-strided table.
@@ -41,11 +463,24 @@ pub struct StriatalOfc {
     pub ctx_ticks: [u32; OFC_CONTEXTS],
     pub ctx_r_peak: [f32; OFC_CONTEXTS],
     pub r_bar_ctx: [f32; OFC_CONTEXTS],
+    pub total_cols: u32,
+    pub dend_mismatch_streak: u8,
+    pub hot_col_id: [u32; OFC_CONTEXTS],
+    pub hot_last_use: [u64; OFC_CONTEXTS],
+    pub hot_dend_ch: [[u32; STRIATAL_PORES]; OFC_CONTEXTS],
+    pub hot_dend_env: [[u8; STRIATAL_PORES]; OFC_CONTEXTS],
+    pub hot_dend_key: [[f32; STRIATAL_PORES]; OFC_CONTEXTS],
+    pub paged_cols: Vec<PagedColumnEntry>,
     pub pore_ch: [u32; STRIATAL_PORES],
     pub pore_age: [u32; STRIATAL_PORES],
     pub pore_mean: [f32; STRIATAL_PORES],
     pub pore_var_raw: [f32; STRIATAL_PORES],
     pub pore_var_exaff: [f32; STRIATAL_PORES],
+    pub pore_carr_mean: [f32; STRIATAL_PORES],
+    pub pore_carr_var: [f32; STRIATAL_PORES],
+    pub pore_prev_x: [f32; STRIATAL_PORES],
+    pub pore_var_dx: [f32; STRIATAL_PORES],
+    pub pore_orb_err: [f32; STRIATAL_PORES],
     pub canc_g: Vec<f32>,
     pub w_birth: Vec<f32>,
     pub w_ctx: Vec<f32>,
@@ -102,9 +537,12 @@ impl StriatalOfc {
     #[must_use]
     pub fn logical_bytes(&self) -> usize {
         let (na, tap_dim, w_len, fwd_len) = self.dims();
+        let paged_meta = self.paged_cols.len() * (16 + 9 * STRIATAL_PORES);
         3 + OFC_CONTEXTS
             + 6 * 4 * OFC_CONTEXTS
-            + 5 * 4 * STRIATAL_PORES
+            + 12 * OFC_CONTEXTS
+            + 9 * STRIATAL_PORES * OFC_CONTEXTS
+            + 10 * 4 * STRIATAL_PORES
             + 4 * STRIATAL_PORES * tap_dim
             + 4 * w_len
             + 2 * 4 * OFC_CONTEXTS * w_len
@@ -117,7 +555,8 @@ impl StriatalOfc {
             + 4 * w_len
             + 3 * 4 * STRIATAL_FEATS
             + 2 * 4 * STRIATAL_CUES
-            + 72
+            + paged_meta
+            + 80
     }
 
     /// Grows every actuator-strided table to `num_actuators` columns. Existing columns keep
@@ -137,14 +576,21 @@ impl StriatalOfc {
         }
         self.w_birth.extend_from_slice(&new_birth);
         let new_w_len = new_na * STRIATAL_CUES;
-        for table in [&mut self.w_ctx, &mut self.w_cons] {
-            let mut grown = Vec::with_capacity(OFC_CONTEXTS * new_w_len);
-            for c in 0..OFC_CONTEXTS {
-                grown.extend_from_slice(&table[c * old_w_len..(c + 1) * old_w_len]);
-                grown.extend_from_slice(&new_birth);
+        let mut grown_ctx = Vec::with_capacity(OFC_CONTEXTS * new_w_len);
+        let mut grown_cons = Vec::with_capacity(OFC_CONTEXTS * new_w_len);
+        let zeros_extra = vec![0.0_f32; extra_rows];
+        for c in 0..OFC_CONTEXTS {
+            grown_ctx.extend_from_slice(&self.w_ctx[c * old_w_len..(c + 1) * old_w_len]);
+            grown_ctx.extend_from_slice(&new_birth);
+            grown_cons.extend_from_slice(&self.w_cons[c * old_w_len..(c + 1) * old_w_len]);
+            if self.ctx_has_cons[c] != 0 {
+                grown_cons.extend_from_slice(&new_birth);
+            } else {
+                grown_cons.extend_from_slice(&zeros_extra);
             }
-            *table = grown;
         }
+        self.w_ctx = grown_ctx;
+        self.w_cons = grown_cons;
         self.elig_actor.resize(new_w_len, 0.0);
         let restride = |src: &[f32], rows: usize, old_c: usize, new_c: usize| -> Vec<f32> {
             let mut out = vec![0.0_f32; rows * new_c];
@@ -189,7 +635,7 @@ impl StriatalOfc {
         for _ in 0..OFC_CONTEXTS {
             w_ctx.extend_from_slice(&w_birth);
         }
-        let w_cons = w_ctx.clone();
+        let w_cons = vec![0.0; OFC_CONTEXTS * w_len];
         Self {
             n_act: na,
             num_ctx: 1,
@@ -199,11 +645,24 @@ impl StriatalOfc {
             ctx_ticks: [0; OFC_CONTEXTS],
             ctx_r_peak: [0.0; OFC_CONTEXTS],
             r_bar_ctx: [0.0; OFC_CONTEXTS],
+            total_cols: 1,
+            dend_mismatch_streak: 0,
+            hot_col_id: [0, 1, 2, 3],
+            hot_last_use: [0; OFC_CONTEXTS],
+            hot_dend_ch: [[u32::MAX; STRIATAL_PORES]; OFC_CONTEXTS],
+            hot_dend_env: [[0; STRIATAL_PORES]; OFC_CONTEXTS],
+            hot_dend_key: [[0.0; STRIATAL_PORES]; OFC_CONTEXTS],
+            paged_cols: Vec::new(),
             pore_ch: [u32::MAX; STRIATAL_PORES],
             pore_age: [0; STRIATAL_PORES],
             pore_mean: [0.0; STRIATAL_PORES],
             pore_var_raw: [1.0e-4; STRIATAL_PORES],
             pore_var_exaff: [1.0e-4; STRIATAL_PORES],
+            pore_carr_mean: [0.0; STRIATAL_PORES],
+            pore_carr_var: [1.0e-4; STRIATAL_PORES],
+            pore_prev_x: [0.0; STRIATAL_PORES],
+            pore_var_dx: [1.0e-5; STRIATAL_PORES],
+            pore_orb_err: [1.0; STRIATAL_PORES],
             canc_g: vec![0.0; STRIATAL_PORES * tap_dim],
             w_birth,
             w_ctx,
@@ -249,8 +708,8 @@ impl StriatalOfc {
         for c in 0..OFC_CONTEXTS {
             let off = c * w_len;
             self.w_ctx[off..off + w_len].copy_from_slice(&self.w_birth);
-            self.w_cons[off..off + w_len].copy_from_slice(&self.w_birth);
         }
+        self.w_cons.fill(0.0);
         self.v_ctx.fill(0.0);
         self.v_cons.fill(0.0);
         self.q_ctx.fill(0.0);
@@ -265,11 +724,24 @@ impl StriatalOfc {
         self.ctx_ticks = [0; OFC_CONTEXTS];
         self.ctx_r_peak = [0.0; OFC_CONTEXTS];
         self.r_bar_ctx = [0.0; OFC_CONTEXTS];
+        self.total_cols = 1;
+        self.dend_mismatch_streak = 0;
+        self.hot_col_id = [0, 1, 2, 3];
+        self.hot_last_use = [0; OFC_CONTEXTS];
+        self.hot_dend_ch = [[u32::MAX; STRIATAL_PORES]; OFC_CONTEXTS];
+        self.hot_dend_env = [[0; STRIATAL_PORES]; OFC_CONTEXTS];
+        self.hot_dend_key = [[0.0; STRIATAL_PORES]; OFC_CONTEXTS];
+        self.paged_cols.clear();
         self.pore_ch = [u32::MAX; STRIATAL_PORES];
         self.pore_age = [0; STRIATAL_PORES];
         self.pore_mean = [0.0; STRIATAL_PORES];
         self.pore_var_raw = [1.0e-4; STRIATAL_PORES];
         self.pore_var_exaff = [1.0e-4; STRIATAL_PORES];
+        self.pore_carr_mean = [0.0; STRIATAL_PORES];
+        self.pore_carr_var = [1.0e-4; STRIATAL_PORES];
+        self.pore_prev_x = [0.0; STRIATAL_PORES];
+        self.pore_var_dx = [1.0e-5; STRIATAL_PORES];
+        self.pore_orb_err = [1.0; STRIATAL_PORES];
         self.canc_g.fill(0.0);
         self.fwd_b = [0.0; STRIATAL_CUES];
         self.fwd_alpha = [0.0; STRIATAL_CUES];
@@ -314,6 +786,11 @@ impl StriatalOfc {
         self.pore_mean[p] = 0.0;
         self.pore_var_raw[p] = 1.0e-4;
         self.pore_var_exaff[p] = 1.0e-4;
+        self.pore_carr_mean[p] = 0.0;
+        self.pore_carr_var[p] = 1.0e-4;
+        self.pore_prev_x[p] = 0.0;
+        self.pore_var_dx[p] = 1.0e-5;
+        self.pore_orb_err[p] = 1.0;
         let g_off = p * tap_dim;
         self.canc_g[g_off..g_off + tap_dim].fill(0.0);
         for st in 0..STRIATAL_STRATA {
@@ -324,17 +801,13 @@ impl StriatalOfc {
                     let row = m * STRIATAL_CUES;
                     let wb = self.w_birth[row + fi];
                     self.w_ctx[w_off + row + fi] = wb;
-                    self.w_cons[w_off + row + fi] = wb;
                 }
                 let v_off = c * STRIATAL_FEATS;
                 self.v_ctx[v_off + fi] = 0.0;
-                self.v_cons[v_off + fi] = 0.0;
                 let q_off = c * STRIATAL_CUES;
                 self.q_ctx[q_off + fi] = 0.0;
-                self.q_cons[q_off + fi] = 0.0;
                 let j_off = c * fwd_len + fi * na;
                 self.fwd_j_ctx[j_off..j_off + na].fill(0.0);
-                self.fwd_j_cons[j_off..j_off + na].fill(0.0);
             }
             for m in 0..na {
                 self.elig_actor[m * STRIATAL_CUES + fi] = 0.0;
@@ -349,6 +822,64 @@ impl StriatalOfc {
             let j_off = fi * na;
             self.fwd_j[j_off..j_off + na].fill(0.0);
         }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_quad_carrier_slot(&self, p: usize) -> bool {
+        if p >= STRIATAL_PORES || self.pore_ch[p] == u32::MAX || self.pore_age[p] < 36 {
+            return false;
+        }
+        let v_c = self.pore_carr_var[p];
+        if v_c < 1.2e-3 {
+            return false;
+        }
+        let rough = self.pore_var_dx[p] / v_c.max(1.0e-8);
+        rough > 0.001 && rough < 0.025 && self.pore_orb_err[p] < 0.30
+    }
+
+    #[must_use]
+    pub fn has_dual_population_carrier_bank(&self) -> bool {
+        let mut n_carr = 0usize;
+        let mut n_non = 0usize;
+        for p in 0..STRIATAL_PORES {
+            if self.pore_ch[p] == u32::MAX || self.pore_age[p] < 24 {
+                continue;
+            }
+            if self.is_quad_carrier_slot(p) {
+                n_carr += 1;
+            } else if self.pore_var_raw[p] >= 8.0e-5 && self.pore_orb_err[p] >= 0.34 {
+                n_non += 1;
+            }
+        }
+        n_carr >= 8 && n_non >= 10
+    }
+
+    #[must_use]
+    pub fn consolidated_role_for_channel(&self, ch: u32) -> u8 {
+        if ch == u32::MAX {
+            return 0;
+        }
+        let num_c = (self.num_ctx as usize).min(OFC_CONTEXTS);
+        let mut role = 0u8;
+        for c in 0..num_c {
+            if self.ctx_has_cons[c] == 0 {
+                continue;
+            }
+            for p in 0..STRIATAL_PORES {
+                if self.hot_dend_ch[c][p] == ch {
+                    role |= self.hot_dend_env[c][p] & 3;
+                }
+            }
+        }
+        for entry in &self.paged_cols {
+            for p in 0..STRIATAL_PORES {
+                if entry.dend_ch[p] == ch {
+                    role |= entry.dend_env[p] & 3;
+                }
+            }
+        }
+        role
     }
 
     #[inline]
@@ -387,9 +918,16 @@ impl StriatalOfc {
         sanitize(sum)
     }
 
-    fn consolidate_active_context(&mut self) {
+    fn consolidate_active_context_with_dend(
+        &mut self,
+        tonic_valid: &[bool; STRIATAL_PORES],
+        tonic_now: &[f32; STRIATAL_PORES],
+        apical_carrier: &[bool; STRIATAL_PORES],
+        feat_active: &[bool; STRIATAL_PORES],
+    ) {
         let (_, _, w_len, fwd_len) = self.dims();
         let c = self.active_ctx as usize;
+        let prev_had = self.ctx_has_cons[c] != 0;
         self.w_cons[c * w_len..(c + 1) * w_len]
             .copy_from_slice(&self.w_ctx[c * w_len..(c + 1) * w_len]);
         self.v_cons[c * STRIATAL_FEATS..(c + 1) * STRIATAL_FEATS]
@@ -398,10 +936,270 @@ impl StriatalOfc {
             .copy_from_slice(&self.q_ctx[c * STRIATAL_CUES..(c + 1) * STRIATAL_CUES]);
         self.fwd_j_cons[c * fwd_len..(c + 1) * fwd_len]
             .copy_from_slice(&self.fwd_j_ctx[c * fwd_len..(c + 1) * fwd_len]);
+        let mut env_pick = [false; STRIATAL_PORES];
+        let mut env_cnt = 0usize;
+        for p in 0..STRIATAL_PORES {
+            if tonic_valid[p]
+                && self.pore_ch[p] != u32::MAX
+                && (self.consolidated_role_for_channel(self.pore_ch[p]) & 1) != 0
+                && env_cnt < 16
+            {
+                env_pick[p] = true;
+                env_cnt += 1;
+            }
+        }
+        for p in 0..STRIATAL_PORES {
+            if !env_pick[p]
+                && tonic_valid[p]
+                && self.pore_ch[p] != u32::MAX
+                && self.pore_age[p] >= 36
+                && apical_carrier[p]
+                && env_cnt < 16
+            {
+                env_pick[p] = true;
+                env_cnt += 1;
+            }
+        }
+        for p in 0..STRIATAL_PORES {
+            if !tonic_valid[p] || self.pore_ch[p] == u32::MAX {
+                self.hot_dend_ch[c][p] = u32::MAX;
+                self.hot_dend_env[c][p] = 0;
+                self.hot_dend_key[c][p] = 0.0;
+                continue;
+            }
+            let is_env = env_pick[p];
+            let prev_same_ch = prev_had && self.hot_dend_ch[c][p] == self.pore_ch[p];
+            let dc_est = sanitize_clamp(tonic_now[p], -1.0, 1.0);
+            self.hot_dend_ch[c][p] = self.pore_ch[p];
+            self.hot_dend_env[c][p] =
+                u8::from(is_env) | (u8::from(!is_env && feat_active[p]) << 1);
+            self.hot_dend_key[c][p] = if prev_same_ch {
+                sanitize_clamp(0.50 * self.hot_dend_key[c][p] + 0.50 * dc_est, -1.0, 1.0)
+            } else {
+                dc_est
+            };
+        }
         self.ctx_has_cons[c] = 1;
+        self.hot_last_use[c] = self.tick;
     }
 
-    fn restore_consolidated_context(&mut self, c: usize) {
+    pub fn encode_hot_slot_slab(&self, slot: usize) -> Result<(Vec<u8>, u32), PersistError> {
+        let (na, _, w_len, fwd_len) = self.dims();
+        if slot >= OFC_CONTEXTS || self.ctx_has_cons[slot] == 0 {
+            return Err(PersistError::InvalidTopology);
+        }
+        encode_column_slab(
+            self.hot_col_id[slot],
+            na,
+            self.ctx_ticks[slot],
+            self.ctx_r_peak[slot],
+            self.r_bar_ctx[slot],
+            &self.hot_dend_ch[slot],
+            &self.hot_dend_env[slot],
+            &self.hot_dend_key[slot],
+            &self.w_cons[slot * w_len..(slot + 1) * w_len],
+            &self.v_cons[slot * STRIATAL_FEATS..(slot + 1) * STRIATAL_FEATS],
+            &self.q_cons[slot * STRIATAL_CUES..(slot + 1) * STRIATAL_CUES],
+            &self.fwd_j_cons[slot * fwd_len..(slot + 1) * fwd_len],
+        )
+    }
+
+    fn evict_hot_slot_to_paged(&mut self, slot: usize) -> Result<(), PersistError> {
+        if slot >= OFC_CONTEXTS || self.ctx_has_cons[slot] == 0 {
+            return Ok(());
+        }
+        let (slab_bytes, slab_crc32c) = self.encode_hot_slot_slab(slot)?;
+        let col_id = self.hot_col_id[slot];
+        let entry = PagedColumnEntry {
+            col_id,
+            r_peak: self.ctx_r_peak[slot],
+            dend_ch: self.hot_dend_ch[slot],
+            dend_env: self.hot_dend_env[slot],
+            dend_key: self.hot_dend_key[slot],
+            slab_crc32c,
+            slab_bytes,
+        };
+        if let Some(pos) = self.paged_cols.iter().position(|e| e.col_id == col_id) {
+            self.paged_cols[pos] = entry;
+        } else {
+            let ins = self.paged_cols.partition_point(|e| e.col_id < col_id);
+            self.paged_cols.insert(ins, entry);
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn remap_slab_for_channels(
+        &self,
+        dec: &DecodedColumnSlab,
+        cur_ch: &[u32; STRIATAL_PORES],
+    ) -> DecodedColumnSlab {
+        let (na, _, w_len, fwd_len) = self.dims();
+        let copy_na = dec.na.min(na);
+        let mut w_out = vec![0.0_f32; w_len];
+        let mut v_out = [0.0_f32; STRIATAL_FEATS];
+        v_out[STRIATAL_CUES] = dec.v_cons[STRIATAL_CUES];
+        let mut q_out = [0.0_f32; STRIATAL_CUES];
+        let mut j_out = vec![0.0_f32; fwd_len];
+        let mut dend_ch_out = [u32::MAX; STRIATAL_PORES];
+        let mut dend_env_out = [0u8; STRIATAL_PORES];
+        let mut dend_key_out = [0.0_f32; STRIATAL_PORES];
+
+        for p_dst in 0..STRIATAL_PORES {
+            let ch = cur_ch[p_dst];
+            if ch == u32::MAX {
+                continue;
+            }
+            let src_opt = if dec.dend_ch[p_dst] == ch {
+                Some(p_dst)
+            } else {
+                (0..STRIATAL_PORES).find(|&q| dec.dend_ch[q] == ch)
+            };
+            if let Some(p_src) = src_opt {
+                dend_ch_out[p_dst] = ch;
+                dend_env_out[p_dst] = dec.dend_env[p_src];
+                dend_key_out[p_dst] = dec.dend_key[p_src];
+                for st in 0..STRIATAL_STRATA {
+                    let d_fi = st * STRIATAL_PORES + p_dst;
+                    let s_fi = st * STRIATAL_PORES + p_src;
+                    for m in 0..copy_na {
+                        w_out[m * STRIATAL_CUES + d_fi] = dec.w_cons[m * STRIATAL_CUES + s_fi];
+                    }
+                    v_out[d_fi] = dec.v_cons[s_fi];
+                    q_out[d_fi] = dec.q_cons[s_fi];
+                    let d_jf = d_fi * na;
+                    let s_jf = s_fi * dec.na;
+                    j_out[d_jf..d_jf + copy_na]
+                        .copy_from_slice(&dec.fwd_j_cons[s_jf..s_jf + copy_na]);
+                }
+            }
+        }
+        DecodedColumnSlab {
+            col_id: dec.col_id,
+            na,
+            ticks: dec.ticks,
+            r_peak: dec.r_peak,
+            r_bar: dec.r_bar,
+            dend_ch: dend_ch_out,
+            dend_env: dend_env_out,
+            dend_key: dend_key_out,
+            w_cons: w_out,
+            v_cons: v_out,
+            q_cons: q_out,
+            fwd_j_cons: j_out,
+        }
+    }
+
+    pub fn apply_decoded_slab_to_hot_slot(&mut self, slot: usize, raw_dec: &DecodedColumnSlab) {
+        let cur_ch = self.pore_ch;
+        let dec = self.remap_slab_for_channels(raw_dec, &cur_ch);
+        let (_, _, w_len, fwd_len) = self.dims();
+        self.hot_col_id[slot] = dec.col_id;
+        self.ctx_has_cons[slot] = 1;
+        self.ctx_ticks[slot] = dec.ticks;
+        self.ctx_r_peak[slot] = dec.r_peak;
+        self.r_bar_ctx[slot] = dec.r_bar;
+        self.hot_dend_ch[slot] = dec.dend_ch;
+        self.hot_dend_env[slot] = dec.dend_env;
+        self.hot_dend_key[slot] = dec.dend_key;
+        self.hot_last_use[slot] = self.tick;
+
+        let w_dst = slot * w_len;
+        self.w_cons[w_dst..w_dst + w_len].copy_from_slice(&dec.w_cons);
+        let v_dst = slot * STRIATAL_FEATS;
+        self.v_cons[v_dst..v_dst + STRIATAL_FEATS].copy_from_slice(&dec.v_cons);
+        let q_dst = slot * STRIATAL_CUES;
+        self.q_cons[q_dst..q_dst + STRIATAL_CUES].copy_from_slice(&dec.q_cons);
+        let j_dst = slot * fwd_len;
+        self.fwd_j_cons[j_dst..j_dst + fwd_len].copy_from_slice(&dec.fwd_j_cons);
+        self.restore_consolidated_context(slot);
+    }
+
+    fn page_in_cold_column(
+        &mut self,
+        paged_idx: usize,
+        target_slot: usize,
+    ) -> Result<(), PersistError> {
+        if paged_idx >= self.paged_cols.len() || target_slot >= OFC_CONTEXTS {
+            return Err(PersistError::InvalidTopology);
+        }
+        let dec = decode_column_slab(&self.paged_cols[paged_idx].slab_bytes)?;
+        let incoming_col_id = dec.col_id;
+        if self.ctx_has_cons[target_slot] != 0 && self.hot_col_id[target_slot] != incoming_col_id {
+            self.evict_hot_slot_to_paged(target_slot)?;
+        }
+        if let Some(pos) = self
+            .paged_cols
+            .iter()
+            .position(|e| e.col_id == incoming_col_id)
+        {
+            self.paged_cols.remove(pos);
+        }
+        self.apply_decoded_slab_to_hot_slot(target_slot, &dec);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn dendritic_match_stats(
+        dend_ch: &[u32; STRIATAL_PORES],
+        dend_env: &[u8; STRIATAL_PORES],
+        dend_key: &[f32; STRIATAL_PORES],
+        cur_ch: &[u32; STRIATAL_PORES],
+        tonic_valid: &[bool; STRIATAL_PORES],
+        tonic_now: &[f32; STRIATAL_PORES],
+    ) -> (usize, f32, f32) {
+        let mut pairs = [(0.0_f32, 0.0_f32); STRIATAL_PORES];
+        let mut cnt = 0usize;
+        let mut sum_u = 0.0_f32;
+        let mut sum_k = 0.0_f32;
+        let mut sum_abs = 0.0_f32;
+
+        for p_col in 0..STRIATAL_PORES {
+            if (dend_env[p_col] & 1) == 0 || dend_ch[p_col] == u32::MAX {
+                continue;
+            }
+            let ch = dend_ch[p_col];
+            let matched_cur = if cur_ch[p_col] == ch && tonic_valid[p_col] {
+                Some(p_col)
+            } else {
+                (0..STRIATAL_PORES).find(|&q| cur_ch[q] == ch && tonic_valid[q])
+            };
+            if let Some(q) = matched_cur {
+                let u = tonic_now[q];
+                let k = dend_key[p_col];
+                pairs[cnt] = (u, k);
+                cnt += 1;
+                sum_u += u;
+                sum_k += k;
+                sum_abs += (u - k).abs();
+            }
+        }
+        if cnt == 0 {
+            return (0, 1.0, 0.0);
+        }
+        let inv = 1.0 / (cnt as f32);
+        let mean_u = sum_u * inv;
+        let mean_k = sum_k * inv;
+        let mean_abs = sanitize(sum_abs * inv);
+        let mut dot = 0.0_f32;
+        let mut nu = 0.0_f32;
+        let mut nk = 0.0_f32;
+        for &(u, k) in &pairs[..cnt] {
+            let du = u - mean_u;
+            let dk = k - mean_k;
+            dot += du * dk;
+            nu += du * du;
+            nk += dk * dk;
+        }
+        let cos = if nk > 1.0e-4 && nu > 1.0e-4 {
+            sanitize_clamp(dot / ((nu * nk).sqrt() + 1.0e-8), -1.0, 1.0)
+        } else {
+            0.0
+        };
+        (cnt, mean_abs, cos)
+    }
+
+    pub fn restore_consolidated_context(&mut self, c: usize) {
         let (_, _, w_len, fwd_len) = self.dims();
         if self.ctx_has_cons[c] == 0 {
             return;
@@ -445,7 +1243,8 @@ impl StriatalOfc {
                 }
             }
         }
-        let dof = eff_dof.clamp(2, 8).min(cols);
+        let min_dof = (cols / 3).max(2);
+        let dof = eff_dof.max(min_dof).clamp(2, 32).min(cols);
         let dof_pen = (dof as f32) / 500.0;
         let mut sum_r2 = 0.0_f32;
         let mut active_cnt = 0usize;
@@ -465,16 +1264,38 @@ impl StriatalOfc {
     }
 
     pub fn hash_learned(&self, hasher: &mut ParamHasher) {
+        hasher.write_u32(self.total_cols);
         hasher.write_u8(self.num_ctx);
         hasher.write_u8(self.active_ctx);
+        for &cid in &self.hot_col_id {
+            hasher.write_u32(cid);
+        }
         for &hc in &self.ctx_has_cons {
             hasher.write_u8(hc);
+        }
+        for c in 0..OFC_CONTEXTS {
+            for p in 0..STRIATAL_PORES {
+                hasher.write_u32(self.hot_dend_ch[c][p]);
+                hasher.write_u8(self.hot_dend_env[c][p]);
+                hasher.write_f32(self.hot_dend_key[c][p]);
+            }
+        }
+        hasher.write_usize(self.paged_cols.len());
+        for entry in &self.paged_cols {
+            hasher.write_u32(entry.col_id);
+            hasher.write_u32(entry.slab_crc32c);
         }
         for &ch in &self.pore_ch {
             hasher.write_u32(ch);
         }
         for &pm in &self.pore_mean {
             hasher.write_f32(pm);
+        }
+        for &cm in &self.pore_carr_mean {
+            hasher.write_f32(cm);
+        }
+        for &oe in &self.pore_orb_err {
+            hasher.write_f32(oe);
         }
         for &cg in &self.canc_g {
             hasher.write_f32(cg);
@@ -1476,7 +2297,8 @@ impl TubeGraph {
             self.slots.push(tube);
             s
         };
-        self.outgoing_by_cell[pre].push(idx);
+        let ins_pos = self.outgoing_by_cell[pre].partition_point(|&x| x < idx);
+        self.outgoing_by_cell[pre].insert(ins_pos, idx);
         self.alive_count += 1;
         Some(idx)
     }
@@ -1695,6 +2517,7 @@ impl TubeGraph {
 
         let pore_cap = PRED_BUCKETS.min(membrane.sensor_pores.len());
         let n_scout = membrane.scout_stats.len();
+        let quad_bank_ag = self.striatal.has_dual_population_carrier_bank();
         let mut shuf_act = vec![0.0_f32; ad];
         if prev.committed
             && let Some(lag9) = ring.at_lag(9)
@@ -1857,15 +2680,21 @@ impl TubeGraph {
                 let ag_pore_cap = if !emb_eco { 0.75 } else { 0.65 };
                 let ag_da_ok = !emb_eco || da_norm_sq >= 0.015;
                 let ag_delta_min = if !emb_eco { 0.012 } else { 0.020 };
+                let quad_carr_ag = quad_bank_ag
+                    && p < STRIATAL_PORES
+                    && self.striatal.pore_ch[p] == sp.channel
+                    && self.striatal.is_quad_carrier_slot(p);
                 let striatal_reaff = self.striatal.tick >= 48
                     && p < STRIATAL_PORES
                     && self.striatal.pore_ch[p] == sp.channel
+                    && !quad_carr_ag
                     && self.striatal.pore_var_raw[p] > 8.0e-4
                     && self.striatal.pore_var_exaff[p] < 0.28 * self.striatal.pore_var_raw[p];
                 if prev.committed
                     && ag_da_ok
                     && sp.age_ticks >= 16
                     && self.pore_agency[p] <= ag_pore_cap
+                    && !quad_carr_ag
                     && !striatal_reaff
                     && !self.on_tonotopic_floor(p)
                     && dx2_s.abs() > 1.0e-3
@@ -1958,30 +2787,33 @@ impl TubeGraph {
                     self.pore_agency[p] =
                         sanitize_clamp(0.990 * self.pore_agency[p] + 0.010 * inst_gain, -0.25, 1.0);
                 }
-                self.pore_self_w[p] = sanitize_clamp(
-                    0.998 * self.pore_self_w[p] + 0.024 * err_act.clamp(-1.5, 1.5) * dz_prev,
-                    -0.95,
-                    0.95,
-                );
-                if prev.committed {
-                    let lr_p = 0.032 * nlms_scale;
-                    let clean_e = err_act.clamp(-1.2, 1.2);
-                    for (m, &da_m) in centered_act.iter().enumerate() {
-                        let w_old = self.pore_action_w[m][p];
-                        let sign_flip = da_m.abs() > 0.14 && dz_now * (w_old * da_m) < -5.0e-3;
-                        let dec = if sign_flip {
-                            0.94
-                        } else if adult_pruned_coch
-                            && da_m.abs() < 0.03
-                            && w_old >= 0.012
-                            && self.on_tonotopic_floor(p)
-                        {
-                            0.99995
-                        } else {
-                            0.9990
-                        };
-                        self.pore_action_w[m][p] =
-                            sanitize_clamp(dec * w_old + lr_p * clean_e * da_m, -1.8, 1.8);
+                if !quad_carr_ag {
+                    self.pore_self_w[p] = sanitize_clamp(
+                        0.998 * self.pore_self_w[p] + 0.024 * err_act.clamp(-1.5, 1.5) * dz_prev,
+                        -0.95,
+                        0.95,
+                    );
+                    if prev.committed {
+                        let lr_p = 0.032 * nlms_scale;
+                        let clean_e = err_act.clamp(-1.2, 1.2);
+                        for (m, &da_m) in centered_act.iter().enumerate() {
+                            let w_old = self.pore_action_w[m][p];
+                            let sign_flip =
+                                da_m.abs() > 0.14 && dz_now * (w_old * da_m) < -5.0e-3;
+                            let dec = if sign_flip {
+                                0.94
+                            } else if adult_pruned_coch
+                                && da_m.abs() < 0.03
+                                && w_old >= 0.012
+                                && self.on_tonotopic_floor(p)
+                            {
+                                0.99995
+                            } else {
+                                0.9990
+                            };
+                            self.pore_action_w[m][p] =
+                                sanitize_clamp(dec * w_old + lr_p * clean_e * da_m, -1.8, 1.8);
+                        }
                     }
                 }
             }
@@ -3604,18 +4436,29 @@ impl TubeGraph {
                 }
             }
 
+            let base_k_td = (cells.alive_count / 2).max(cells.alive_count.min(24));
+            let uncap_k_td = base_k_td.clamp(4, 96).min(cells.alive_count.max(1));
+            let cap_k_td = cells.k_winners_target().max(1);
+            let ap_scale_td = if cells.alive_count > 128 && uncap_k_td > cap_k_td {
+                (uncap_k_td as f32) / (cap_k_td as f32)
+            } else {
+                1.0
+            };
             let mut td_past = vec![0.0_f32; ad];
             let mut max_reward_jac = vec![0.0_f32; ad];
             for &(c_idx, v_past, dv_past, _) in &entry.active_cells {
+                let mut cell_is_apical = false;
                 if let Some(cell) = cells.slots.get(c_idx as usize)
                     && cell.alive
-                    && (cell.v_homeo.abs() + cell.v_delta_homeo.abs()) > 0.12
                 {
-                    let b = c_idx as usize;
-                    for (m, dst) in max_reward_jac.iter_mut().enumerate() {
-                        let j = self.action_sensory_w[m][b].abs();
-                        if j > *dst {
-                            *dst = j;
+                    cell_is_apical = cell.tau >= 16.0;
+                    if (cell.v_homeo.abs() + cell.v_delta_homeo.abs()) > 0.12 {
+                        let b = c_idx as usize;
+                        for (m, dst) in max_reward_jac.iter_mut().enumerate() {
+                            let j = self.action_sensory_w[m][b].abs();
+                            if j > *dst {
+                                *dst = j;
+                            }
                         }
                     }
                 }
@@ -3642,7 +4485,12 @@ impl TubeGraph {
                     let act_ch = mp.actuator_channel as usize;
                     if act_ch < ad {
                         let g = tube.effective_g(&cells.slots);
-                        td_past[act_ch] = sanitize(td_past[act_ch] + g * pre_sig * mp.conductance);
+                        let term = if cell_is_apical && ap_scale_td > 1.0 {
+                            g * pre_sig * mp.conductance * ap_scale_td
+                        } else {
+                            g * pre_sig * mp.conductance
+                        };
+                        td_past[act_ch] = sanitize(td_past[act_ch] + term);
                     }
                 }
             }
@@ -5060,6 +5908,14 @@ impl TubeGraph {
             }
         }
 
+        let base_k_ro = (cells.alive_count / 2).max(cells.alive_count.min(24));
+        let uncap_k_ro = base_k_ro.clamp(4, 96).min(cells.alive_count.max(1));
+        let cap_k_ro = cells.k_winners_target().max(1);
+        let ap_scale_ro = if cells.alive_count > 128 && uncap_k_ro > cap_k_ro {
+            (uncap_k_ro as f32) / (cap_k_ro as f32)
+        } else {
+            1.0
+        };
         for &c_idx in &cells.active_indices {
             let Some(cell) = cells.slots.get(c_idx as usize) else {
                 continue;
@@ -5070,6 +5926,11 @@ impl TubeGraph {
             let sig = sanitize(cell.v_real + 0.25 * cell.delta_v);
             let is_slow = cell.tau >= 5.0;
             let is_apical = cell.tau >= 16.0;
+            let sig_m = if is_apical && ap_scale_ro > 1.0 {
+                sanitize(sig * ap_scale_ro)
+            } else {
+                sig
+            };
             let Some(out_list) = self.outgoing_by_cell.get(c_idx as usize) else {
                 continue;
             };
@@ -5079,7 +5940,7 @@ impl TubeGraph {
                 };
                 if !tube.alive || tube.kind != TubeKind::CellToMotor {
                     continue;
-                }
+                };
                 let Some(mp) = membrane.motor_pores.get(tube.post as usize) else {
                     continue;
                 };
@@ -5096,13 +5957,14 @@ impl TubeGraph {
                     pyr_env_cnt[act_ch] = pyr_env_cnt[act_ch].saturating_add(1);
                 }
                 let g = tube.effective_g(&cells.slots);
-                let contrib = sanitize(g * sig * mp.conductance);
+                let contrib = sanitize(g * sig_m * mp.conductance);
                 if is_apical {
                     apical_drive[act_ch] = sanitize(apical_drive[act_ch] + contrib);
                 } else {
                     basal_drive[act_ch] = sanitize(basal_drive[act_ch] + contrib);
                 }
-                let pred_contrib = sanitize((0.65 * g + 0.85 * tube.w_pred) * sig * mp.conductance);
+                let pred_contrib =
+                    sanitize((0.65 * g + 0.85 * tube.w_pred) * sig_m * mp.conductance);
                 tube_pred_action_val[act_ch] =
                     sanitize(tube_pred_action_val[act_ch] + pred_contrib);
                 stiff_motor_conf[act_ch] =
@@ -6948,9 +7810,9 @@ impl TubeGraph {
         emb_eco: bool,
         membrane: &mut PoreMembrane,
         mode: ControlMode,
-    ) -> (Option<Vec<f32>>, u64) {
+    ) -> Result<(Option<Vec<f32>>, u64), PersistError> {
         if num_actuators == 0 || emb_eco {
-            return (None, 0);
+            return Ok((None, 0));
         }
         let is_plastic = mode == ControlMode::Natural;
         if is_plastic {
@@ -6976,10 +7838,33 @@ impl TubeGraph {
 
         let pore_cap = membrane.sensor_pores.len().min(STRIATAL_PORES);
         let n_scout = membrane.scout_stats.len();
+        let num_c_init = (self.striatal.num_ctx as usize).min(OFC_CONTEXTS);
+        let has_any_env = (0..num_c_init).any(|c| {
+            self.striatal.ctx_has_cons[c] != 0
+                && self.striatal.hot_dend_env[c]
+                    .iter()
+                    .any(|&ev| (ev & 1) != 0)
+        }) || self
+            .striatal
+            .paged_cols
+            .iter()
+            .any(|e| e.dend_env.iter().any(|&ev| (ev & 1) != 0));
+
+        let mut live_pore_ch = [u32::MAX; STRIATAL_PORES];
+        let mut raw_x_arr = [0.0_f32; STRIATAL_PORES];
+        let mut is_white_arr = [false; STRIATAL_PORES];
+        let mut is_dead_flat_arr = [false; STRIATAL_PORES];
+        let mut quad_cand = [false; STRIATAL_PORES];
+        let mut tonic_valid = [false; STRIATAL_PORES];
+        let mut tonic_now = [0.0_f32; STRIATAL_PORES];
+        let mut prony_valid_arr = [false; STRIATAL_PORES];
+        let mut apical_carrier = [false; STRIATAL_PORES];
         let mut feat_active = [false; STRIATAL_PORES];
         let mut pore_sig = [0.0_f32; STRIATAL_PORES];
         let mut c1_wave_pores = 0usize;
         let mut max_smooth_raw = 0.0_f32;
+        let mut n_quad_cand = 0usize;
+        let mut n_non_carr = 0usize;
 
         for p in 0..STRIATAL_PORES {
             if p >= pore_cap || !membrane.sensor_pores[p].alive {
@@ -6989,62 +7874,57 @@ impl TubeGraph {
                 continue;
             }
             let ch = membrane.sensor_pores[p].channel;
+            live_pore_ch[p] = ch;
             if is_plastic && self.striatal.pore_ch[p] != ch {
                 self.striatal.reset_pore_slot(p, ch);
             }
             let ch_u = ch as usize;
             let raw_x = sanitize_clamp(ambient_in.get(ch_u).copied().unwrap_or(0.0), -1.0, 1.0);
-            let matched = self.striatal.pore_ch[p] == ch;
-            let mean_x = if matched {
-                self.striatal.pore_mean[p]
-            } else {
-                0.0
-            };
-            let xc = raw_x - mean_x;
-            let g_off = p * tap_dim;
-            let mut reaff = 0.0_f32;
-            if matched {
-                for tap in 0..STRIATAL_TAPS {
-                    let r_off = tap * na;
-                    for m in 0..act_s {
-                        reaff += self.striatal.canc_g[g_off + r_off + m]
-                            * self.striatal.da_ring[r_off + m];
-                    }
-                }
-            }
-            let x_tilde = xc - reaff;
+            raw_x_arr[p] = raw_x;
+
             if is_plastic {
-                let age = self.striatal.pore_age[p];
-                let beta_m = if age < 48 { 0.06 } else { 0.015 };
-                self.striatal.pore_mean[p] =
-                    sanitize_clamp(self.striatal.pore_mean[p] + beta_m * xc, -1.0, 1.0);
-                self.striatal.pore_var_raw[p] =
-                    sanitize((1.0 - beta_m) * self.striatal.pore_var_raw[p] + beta_m * xc * xc);
-                self.striatal.pore_var_exaff[p] = sanitize(
-                    (1.0 - beta_m) * self.striatal.pore_var_exaff[p] + beta_m * x_tilde * x_tilde,
-                );
-                for tap in 0..STRIATAL_TAPS {
-                    let r_off = tap * na;
-                    for m in 0..act_s {
-                        let idx = g_off + r_off + m;
-                        self.striatal.canc_g[idx] = sanitize_clamp(
-                            canc_decay * self.striatal.canc_g[idx]
-                                + eta_g * x_tilde * self.striatal.da_ring[r_off + m],
-                            -2.0,
-                            2.0,
-                        );
-                    }
-                }
-                self.striatal.pore_age[p] = age.saturating_add(1);
-                if age >= prune_warmup
-                    && !self.is_tonotopic_receptor(p)
-                    && self.striatal.pore_var_raw[p] > 8.0e-4
-                    && self.striatal.pore_var_exaff[p] < 0.25 * self.striatal.pore_var_raw[p]
-                {
-                    membrane.sensor_pores[p].trophic_ema = 0.0;
-                    membrane.sensor_pores[p].conductance = 0.01;
+                if self.striatal.pore_age[p] == 0 {
+                    self.striatal.pore_carr_mean[p] = raw_x;
+                    self.striatal.pore_prev_x[p] = raw_x;
+                    self.striatal.pore_carr_var[p] = 1.0e-4;
+                    self.striatal.pore_var_dx[p] = 1.0e-5;
+                    self.striatal.pore_orb_err[p] = 1.0;
+                } else {
+                    let dx = sanitize(raw_x - self.striatal.pore_prev_x[p]);
+                    let mid = sanitize(
+                        0.5 * (raw_x + self.striatal.pore_prev_x[p])
+                            - self.striatal.pore_carr_mean[p],
+                    );
+                    self.striatal.pore_carr_mean[p] = sanitize_clamp(
+                        self.striatal.pore_carr_mean[p]
+                            + 0.03 * (raw_x - self.striatal.pore_carr_mean[p]),
+                        -1.0,
+                        1.0,
+                    );
+                    self.striatal.pore_carr_var[p] =
+                        sanitize(0.96 * self.striatal.pore_carr_var[p] + 0.04 * mid * mid);
+                    self.striatal.pore_var_dx[p] =
+                        sanitize(0.96 * self.striatal.pore_var_dx[p] + 0.04 * dx * dx);
+                    let r2 = (mid * mid) / (2.0 * self.striatal.pore_carr_var[p].max(1.0e-7))
+                        + (dx * dx) / (2.0 * self.striatal.pore_var_dx[p].max(1.0e-8));
+                    let r_dev = (r2 - 1.0).abs().min(4.0);
+                    self.striatal.pore_orb_err[p] =
+                        sanitize(0.96 * self.striatal.pore_orb_err[p] + 0.04 * r_dev);
+                    self.striatal.pore_prev_x[p] = raw_x;
                 }
             }
+
+            if membrane.sensor_pores[p].age_ticks >= 1 {
+                let (dc_v, pr_ok) = harmonic_dc_from_history(
+                    &membrane.sensor_pores[p].history,
+                    membrane.sensor_pores[p].hist_head,
+                    membrane.sensor_pores[p].age_ticks,
+                );
+                tonic_now[p] = dc_v;
+                tonic_valid[p] = true;
+                prony_valid_arr[p] = pr_ok;
+            }
+
             let is_white = ch_u < n_scout
                 && membrane.scout_stats[ch_u].initialized
                 && membrane.scout_stats[ch_u].var_ema > 1.0e-3
@@ -7057,15 +7937,187 @@ impl TubeGraph {
                 max_h_s = max_h_s.max(hv);
             }
             let max_abs_h = min_h_s.abs().max(max_h_s.abs());
-            let is_dead_flat = membrane.sensor_pores[p].age_ticks >= 16
+            let is_dead_flat = (!has_any_env || is_plastic)
+                && membrane.sensor_pores[p].age_ticks >= 16
                 && (max_h_s - min_h_s) < 1.0e-5
                 && (max_abs_h < 1.0e-5 || max_h_s < -0.05);
-            feat_active[p] = !is_white && !is_dead_flat;
-            let neg_floor = if mean_x < -0.05 { mean_x } else { 0.0 };
+            is_white_arr[p] = is_white;
+            is_dead_flat_arr[p] = is_dead_flat;
+
+            if self.striatal.is_quad_carrier_slot(p) {
+                quad_cand[p] = true;
+                n_quad_cand += 1;
+            } else if !is_white
+                && !is_dead_flat
+                && self.striatal.pore_age[p] >= 24
+                && self.striatal.pore_orb_err[p] >= 0.34
+            {
+                n_non_carr += 1;
+            }
+        }
+
+        let carrier_bank = n_quad_cand >= 8 && n_non_carr >= 10;
+        if carrier_bank {
+            for p in 0..STRIATAL_PORES {
+                apical_carrier[p] = quad_cand[p]
+                    || (self.striatal.consolidated_role_for_channel(live_pore_ch[p]) & 1) != 0;
+            }
+            if is_plastic && n_quad_cand > 16 && (self.striatal.tick & 3) == 0 {
+                let mut victim_p: Option<usize> = None;
+                for p in (0..STRIATAL_PORES).rev() {
+                    if !quad_cand[p] {
+                        continue;
+                    }
+                    let role = self.striatal.consolidated_role_for_channel(live_pore_ch[p]);
+                    if role == 0 {
+                        victim_p = Some(p);
+                        break;
+                    }
+                }
+                if let Some(vp) = victim_p {
+                    membrane.sensor_pores[vp].trophic_ema = 0.0;
+                    membrane.sensor_pores[vp].conductance = 0.01;
+                    apical_carrier[vp] = false;
+                }
+            }
+        }
+
+        let mut n_prony_env = 0usize;
+        let mut basal_coherent = [false; STRIATAL_PORES];
+        for p in 0..STRIATAL_PORES {
+            if live_pore_ch[p] == u32::MAX {
+                continue;
+            }
+            if apical_carrier[p] && prony_valid_arr[p] {
+                n_prony_env += 1;
+            }
+            let ch = live_pore_ch[p];
+            let ch_u = ch as usize;
+            let raw_x = raw_x_arr[p];
+            let matched = self.striatal.pore_ch[p] == ch;
+            let mean_x = if matched {
+                self.striatal.pore_mean[p]
+            } else {
+                0.0
+            };
+            let xc = raw_x - mean_x;
+            let g_off = p * tap_dim;
+            let mut reaff = 0.0_f32;
+            if matched && (is_plastic || !has_any_env) && !apical_carrier[p] {
+                for tap in 0..STRIATAL_TAPS {
+                    let r_off = tap * na;
+                    for m in 0..act_s {
+                        reaff += self.striatal.canc_g[g_off + r_off + m]
+                            * self.striatal.da_ring[r_off + m];
+                    }
+                }
+            }
+            let x_tilde = xc - reaff;
+            let vel_c = if ch_u < n_scout {
+                membrane.scout_stats[ch_u].cov_dx_ema
+                    / membrane.scout_stats[ch_u].diff_sq_ema.max(1.0e-8)
+            } else {
+                0.0
+            };
+            let cons_role = if has_any_env {
+                self.striatal.consolidated_role_for_channel(ch)
+            } else {
+                0
+            };
+            if is_plastic {
+                let age = self.striatal.pore_age[p];
+                let beta_m = if age < 48 { 0.06 } else { 0.015 };
+                self.striatal.pore_mean[p] =
+                    sanitize_clamp(self.striatal.pore_mean[p] + beta_m * xc, -1.0, 1.0);
+                self.striatal.pore_var_raw[p] =
+                    sanitize((1.0 - beta_m) * self.striatal.pore_var_raw[p] + beta_m * xc * xc);
+                self.striatal.pore_var_exaff[p] = sanitize(
+                    (1.0 - beta_m) * self.striatal.pore_var_exaff[p] + beta_m * x_tilde * x_tilde,
+                );
+                if !apical_carrier[p] {
+                    for tap in 0..STRIATAL_TAPS {
+                        let r_off = tap * na;
+                        for m in 0..act_s {
+                            let idx = g_off + r_off + m;
+                            self.striatal.canc_g[idx] = sanitize_clamp(
+                                canc_decay * self.striatal.canc_g[idx]
+                                    + eta_g * x_tilde * self.striatal.da_ring[r_off + m],
+                                -2.0,
+                                2.0,
+                            );
+                        }
+                    }
+                }
+                self.striatal.pore_age[p] = age.saturating_add(1);
+
+                let anchored_spine = cons_role != 0;
+                if anchored_spine {
+                    if membrane.sensor_pores[p].trophic_ema < 0.12 {
+                        membrane.sensor_pores[p].trophic_ema = 0.12;
+                    }
+                    if membrane.sensor_pores[p].conductance < 0.18 {
+                        membrane.sensor_pores[p].conductance = 0.18;
+                    }
+                }
+
+                let is_newtonian_field = carrier_bank
+                    && ch_u < n_scout
+                    && membrane.scout_stats[ch_u].is_smooth_spatial_field();
+                let is_brownian_ou = carrier_bank
+                    && age >= 48
+                    && vel_c < 0.08
+                    && self.striatal.pore_var_raw[p] > 2.0e-3;
+                if !apical_carrier[p]
+                    && !anchored_spine
+                    && !is_newtonian_field
+                    && !self.is_tonotopic_receptor(p)
+                    && (is_brownian_ou
+                        || (age >= prune_warmup
+                            && self.striatal.pore_var_raw[p] > 8.0e-4
+                            && self.striatal.pore_var_exaff[p]
+                                < 0.25 * self.striatal.pore_var_raw[p]))
+                {
+                    membrane.sensor_pores[p].trophic_ema = 0.0;
+                    membrane.sensor_pores[p].conductance = 0.01;
+                }
+            }
+            let age_now = self.striatal.pore_age[p];
+            let is_self_copy_like = age_now >= 36
+                && self.striatal.pore_var_raw[p] > 8.0e-4
+                && self.striatal.pore_var_exaff[p] < 0.25 * self.striatal.pore_var_raw[p];
+            let is_ou_like = carrier_bank
+                && (cons_role & 2) == 0
+                && age_now >= 36
+                && vel_c < 0.08
+                && self.striatal.pore_var_raw[p] > 2.0e-3;
+            feat_active[p] = if carrier_bank && (cons_role & 2) != 0 {
+                !apical_carrier[p]
+            } else {
+                !is_white_arr[p]
+                    && !is_dead_flat_arr[p]
+                    && !apical_carrier[p]
+                    && (!carrier_bank || (!is_self_copy_like && !is_ou_like))
+            };
+            basal_coherent[p] = if carrier_bank {
+                !apical_carrier[p]
+                    && ((cons_role & 2) != 0
+                        || (!is_white_arr[p]
+                            && feat_active[p]
+                            && age_now >= 48
+                            && vel_c > 0.14
+                            && !is_self_copy_like))
+            } else {
+                feat_active[p]
+            };
+            let neg_floor = if (!has_any_env || is_plastic) && mean_x < -0.05 {
+                mean_x
+            } else {
+                0.0
+            };
             pore_sig[p] = sanitize_clamp(raw_x - neg_floor - reaff, -1.0, 1.0);
             let is_sparse = ch_u < n_scout && membrane.scout_stats[ch_u].is_sparse_impulse();
             if !is_sparse {
-                if !is_white {
+                if !is_white_arr[p] {
                     max_smooth_raw = max_smooth_raw.max(raw_x.abs());
                 }
                 let wave_ok = if is_plastic {
@@ -7090,7 +8142,108 @@ impl TubeGraph {
                 self.striatal.has_prev = false;
                 self.striatal.tick = self.striatal.tick.saturating_add(1);
             }
-            return (None, 0);
+            return Ok((None, 0));
+        }
+
+        let mut ro_paged_slab: Option<DecodedColumnSlab> = None;
+        if !is_plastic && has_any_env {
+            let num_c_ro = (self.striatal.num_ctx as usize).min(OFC_CONTEXTS);
+            let mut n_ro_prony = 0usize;
+            for p in 0..STRIATAL_PORES {
+                if prony_valid_arr[p]
+                    && (self.striatal.consolidated_role_for_channel(live_pore_ch[p]) & 1) != 0
+                {
+                    n_ro_prony += 1;
+                }
+            }
+            let (ro_mad_max, ro_cos_min) = if n_ro_prony >= 5 {
+                (0.115, 0.72)
+            } else {
+                (0.28, 0.56)
+            };
+            let mut best_hot: Option<(usize, f32)> = None;
+            for c in 0..num_c_ro {
+                if self.striatal.ctx_has_cons[c] == 0 {
+                    continue;
+                }
+                let (cnt, mad, cos) = StriatalOfc::dendritic_match_stats(
+                    &self.striatal.hot_dend_ch[c],
+                    &self.striatal.hot_dend_env[c],
+                    &self.striatal.hot_dend_key[c],
+                    &live_pore_ch,
+                    &tonic_valid,
+                    &tonic_now,
+                );
+                if cnt >= 5 && mad < ro_mad_max && cos > ro_cos_min {
+                    let sc = cos - 2.0 * mad;
+                    if best_hot.is_none_or(|(_, b)| sc > b) {
+                        best_hot = Some((c, sc));
+                    }
+                }
+            }
+            let mut best_cold: Option<(usize, f32)> = None;
+            for (idx, entry) in self.striatal.paged_cols.iter().enumerate() {
+                let (cnt, mad, cos) = StriatalOfc::dendritic_match_stats(
+                    &entry.dend_ch,
+                    &entry.dend_env,
+                    &entry.dend_key,
+                    &live_pore_ch,
+                    &tonic_valid,
+                    &tonic_now,
+                );
+                if cnt >= 5 && mad < ro_mad_max && cos > ro_cos_min {
+                    let sc = cos - 2.0 * mad;
+                    if best_cold.is_none_or(|(_, b)| sc > b) {
+                        best_cold = Some((idx, sc));
+                    }
+                }
+            }
+            if let Some((p_idx, p_sc)) = best_cold
+                && best_hot.is_none_or(|(_, h_sc)| p_sc > h_sc)
+            {
+                let raw_dec = decode_column_slab(&self.striatal.paged_cols[p_idx].slab_bytes)?;
+                ro_paged_slab =
+                    Some(self.striatal.remap_slab_for_channels(&raw_dec, &live_pore_ch));
+            } else if let Some((h_c, _)) = best_hot {
+                let mut v_arr = [0.0_f32; STRIATAL_FEATS];
+                v_arr.copy_from_slice(
+                    &self.striatal.v_cons[h_c * STRIATAL_FEATS..(h_c + 1) * STRIATAL_FEATS],
+                );
+                let mut q_arr = [0.0_f32; STRIATAL_CUES];
+                q_arr.copy_from_slice(
+                    &self.striatal.q_cons[h_c * STRIATAL_CUES..(h_c + 1) * STRIATAL_CUES],
+                );
+                let raw_hot = DecodedColumnSlab {
+                    col_id: self.striatal.hot_col_id[h_c],
+                    na,
+                    ticks: self.striatal.ctx_ticks[h_c],
+                    r_peak: self.striatal.ctx_r_peak[h_c],
+                    r_bar: self.striatal.r_bar_ctx[h_c],
+                    dend_ch: self.striatal.hot_dend_ch[h_c],
+                    dend_env: self.striatal.hot_dend_env[h_c],
+                    dend_key: self.striatal.hot_dend_key[h_c],
+                    w_cons: self.striatal.w_cons[h_c * w_len..(h_c + 1) * w_len].to_vec(),
+                    v_cons: v_arr,
+                    q_cons: q_arr,
+                    fwd_j_cons: self.striatal.fwd_j_cons[h_c * fwd_len..(h_c + 1) * fwd_len]
+                        .to_vec(),
+                };
+                ro_paged_slab =
+                    Some(self.striatal.remap_slab_for_channels(&raw_hot, &live_pore_ch));
+            }
+            if let Some(ref dec) = ro_paged_slab {
+                let mut mask_cnt = 0usize;
+                for (p, &ev) in dec.dend_env.iter().enumerate() {
+                    if live_pore_ch[p] != u32::MAX && (ev & 2) != 0 {
+                        mask_cnt += 1;
+                    }
+                }
+                if mask_cnt >= 4 {
+                    for p in 0..STRIATAL_PORES {
+                        feat_active[p] = live_pore_ch[p] != u32::MAX && (dec.dend_env[p] & 2) != 0;
+                    }
+                }
+            }
         }
 
         let mut mean_sig = 0.0_f32;
@@ -7140,7 +8293,8 @@ impl TubeGraph {
                 da_norm_sq += d * d;
             }
             let beta_v = 0.004_f32;
-            let eta_j = 0.015 / (da_norm_sq + 0.25);
+            let nlms_m_scale = ((act_s.max(6) as f32) * (1.0 / 6.0)).clamp(1.0, 6.0);
+            let eta_j = (0.015 * nlms_m_scale) / (da_norm_sq + 0.25);
             let mut step_num = [0.0_f32; OFC_CONTEXTS];
             let mut step_den = [0.0_f32; OFC_CONTEXTS];
             for j in 0..STRIATAL_CUES {
@@ -7262,11 +8416,13 @@ impl TubeGraph {
         }
 
         let mut switched_context = false;
+        let mut act_mismatch_inst = false;
         let mut splits = 0u64;
         if is_plastic && self.striatal.has_prev {
             let act_c = self.striatal.active_ctx as usize;
             let num_c = self.striatal.num_ctx as usize;
             self.striatal.ctx_ticks[act_c] = self.striatal.ctx_ticks[act_c].saturating_add(1);
+            self.striatal.hot_last_use[act_c] = self.striatal.tick;
             if self.striatal.ctx_cooldown > 0 {
                 self.striatal.ctx_cooldown -= 1;
             }
@@ -7274,6 +8430,29 @@ impl TubeGraph {
                 sanitize(0.97 * self.striatal.r_fast_ema + 0.03 * reward).min(0.022);
             self.striatal.r_med200 =
                 sanitize(0.992 * self.striatal.r_med200 + 0.008 * reward).min(0.022);
+
+            let (act_env_cnt, act_mad, act_cos) = if self.striatal.ctx_has_cons[act_c] != 0 {
+                let cur_ch = self.striatal.pore_ch;
+                StriatalOfc::dendritic_match_stats(
+                    &self.striatal.hot_dend_ch[act_c],
+                    &self.striatal.hot_dend_env[act_c],
+                    &self.striatal.hot_dend_key[act_c],
+                    &cur_ch,
+                    &tonic_valid,
+                    &tonic_now,
+                )
+            } else {
+                (0, 0.0, 1.0)
+            };
+            let env_mismatch_raw = act_env_cnt >= 5 && (act_mad > 0.115 || act_cos < 0.76);
+            act_mismatch_inst = env_mismatch_raw && n_prony_env >= 5;
+            if act_mismatch_inst {
+                self.striatal.dend_mismatch_streak =
+                    self.striatal.dend_mismatch_streak.saturating_add(1);
+            } else if !env_mismatch_raw {
+                self.striatal.dend_mismatch_streak = 0;
+            }
+            let dend_mismatch_now = self.striatal.dend_mismatch_streak >= 6;
 
             let has_fwd_act = self.striatal.fwd_den[act_c] > 2.0e-5;
             let beta_act = if has_fwd_act {
@@ -7316,109 +8495,231 @@ impl TubeGraph {
                 }
             }
 
-            if self.striatal.ctx_ticks[act_c] >= 520
-                && self.striatal.r_med200 > 0.002
-                && self.striatal.r_med200 >= self.striatal.ctx_r_peak[act_c] - 0.003
-                && (!has_fwd_act || beta_act > 0.15)
-            {
-                self.striatal.ctx_r_peak[act_c] =
-                    self.striatal.ctx_r_peak[act_c].max(self.striatal.r_med200);
-                self.striatal.consolidate_active_context();
-            } else if act_c > 0
-                && self.striatal.ctx_has_cons[act_c] == 0
-                && self.striatal.ctx_ticks[act_c] >= 400
-                && has_fwd_act
-                && beta_act > 0.20
-                && (self.striatal.r_med200 > -0.008
-                    || (self.striatal.ctx_ticks[act_c] >= 650 && self.striatal.r_med200 > -0.010))
-            {
-                self.striatal.ctx_r_peak[act_c] = self.striatal.r_med200;
-                self.striatal.consolidate_active_context();
-            } else if self.striatal.ctx_has_cons[act_c] != 0
-                && has_fwd_act
-                && beta_act > 0.55
-                && (self.striatal.ctx_ticks[act_c] & 63) == 0
-            {
-                let f_off = act_c * fwd_len;
-                self.striatal.fwd_j_cons[f_off..f_off + fwd_len]
-                    .copy_from_slice(&self.striatal.fwd_j_ctx[f_off..f_off + fwd_len]);
+            if !env_mismatch_raw && (!carrier_bank || n_prony_env >= 6) {
+                if carrier_bank {
+                    if self.striatal.ctx_has_cons[act_c] == 0 {
+                        if self.striatal.ctx_ticks[act_c] >= 480
+                            && ((has_fwd_act && beta_act > 0.10 && self.striatal.r_med200 > -0.025)
+                                || self.striatal.ctx_ticks[act_c] >= 680)
+                        {
+                            self.striatal.ctx_r_peak[act_c] = self.striatal.r_med200;
+                            self.striatal.consolidate_active_context_with_dend(
+                                &tonic_valid,
+                                &tonic_now,
+                                &apical_carrier,
+                                &basal_coherent,
+                            );
+                        }
+                    } else if self.striatal.ctx_ticks[act_c] < 1_150
+                        && self.striatal.ctx_ticks[act_c] >= 520
+                        && (self.striatal.r_med200 >= self.striatal.ctx_r_peak[act_c] - 0.004
+                            || (self.striatal.r_med200 > 0.0015
+                                && (self.striatal.ctx_ticks[act_c] & 31) == 0)
+                            || (self.striatal.ctx_ticks[act_c] == 1_148
+                                && self.striatal.r_med200
+                                    >= self.striatal.ctx_r_peak[act_c] - 0.010))
+                        && (!has_fwd_act || beta_act > 0.08)
+                    {
+                        self.striatal.ctx_r_peak[act_c] =
+                            self.striatal.ctx_r_peak[act_c].max(self.striatal.r_med200);
+                        self.striatal.consolidate_active_context_with_dend(
+                            &tonic_valid,
+                            &tonic_now,
+                            &apical_carrier,
+                            &basal_coherent,
+                        );
+                    } else if self.striatal.ctx_ticks[act_c] >= 1_150
+                        && self.striatal.r_med200 > self.striatal.ctx_r_peak[act_c] + 0.002
+                        && (!has_fwd_act || beta_act > 0.15)
+                    {
+                        self.striatal.ctx_r_peak[act_c] = self.striatal.r_med200;
+                        self.striatal.consolidate_active_context_with_dend(
+                            &tonic_valid,
+                            &tonic_now,
+                            &apical_carrier,
+                            &basal_coherent,
+                        );
+                    } else if self.striatal.ctx_ticks[act_c] < 1_150
+                        && has_fwd_act
+                        && beta_act > 0.50
+                        && (self.striatal.ctx_ticks[act_c] & 63) == 0
+                    {
+                        let f_off = act_c * fwd_len;
+                        self.striatal.fwd_j_cons[f_off..f_off + fwd_len]
+                            .copy_from_slice(&self.striatal.fwd_j_ctx[f_off..f_off + fwd_len]);
+                    }
+                } else if self.striatal.ctx_ticks[act_c] >= 520
+                    && self.striatal.r_med200 > 0.002
+                    && self.striatal.r_med200 >= self.striatal.ctx_r_peak[act_c] - 0.003
+                    && (!has_fwd_act || beta_act > 0.15)
+                {
+                    self.striatal.ctx_r_peak[act_c] =
+                        self.striatal.ctx_r_peak[act_c].max(self.striatal.r_med200);
+                    self.striatal.consolidate_active_context_with_dend(
+                        &tonic_valid,
+                        &tonic_now,
+                        &apical_carrier,
+                        &feat_active,
+                    );
+                } else if act_c > 0
+                    && self.striatal.ctx_has_cons[act_c] == 0
+                    && self.striatal.ctx_ticks[act_c] >= 400
+                    && has_fwd_act
+                    && beta_act > 0.20
+                    && (self.striatal.r_med200 > -0.008
+                        || (self.striatal.ctx_ticks[act_c] >= 650
+                            && self.striatal.r_med200 > -0.010))
+                {
+                    self.striatal.ctx_r_peak[act_c] = self.striatal.r_med200;
+                    self.striatal.consolidate_active_context_with_dend(
+                        &tonic_valid,
+                        &tonic_now,
+                        &apical_carrier,
+                        &feat_active,
+                    );
+                } else if self.striatal.ctx_has_cons[act_c] != 0
+                    && has_fwd_act
+                    && beta_act > 0.55
+                    && (self.striatal.ctx_ticks[act_c] & 63) == 0
+                {
+                    let f_off = act_c * fwd_len;
+                    self.striatal.fwd_j_cons[f_off..f_off + fwd_len]
+                        .copy_from_slice(&self.striatal.fwd_j_ctx[f_off..f_off + fwd_len]);
+                }
             }
 
-            if self.striatal.ctx_cooldown == 0 && self.striatal.ctx_ticks[act_c] >= 220 {
-                let mut recall_target = None;
-                let mut best_score = f32::MIN;
-                for c in 0..num_c {
-                    if c != act_c && self.striatal.ctx_has_cons[c] != 0 {
-                        let has_fwd_c = self.striatal.fwd_den[c] > 2.0e-5;
-                        let beta_c = if has_fwd_c {
-                            self.striatal.fwd_num[c] / (self.striatal.fwd_den[c] + 1.0e-5)
-                        } else {
-                            0.0
-                        };
-                        let mosaic_match =
-                            has_fwd_c && has_fwd_act && beta_c > 0.18 && beta_act < -0.18;
-                        let val_match = has_fwd_c
-                            && beta_c > 0.12
-                            && (self.striatal.valence_flip_ema > 0.00011
-                                || (self.striatal.ctx_out_events >= 5
-                                    && self.striatal.ctx_out_err[act_c]
-                                        > self.striatal.ctx_out_err[c] + 0.0008
-                                    && self.striatal.ctx_out_err[c] < 0.0025));
-                        if mosaic_match || val_match {
-                            let score = beta_c - 40.0 * self.striatal.ctx_out_err[c];
-                            if score > best_score {
-                                best_score = score;
-                                recall_target = Some(c);
+            let can_switch = self.striatal.ctx_cooldown == 0
+                && (dend_mismatch_now || self.striatal.ctx_ticks[act_c] >= 220);
+            if can_switch {
+                if dend_mismatch_now {
+                    for p in 0..STRIATAL_PORES {
+                        if quad_cand[p] && tonic_valid[p] {
+                            self.striatal.pore_carr_mean[p] = tonic_now[p];
+                            self.striatal.pore_prev_x[p] = raw_x_arr[p];
+                        }
+                    }
+                    let cur_ch = self.striatal.pore_ch;
+                    let mut best_hot: Option<(usize, f32)> = None;
+                    for c in 0..num_c {
+                        if c != act_c && self.striatal.ctx_has_cons[c] != 0 {
+                            let (cnt, mad, cos) = StriatalOfc::dendritic_match_stats(
+                                &self.striatal.hot_dend_ch[c],
+                                &self.striatal.hot_dend_env[c],
+                                &self.striatal.hot_dend_key[c],
+                                &cur_ch,
+                                &tonic_valid,
+                                &tonic_now,
+                            );
+                            if cnt >= 5 && mad < 0.065 && cos > 0.90 {
+                                let sc = cos - 2.0 * mad;
+                                if best_hot.is_none_or(|(_, b)| sc > b) {
+                                    best_hot = Some((c, sc));
+                                }
                             }
                         }
                     }
-                }
-
-                let hedonic_collapse = self.striatal.ctx_r_peak[act_c] > 0.002
-                    && ((self.striatal.r_med200 < -0.0115
-                        && self.striatal.ctx_r_peak[act_c] - self.striatal.r_med200 > 0.015
-                        && (act_c == 0 || !has_fwd_act || beta_act < 0.05))
-                        || (num_c == 1
-                            && act_c == 0
-                            && self.striatal.ctx_ticks[0] >= 700
-                            && has_fwd_act
-                            && beta_act < -0.35
-                            && self.striatal.r_fast_ema < -0.018));
-                let kin_streak = self.striatal.impact_refrac & 31;
-                let kin_rev_collapse = num_c == 1
-                    && act_c == 0
-                    && self.striatal.ctx_ticks[0] >= 700
-                    && self.striatal.ctx_r_peak[0] > 0.002
-                    && self.striatal.fwd_den[0] > 5.0e-5
-                    && beta_act < -0.45
-                    && kin_streak >= 16
-                    && reward <= 0.0005
-                    && self.striatal.r_fast_ema <= 0.008;
-                let spawn_collapse = self.striatal.ctx_has_cons[act_c] != 0
-                    && (hedonic_collapse || kin_rev_collapse);
-
-                let next_ctx = if let Some(c) = recall_target {
-                    Some(c)
-                } else if spawn_collapse {
-                    if num_c < OFC_CONTEXTS {
-                        self.striatal.num_ctx += 1;
-                        Some(num_c)
-                    } else {
-                        (0..num_c)
-                            .filter(|&c| c != act_c)
-                            .min_by_key(|&c| self.striatal.ctx_ticks[c])
+                    let mut best_cold: Option<(usize, f32)> = None;
+                    for (idx, entry) in self.striatal.paged_cols.iter().enumerate() {
+                        let (cnt, mad, cos) = StriatalOfc::dendritic_match_stats(
+                            &entry.dend_ch,
+                            &entry.dend_env,
+                            &entry.dend_key,
+                            &cur_ch,
+                            &tonic_valid,
+                            &tonic_now,
+                        );
+                        if cnt >= 5 && mad < 0.065 && cos > 0.90 {
+                            let sc = cos - 2.0 * mad;
+                            if best_cold.is_none_or(|(_, b)| sc > b) {
+                                best_cold = Some((idx, sc));
+                            }
+                        }
                     }
-                } else {
-                    None
-                };
 
-                if let Some(target_ctx) = next_ctx
-                    && target_ctx != act_c
-                {
-                    if self.striatal.ctx_has_cons[target_ctx] == 0
-                        && self.striatal.ctx_has_cons[act_c] != 0
+                    if self.striatal.ctx_has_cons[act_c] != 0 {
+                        self.striatal.restore_consolidated_context(act_c);
+                    }
+
+                    if let Some((p_idx, p_sc)) = best_cold
+                        && best_hot.is_none_or(|(_, h_sc)| p_sc > h_sc + 0.01)
                     {
+                        let target_slot = if num_c < OFC_CONTEXTS {
+                            self.striatal.num_ctx += 1;
+                            num_c
+                        } else {
+                            (0..num_c)
+                                .filter(|&c| c != act_c)
+                                .min_by_key(|&c| self.striatal.hot_last_use[c])
+                                .unwrap_or(0)
+                        };
+                        self.striatal.page_in_cold_column(p_idx, target_slot)?;
+                        let fj_dst = target_slot * fwd_len;
+                        self.striatal
+                            .fwd_j
+                            .copy_from_slice(&self.striatal.fwd_j_cons[fj_dst..fj_dst + fwd_len]);
+                        self.striatal.active_ctx = target_slot as u8;
+                        self.striatal.impact_refrac = 0;
+                        self.striatal.ctx_cooldown = 24;
+                        self.striatal.dend_mismatch_streak = 0;
+                        self.striatal.ctx_out_events = 0;
+                        self.striatal.ctx_out_err = [0.0; OFC_CONTEXTS];
+                        self.striatal.fwd_num = [0.0; OFC_CONTEXTS];
+                        self.striatal.fwd_den = [0.0; OFC_CONTEXTS];
+                        self.striatal.r_fast_ema = 0.0;
+                        self.striatal.r_med200 = 0.0;
+                        self.striatal.valence_flip_ema = 0.0;
+                        self.striatal.elig_actor.fill(0.0);
+                        self.striatal.elig_critic = [0.0; STRIATAL_FEATS];
+                        switched_context = true;
+                        splits = 1;
+                    } else if let Some((target_ctx, _)) = best_hot {
+                        self.striatal.restore_consolidated_context(target_ctx);
+                        let fj_dst = target_ctx * fwd_len;
+                        self.striatal
+                            .fwd_j
+                            .copy_from_slice(&self.striatal.fwd_j_cons[fj_dst..fj_dst + fwd_len]);
+                        self.striatal.hot_last_use[target_ctx] = self.striatal.tick;
+                        self.striatal.active_ctx = target_ctx as u8;
+                        self.striatal.impact_refrac = 0;
+                        self.striatal.ctx_cooldown = 24;
+                        self.striatal.dend_mismatch_streak = 0;
+                        self.striatal.ctx_out_events = 0;
+                        self.striatal.ctx_out_err = [0.0; OFC_CONTEXTS];
+                        self.striatal.fwd_num = [0.0; OFC_CONTEXTS];
+                        self.striatal.fwd_den = [0.0; OFC_CONTEXTS];
+                        self.striatal.r_fast_ema = 0.0;
+                        self.striatal.r_med200 = 0.0;
+                        self.striatal.valence_flip_ema = 0.0;
+                        self.striatal.elig_actor.fill(0.0);
+                        self.striatal.elig_critic = [0.0; STRIATAL_FEATS];
+                        switched_context = true;
+                        splits = 1;
+                    } else {
+                        let target_ctx = if num_c < OFC_CONTEXTS {
+                            self.striatal.num_ctx += 1;
+                            num_c
+                        } else {
+                            (0..num_c)
+                                .filter(|&c| c != act_c)
+                                .min_by_key(|&c| self.striatal.hot_last_use[c])
+                                .unwrap_or(0)
+                        };
+                        if self.striatal.ctx_has_cons[target_ctx] != 0 {
+                            self.striatal.evict_hot_slot_to_paged(target_ctx)?;
+                        }
+                        self.striatal.hot_col_id[target_ctx] = self.striatal.total_cols;
+                        self.striatal.total_cols = self.striatal.total_cols.saturating_add(1);
+                        self.striatal.ctx_has_cons[target_ctx] = 0;
+                        self.striatal.ctx_ticks[target_ctx] = 0;
+                        self.striatal.ctx_r_peak[target_ctx] = 0.0;
+                        self.striatal.r_bar_ctx[target_ctx] = 0.0;
+                        self.striatal.hot_last_use[target_ctx] = self.striatal.tick;
+                        self.striatal.hot_dend_ch[target_ctx] = [u32::MAX; STRIATAL_PORES];
+                        self.striatal.hot_dend_env[target_ctx] = [0; STRIATAL_PORES];
+                        self.striatal.hot_dend_key[target_ctx] = [0.0; STRIATAL_PORES];
+
                         let dst_off = target_ctx * w_len;
+                        self.striatal.w_cons[dst_off..dst_off + w_len].fill(0.0);
                         for m in 0..na {
                             let row = m * STRIATAL_CUES;
                             for st in 0..STRIATAL_STRATA {
@@ -7439,58 +8740,211 @@ impl TubeGraph {
                         }
                         let v_dst = target_ctx * STRIATAL_FEATS;
                         self.striatal.v_ctx[v_dst..v_dst + STRIATAL_FEATS].fill(0.0);
+                        self.striatal.v_cons[v_dst..v_dst + STRIATAL_FEATS].fill(0.0);
                         let q_dst = target_ctx * STRIATAL_CUES;
                         self.striatal.q_ctx[q_dst..q_dst + STRIATAL_CUES].fill(0.0);
-                        let fj_src = act_c * fwd_len;
+                        self.striatal.q_cons[q_dst..q_dst + STRIATAL_CUES].fill(0.0);
                         let fj_dst = target_ctx * fwd_len;
-                        if has_fwd_act && beta_act < -0.20 {
-                            for k in 0..fwd_len {
-                                let inv_j = sanitize(-self.striatal.fwd_j_cons[fj_src + k]);
-                                self.striatal.fwd_j_ctx[fj_dst + k] = inv_j;
-                                self.striatal.fwd_j[k] = inv_j;
+                        for k in 0..fwd_len {
+                            self.striatal.fwd_j_ctx[fj_dst + k] =
+                                sanitize(0.5 * self.striatal.fwd_j[k]);
+                        }
+                        self.striatal.fwd_j_cons[fj_dst..fj_dst + fwd_len].fill(0.0);
+
+                        self.striatal.active_ctx = target_ctx as u8;
+                        self.striatal.impact_refrac = 0;
+                        self.striatal.ctx_cooldown = 24;
+                        self.striatal.dend_mismatch_streak = 0;
+                        self.striatal.ctx_out_events = 0;
+                        self.striatal.ctx_out_err = [0.0; OFC_CONTEXTS];
+                        self.striatal.fwd_num = [0.0; OFC_CONTEXTS];
+                        self.striatal.fwd_den = [0.0; OFC_CONTEXTS];
+                        self.striatal.r_fast_ema = 0.0;
+                        self.striatal.r_med200 = 0.0;
+                        self.striatal.valence_flip_ema = 0.0;
+                        self.striatal.elig_actor.fill(0.0);
+                        self.striatal.elig_critic = [0.0; STRIATAL_FEATS];
+                        switched_context = true;
+                        splits = 1;
+                    }
+                } else if !has_any_env && self.striatal.ctx_ticks[act_c] >= 220 {
+                    let mut recall_target = None;
+                    let mut best_score = f32::MIN;
+                    for c in 0..num_c {
+                        if c != act_c && self.striatal.ctx_has_cons[c] != 0 {
+                            let has_fwd_c = self.striatal.fwd_den[c] > 2.0e-5;
+                            let beta_c = if has_fwd_c {
+                                self.striatal.fwd_num[c] / (self.striatal.fwd_den[c] + 1.0e-5)
+                            } else {
+                                0.0
+                            };
+                            let mosaic_match =
+                                has_fwd_c && has_fwd_act && beta_c > 0.18 && beta_act < -0.18;
+                            let val_match = has_fwd_c
+                                && beta_c > 0.12
+                                && (self.striatal.valence_flip_ema > 0.00011
+                                    || (self.striatal.ctx_out_events >= 5
+                                        && self.striatal.ctx_out_err[act_c]
+                                            > self.striatal.ctx_out_err[c] + 0.0008
+                                        && self.striatal.ctx_out_err[c] < 0.0025));
+                            if mosaic_match || val_match {
+                                let score = beta_c - 40.0 * self.striatal.ctx_out_err[c];
+                                if score > best_score {
+                                    best_score = score;
+                                    recall_target = Some(c);
+                                }
                             }
-                        } else if has_fwd_act && beta_act > 0.20 {
-                            self.striatal.fwd_j_ctx[fj_dst..fj_dst + fwd_len].copy_from_slice(
-                                &self.striatal.fwd_j_cons[fj_src..fj_src + fwd_len],
-                            );
-                        } else {
-                            self.striatal.fwd_j_ctx[fj_dst..fj_dst + fwd_len].fill(0.0);
                         }
                     }
-                    if self.striatal.ctx_has_cons[act_c] != 0 {
-                        self.striatal.restore_consolidated_context(act_c);
+
+                    let hedonic_collapse = self.striatal.ctx_r_peak[act_c] > 0.002
+                        && ((self.striatal.r_med200 < -0.0115
+                            && self.striatal.ctx_r_peak[act_c] - self.striatal.r_med200 > 0.015
+                            && (act_c == 0 || !has_fwd_act || beta_act < 0.05))
+                            || (num_c == 1
+                                && act_c == 0
+                                && self.striatal.ctx_ticks[0] >= 700
+                                && has_fwd_act
+                                && beta_act < -0.35
+                                && self.striatal.r_fast_ema < -0.018));
+                    let kin_streak = self.striatal.impact_refrac & 31;
+                    let kin_rev_collapse = num_c == 1
+                        && act_c == 0
+                        && self.striatal.ctx_ticks[0] >= 700
+                        && self.striatal.ctx_r_peak[0] > 0.002
+                        && self.striatal.fwd_den[0] > 5.0e-5
+                        && beta_act < -0.45
+                        && kin_streak >= 16
+                        && reward <= 0.0005
+                        && self.striatal.r_fast_ema <= 0.008;
+                    let spawn_collapse = self.striatal.ctx_has_cons[act_c] != 0
+                        && (hedonic_collapse || kin_rev_collapse);
+
+                    let mut spawning_new = false;
+                    let next_ctx = if let Some(c) = recall_target {
+                        Some(c)
+                    } else if spawn_collapse {
+                        spawning_new = true;
+                        if num_c < OFC_CONTEXTS {
+                            self.striatal.num_ctx += 1;
+                            Some(num_c)
+                        } else {
+                            (0..num_c)
+                                .filter(|&c| c != act_c)
+                                .min_by_key(|&c| self.striatal.ctx_ticks[c])
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(target_ctx) = next_ctx
+                        && target_ctx != act_c
+                    {
+                        if spawning_new {
+                            if self.striatal.ctx_has_cons[target_ctx] != 0 {
+                                self.striatal.evict_hot_slot_to_paged(target_ctx)?;
+                            }
+                            self.striatal.hot_col_id[target_ctx] = self.striatal.total_cols;
+                            self.striatal.total_cols = self.striatal.total_cols.saturating_add(1);
+                            self.striatal.ctx_has_cons[target_ctx] = 0;
+                            self.striatal.ctx_ticks[target_ctx] = 0;
+                            self.striatal.ctx_r_peak[target_ctx] = 0.0;
+                            self.striatal.r_bar_ctx[target_ctx] = 0.0;
+                            self.striatal.hot_dend_ch[target_ctx] = [u32::MAX; STRIATAL_PORES];
+                            self.striatal.hot_dend_env[target_ctx] = [0; STRIATAL_PORES];
+                            self.striatal.hot_dend_key[target_ctx] = [0.0; STRIATAL_PORES];
+                            self.striatal.w_cons[target_ctx * w_len..(target_ctx + 1) * w_len]
+                                .fill(0.0);
+                            self.striatal.v_cons
+                                [target_ctx * STRIATAL_FEATS..(target_ctx + 1) * STRIATAL_FEATS]
+                                .fill(0.0);
+                            self.striatal.q_cons
+                                [target_ctx * STRIATAL_CUES..(target_ctx + 1) * STRIATAL_CUES]
+                                .fill(0.0);
+                            self.striatal.fwd_j_cons
+                                [target_ctx * fwd_len..(target_ctx + 1) * fwd_len]
+                                .fill(0.0);
+                        }
+                        if self.striatal.ctx_has_cons[target_ctx] == 0
+                            && self.striatal.ctx_has_cons[act_c] != 0
+                        {
+                            let dst_off = target_ctx * w_len;
+                            for m in 0..na {
+                                let row = m * STRIATAL_CUES;
+                                for st in 0..STRIATAL_STRATA {
+                                    let st_base = row + st * STRIATAL_PORES;
+                                    let mut mean_b = 0.0_f32;
+                                    for p in 0..STRIATAL_PORES {
+                                        mean_b += self.striatal.w_birth[st_base + p];
+                                    }
+                                    mean_b *= 1.0 / (STRIATAL_PORES as f32);
+                                    for p in 0..STRIATAL_PORES {
+                                        self.striatal.w_ctx[dst_off + st_base + p] = sanitize_clamp(
+                                            self.striatal.w_birth[st_base + p] - mean_b,
+                                            -STRIATAL_W_CLAMP,
+                                            STRIATAL_W_CLAMP,
+                                        );
+                                    }
+                                }
+                            }
+                            let v_dst = target_ctx * STRIATAL_FEATS;
+                            self.striatal.v_ctx[v_dst..v_dst + STRIATAL_FEATS].fill(0.0);
+                            let q_dst = target_ctx * STRIATAL_CUES;
+                            self.striatal.q_ctx[q_dst..q_dst + STRIATAL_CUES].fill(0.0);
+                            let fj_src = act_c * fwd_len;
+                            let fj_dst = target_ctx * fwd_len;
+                            if has_fwd_act && beta_act < -0.20 {
+                                for k in 0..fwd_len {
+                                    let inv_j = sanitize(-self.striatal.fwd_j_cons[fj_src + k]);
+                                    self.striatal.fwd_j_ctx[fj_dst + k] = inv_j;
+                                    self.striatal.fwd_j[k] = inv_j;
+                                }
+                            } else if has_fwd_act && beta_act > 0.20 {
+                                self.striatal.fwd_j_ctx[fj_dst..fj_dst + fwd_len].copy_from_slice(
+                                    &self.striatal.fwd_j_cons[fj_src..fj_src + fwd_len],
+                                );
+                            } else {
+                                self.striatal.fwd_j_ctx[fj_dst..fj_dst + fwd_len].fill(0.0);
+                            }
+                        }
+                        if self.striatal.ctx_has_cons[act_c] != 0 {
+                            self.striatal.restore_consolidated_context(act_c);
+                        }
+                        if self.striatal.ctx_has_cons[target_ctx] != 0 {
+                            self.striatal.restore_consolidated_context(target_ctx);
+                            let fj_dst = target_ctx * fwd_len;
+                            self.striatal.fwd_j.copy_from_slice(
+                                &self.striatal.fwd_j_cons[fj_dst..fj_dst + fwd_len],
+                            );
+                        }
+                        self.striatal.hot_last_use[target_ctx] = self.striatal.tick;
+                        self.striatal.active_ctx = target_ctx as u8;
+                        self.striatal.impact_refrac = 0;
+                        self.striatal.ctx_cooldown = 180;
+                        self.striatal.ctx_out_events = 0;
+                        self.striatal.ctx_out_err = [0.0; OFC_CONTEXTS];
+                        self.striatal.fwd_num = [0.0; OFC_CONTEXTS];
+                        self.striatal.fwd_den = [0.0; OFC_CONTEXTS];
+                        self.striatal.r_fast_ema = 0.0;
+                        self.striatal.r_med200 = 0.0;
+                        self.striatal.valence_flip_ema = 0.0;
+                        self.striatal.elig_actor.fill(0.0);
+                        self.striatal.elig_critic = [0.0; STRIATAL_FEATS];
+                        switched_context = true;
+                        splits = 1;
                     }
-                    if self.striatal.ctx_has_cons[target_ctx] != 0 {
-                        self.striatal.restore_consolidated_context(target_ctx);
-                        let fj_dst = target_ctx * fwd_len;
-                        self.striatal
-                            .fwd_j
-                            .copy_from_slice(&self.striatal.fwd_j_cons[fj_dst..fj_dst + fwd_len]);
-                    }
-                    self.striatal.active_ctx = target_ctx as u8;
-                    self.striatal.impact_refrac = 0;
-                    self.striatal.ctx_cooldown = 180;
-                    self.striatal.ctx_out_events = 0;
-                    self.striatal.ctx_out_err = [0.0; OFC_CONTEXTS];
-                    self.striatal.fwd_num = [0.0; OFC_CONTEXTS];
-                    self.striatal.fwd_den = [0.0; OFC_CONTEXTS];
-                    self.striatal.r_fast_ema = 0.0;
-                    self.striatal.r_med200 = 0.0;
-                    self.striatal.valence_flip_ema = 0.0;
-                    self.striatal.elig_actor.fill(0.0);
-                    self.striatal.elig_critic = [0.0; STRIATAL_FEATS];
-                    switched_context = true;
-                    splits = 1;
                 }
             }
         }
 
         let act_c = self.striatal.active_ctx as usize;
-        let has_cons_model = self.striatal.ctx_has_cons.iter().any(|&x| x != 0);
+        let has_cons_model = self.striatal.ctx_has_cons.iter().any(|&x| x != 0)
+            || !self.striatal.paged_cols.is_empty();
         let feat_now = self.striatal.feat;
         let v_now = self.striatal.critic_value(act_c, &feat_now);
         let num_c_ro = self.striatal.num_ctx as usize;
         let read_c = if !is_plastic
+            && ro_paged_slab.is_none()
             && num_c_ro > 1
             && (self.striatal.ctx_has_cons[act_c] == 0
                 || self.striatal.ctx_r_peak[act_c] < 0.0)
@@ -7504,16 +8958,25 @@ impl TubeGraph {
         } else {
             act_c
         };
-        let use_cons_w = !is_plastic
-            && self.striatal.ctx_has_cons[read_c] != 0
-            && (read_c != act_c
-                || self.striatal.r_med200 + 0.003 < self.striatal.ctx_r_peak[read_c]);
+        let recalled_mature = is_plastic
+            && carrier_bank
+            && !act_mismatch_inst
+            && self.striatal.ctx_has_cons[act_c] != 0
+            && self.striatal.ctx_ticks[act_c] >= 1_150;
+        let use_cons_w = ro_paged_slab.is_some()
+            || recalled_mature
+            || (!is_plastic
+                && self.striatal.ctx_has_cons[read_c] != 0
+                && (read_c != act_c
+                    || self.striatal.r_med200 + 0.003 < self.striatal.ctx_r_peak[read_c]));
 
         let mut has_kin_loop = vec![false; act_s];
         let mut loop_mask = vec![[false; STRIATAL_PORES]; act_s];
         {
             let fj_ref_off = read_c * fwd_len;
-            let j_ref = if use_cons_w {
+            let j_ref: &[f32] = if let Some(ref dec) = ro_paged_slab {
+                &dec.fwd_j_cons
+            } else if use_cons_w {
                 &self.striatal.fwd_j_cons[fj_ref_off..fj_ref_off + fwd_len]
             } else {
                 &self.striatal.fwd_j_ctx[fj_ref_off..fj_ref_off + fwd_len]
@@ -7525,18 +8988,25 @@ impl TubeGraph {
             let mut kin_cand = vec![false; act_s];
             for m in 0..act_s {
                 for p in 0..STRIATAL_PORES {
-                    if p >= pore_cap
-                        || !membrane.sensor_pores[p].alive
-                        || self.striatal.pore_ch[p] != membrane.sensor_pores[p].channel
+                    if p >= pore_cap || !membrane.sensor_pores[p].alive {
+                        continue;
+                    }
+                    if ro_paged_slab.is_none()
+                        && self.striatal.pore_ch[p] != membrane.sensor_pores[p].channel
                     {
                         continue;
                     }
                     let mut s_j = 0.0_f32;
                     for st in 0..STRIATAL_STRATA {
                         let idx = (st * STRIATAL_PORES + p) * na + m;
-                        let j1 = self.striatal.fwd_j[idx];
                         let j2 = j_ref[idx];
-                        s_j += (j1 * j1).max(j2 * j2);
+                        let s_j_term = if ro_paged_slab.is_some() || use_cons_w {
+                            j2 * j2
+                        } else {
+                            let j1 = self.striatal.fwd_j[idx];
+                            (j1 * j1).max(j2 * j2)
+                        };
+                        s_j += s_j_term;
                     }
                     jm_p[m][p] = s_j;
                     jm_max[m] = jm_max[m].max(s_j);
@@ -7623,9 +9093,15 @@ impl TubeGraph {
                 out_f
             };
 
-        if is_plastic && self.striatal.has_prev && !switched_context {
+        if is_plastic && self.striatal.has_prev && !switched_context && !act_mismatch_inst {
             let eta_v = 0.05_f32;
-            let eta_w = if has_cons_model { 0.068_f32 } else { 0.05_f32 };
+            let eta_w = if recalled_mature {
+                0.015_f32
+            } else if has_cons_model {
+                0.068_f32
+            } else {
+                0.05_f32
+            };
             let delta = sanitize_clamp(
                 reward + 0.97 * v_now - self.striatal.v_prev,
                 -STRIATAL_TD_CLAMP,
@@ -7662,17 +9138,20 @@ impl TubeGraph {
             let w_off = act_c * w_len;
             for m in 0..act_s {
                 let row = m * STRIATAL_CUES;
-                let row_slice = &mut self.striatal.w_ctx[w_off + row..w_off + row + STRIATAL_CUES];
-                for (wi, ei) in row_slice
-                    .iter_mut()
-                    .zip(self.striatal.elig_actor[row..row + STRIATAL_CUES].iter())
-                {
-                    *wi = sanitize_clamp(
-                        0.9998 * *wi + eta_w * delta * ei,
+                for p_cue in 0..STRIATAL_CUES {
+                    let idx_w = w_off + row + p_cue;
+                    let base_w = if recalled_mature {
+                        0.996 * self.striatal.w_ctx[idx_w] + 0.004 * self.striatal.w_cons[idx_w]
+                    } else {
+                        0.9998 * self.striatal.w_ctx[idx_w]
+                    };
+                    self.striatal.w_ctx[idx_w] = sanitize_clamp(
+                        base_w + eta_w * delta * self.striatal.elig_actor[row + p_cue],
                         -STRIATAL_W_CLAMP,
                         STRIATAL_W_CLAMP,
                     );
                 }
+                let row_slice = &mut self.striatal.w_ctx[w_off + row..w_off + row + STRIATAL_CUES];
                 let mut norm_sq = 0.0_f32;
                 if has_kin_loop[m] {
                     let mut cnt_l = 0usize;
@@ -7741,17 +9220,23 @@ impl TubeGraph {
         let v_read_off = read_c * STRIATAL_FEATS;
         let q_read_off = read_c * STRIATAL_CUES;
         let fj_read_off = read_c * fwd_len;
-        let v_slice = if use_cons_w {
+        let v_slice: &[f32] = if let Some(ref dec) = ro_paged_slab {
+            &dec.v_cons[..STRIATAL_CUES]
+        } else if use_cons_w {
             &self.striatal.v_cons[v_read_off..v_read_off + STRIATAL_CUES]
         } else {
             &self.striatal.v_ctx[v_read_off..v_read_off + STRIATAL_CUES]
         };
-        let q_slice = if use_cons_w {
+        let q_slice: &[f32] = if let Some(ref dec) = ro_paged_slab {
+            &dec.q_cons
+        } else if use_cons_w {
             &self.striatal.q_cons[q_read_off..q_read_off + STRIATAL_CUES]
         } else {
             &self.striatal.q_ctx[q_read_off..q_read_off + STRIATAL_CUES]
         };
-        let j_slice = if use_cons_w {
+        let j_slice: &[f32] = if let Some(ref dec) = ro_paged_slab {
+            &dec.fwd_j_cons
+        } else if use_cons_w {
             &self.striatal.fwd_j_cons[fj_read_off..fj_read_off + fwd_len]
         } else {
             &self.striatal.fwd_j_ctx[fj_read_off..fj_read_off + fwd_len]
@@ -7760,7 +9245,9 @@ impl TubeGraph {
         let mut top_habit = [0.0_f32; 6];
         for m in 0..act_s {
             let row = m * STRIATAL_CUES;
-            let ws = if use_cons_w {
+            let ws: &[f32] = if let Some(ref dec) = ro_paged_slab {
+                &dec.w_cons[row..row + STRIATAL_CUES]
+            } else if use_cons_w {
                 &self.striatal.w_cons[w_off + row..w_off + row + STRIATAL_CUES]
             } else {
                 &self.striatal.w_ctx[w_off + row..w_off + row + STRIATAL_CUES]
@@ -7783,7 +9270,13 @@ impl TubeGraph {
         }
         let mean_habit_norm = habit_norm_sum / (h_cnt as f32);
         let mb_scale = 1.0 - (mean_habit_norm / 1.35).clamp(0.0, 0.90);
-        let mb_gate = if has_cons_model {
+        let mb_gate = if ro_paged_slab.is_some() || recalled_mature {
+            let mut j_sq = 0.0_f32;
+            for &jv in j_slice {
+                j_sq += jv * jv;
+            }
+            (j_sq * 20.0).clamp(0.0, 1.0) * mb_scale
+        } else if has_cons_model {
             (self.striatal.forward_agency(act_s) * 400.0).clamp(0.0, 1.0) * mb_scale
         } else {
             0.0
@@ -7855,8 +9348,73 @@ impl TubeGraph {
             }
         }
 
+        let det_phase = if let Some(ref dec) = ro_paged_slab {
+            let mut osc_a = 0.0_f32;
+            let mut osc_b = 0.0_f32;
+            for p_c in 0..STRIATAL_PORES {
+                if (dec.dend_env[p_c] & 1) != 0 && live_pore_ch[p_c] != u32::MAX {
+                    let diff = raw_x_arr[p_c] - dec.dend_key[p_c];
+                    if dec.dend_key[p_c] >= 0.30 {
+                        osc_a += diff;
+                    } else {
+                        osc_b += diff;
+                    }
+                }
+            }
+            Some(osc_b.atan2(osc_a + 1.0e-6))
+        } else {
+            None
+        };
+
+        let plastic_noise_gain = if recalled_mature {
+            if tissue_stress > 0.02 { 1.35 } else { 0.20 }
+        } else if is_plastic
+            && carrier_bank
+            && self.striatal.ctx_has_cons[act_c] != 0
+            && self.striatal.r_fast_ema > -0.008
+            && tissue_stress <= 0.015
+        {
+            1.0 - 0.40 * (mean_habit_norm / 1.2).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let pre_gain_pl = if recalled_mature && tissue_stress > 0.02 {
+            0.15
+        } else {
+            1.0
+        };
+
         let mut out = vec![0.0_f32; num_actuators];
         for (m, dst) in out.iter_mut().enumerate() {
+            if let Some(ph) = det_phase {
+                let m_ang = ph * (1.0 + 0.37 * ((m & 7) as f32)) + (m as f32) * 1.919_862_2;
+                let (pre_gain, d_amp) = if tissue_stress > 0.02 {
+                    (0.15, 1.45)
+                } else {
+                    (1.0, 0.14)
+                };
+                let dither = d_amp * m_ang.sin();
+                if m >= act_s {
+                    *dst = sanitize_clamp(dither.tanh(), -1.0, 1.0);
+                    continue;
+                }
+                let row = m * STRIATAL_CUES;
+                let w_slice: &[f32] = if let Some(ref dec) = ro_paged_slab {
+                    &dec.w_cons[row..row + STRIATAL_CUES]
+                } else {
+                    &self.striatal.w_cons[w_off + row..w_off + row + STRIATAL_CUES]
+                };
+                let f_m = loop_feat_for(m, &has_kin_loop, &loop_mask);
+                let mut pre = mb_drive[m];
+                for (w_val, f_val) in w_slice.iter().zip(f_m.iter()) {
+                    pre += w_val * f_val;
+                }
+                let a_clean = sanitize_clamp((pre_gain * pre + dither).tanh(), -1.0, 1.0);
+                *dst = a_clean;
+                self.striatal.prev_act[m] = a_clean;
+                continue;
+            }
+
             let g = self.striatal.gaussian();
             if m >= act_s {
                 *dst = sanitize_clamp((innov * g).tanh(), -1.0, 1.0);
@@ -7875,8 +9433,10 @@ impl TubeGraph {
             for (w_val, f_val) in w_slice.iter().zip(f_m.iter()) {
                 pre += w_val * f_val;
             }
-            let mean_a = pre.tanh();
-            let a = (pre + self.striatal.noise[m]).tanh();
+            let scaled_pre = pre_gain_pl * pre;
+            let eff_noise = plastic_noise_gain * self.striatal.noise[m];
+            let mean_a = scaled_pre.tanh();
+            let a = (scaled_pre + eff_noise).tanh();
             let a_clean = sanitize_clamp(a, -1.0, 1.0);
             *dst = a_clean;
             self.striatal.prev_act[m] = a_clean;
@@ -7926,7 +9486,7 @@ impl TubeGraph {
         if is_plastic {
             self.striatal.tick = self.striatal.tick.saturating_add(1);
         }
-        (Some(out), splits)
+        Ok((Some(out), splits))
     }
 
     pub fn zero_learned_conductances(&mut self) {

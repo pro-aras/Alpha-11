@@ -46,11 +46,13 @@ pub fn paired_gate(a: &[f64], b: &[f64]) -> PairedGate {
         0.0
     };
     let se = (var / nf).sqrt();
-    let t = if se > 1e-12 { mean_diff / se } else { 0.0 };
-    let p = if n > 1 && se > 1e-12 {
-        student_t_two_sided_p(t, nf - 1.0)
+    let (t, p) = if n > 1 && se > 1e-12 {
+        let t_val = mean_diff / se;
+        (t_val, student_t_two_sided_p(t_val, nf - 1.0))
+    } else if n > 1 && mean_diff.abs() > 1e-12 {
+        (mean_diff.signum() * f64::INFINITY, 0.0)
     } else {
-        1.0
+        (0.0, 1.0)
     };
     PairedGate {
         n,
@@ -807,6 +809,13 @@ mod tests {
         assert!((student_t_two_sided_p(2.262, 9.0) - 0.05).abs() < 1e-3);
         assert!((student_t_two_sided_p(4.809, 9.0) - 0.000_961_5).abs() < 2e-5);
         assert!((student_t_two_sided_p(0.0, 9.0) - 1.0).abs() < 1e-12);
+        let zero_diff = paired_gate(&[0.02; 12], &[0.02; 12]);
+        assert_eq!(zero_diff.t, 0.0);
+        assert_eq!(zero_diff.p_two_sided, 1.0);
+        let zero_var_win = paired_gate(&[0.02; 12], &[0.0; 12]);
+        assert!(zero_var_win.t.is_infinite() && zero_var_win.t > 0.0);
+        assert_eq!(zero_var_win.p_two_sided, 0.0);
+        assert_eq!(zero_var_win.wins, 12);
     }
 
     #[test]

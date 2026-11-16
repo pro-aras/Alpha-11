@@ -1,10 +1,11 @@
 //! Versioned, CRC32C-verified, shadow-decoded transactional checkpoint persistence.
 
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use a11_medium::{ControlMode, PersistError};
+use a11_medium::{ControlMode, OrganismEngine, PersistError};
 
 use crate::Alpha11Organism;
 use crate::OrganismConfig;
@@ -15,18 +16,62 @@ use crate::pores::{
     ChannelScoutStat, MAX_SCOUT_CHANNELS, MotorPore, PoreMembrane, SCOUT_DWELL_TICKS, SensorPore,
 };
 use crate::rng::{Rng64, sanitize};
+pub use crate::tubes::COL_SLAB_MAGIC;
 use crate::tubes::{
     EfferenceEntry, EfferenceRing, MIN_ACTUATOR_DIM, MIN_CELL_DIM, MIN_STRIATAL_ACT, OFC_CONTEXTS,
-    PRED_BUCKETS, RING_LEN, STRIATAL_CUES, STRIATAL_FEATS, STRIATAL_PORES, STRIATAL_TAPS,
-    StriatalOfc, Tube, TubeGraph, TubeKind,
+    PRED_BUCKETS, PagedColumnEntry, RING_LEN, STRIATAL_CUES, STRIATAL_FEATS, STRIATAL_PORES,
+    STRIATAL_TAPS, StriatalOfc, Tube, TubeGraph, TubeKind, decode_column_slab,
 };
 
 pub const FILE_MAGIC: u64 = 0x4131_3143_484B_5031;
-pub const FORMAT_VERSION: u32 = 6;
+pub const FORMAT_VERSION: u32 = 7;
 pub const MIN_COMPAT_FORMAT_VERSION: u32 = 3;
 pub const SLAB_COUNT: u32 = 6;
 /// Upper bound on decoded per-actuator width (fail-closed against corrupt lengths).
 pub const MAX_ACTUATOR_DIM: usize = 4_096;
+/// Upper bound on paged cortical columns per organism checkpoint.
+pub const MAX_CORTICAL_COLUMNS: usize = 1_048_576;
+const MAX_SLAB_FILE_BYTES: usize = 16 * 1024 * 1024;
+
+#[inline]
+fn pages_dir_for(ckpt: &Path) -> PathBuf {
+    let mut os: OsString = ckpt.as_os_str().to_os_string();
+    let mut s = String::with_capacity(6);
+    for &b in &[b'.', b'p', b'a', b'g', b'e', b's'] {
+        s.push(b as char);
+    }
+    os.push(&s);
+    PathBuf::from(os)
+}
+
+#[inline]
+fn slab_path_for(pages_dir: &Path, col_id: u32) -> PathBuf {
+    let mut name = String::with_capacity(16);
+    for &b in &[b'c', b'o', b'l', b'_'] {
+        name.push(b as char);
+    }
+    let mut digits = [b'0'; 10];
+    let mut v = col_id;
+    let mut n_dig = 0usize;
+    while v > 0 || n_dig < 6 {
+        digits[n_dig] = b'0' + ((v % 10) as u8);
+        v /= 10;
+        n_dig += 1;
+    }
+    for i in (0..n_dig).rev() {
+        name.push(digits[i] as char);
+    }
+    for &b in &[b'.', b's', b'l', b'a', b'b'] {
+        name.push(b as char);
+    }
+    pages_dir.join(name)
+}
+
+#[inline]
+fn slice_all_pos_zero(xs: &[f32]) -> bool {
+    xs.iter()
+        .all(|&v| v.is_finite() && sanitize(v).to_bits() == 0)
+}
 
 /// Exact serialized striatal block size for `na` actuator columns (v5 layout: `na = 8`, no header).
 #[must_use]
@@ -116,6 +161,59 @@ impl ByteWriter {
             .extend_from_slice(&sanitize(v).to_bits().to_le_bytes());
         Ok(())
     }
+
+    fn write_f32_sparse8(&mut self, xs: &[f32]) -> Result<(), PersistError> {
+        for chunk in xs.chunks(8) {
+            let mut mask = 0u8;
+            let mut vals = [0u32; 8];
+            for (i, &v) in chunk.iter().enumerate() {
+                if !v.is_finite() {
+                    return Err(PersistError::NonFiniteState);
+                }
+                let bits = sanitize(v).to_bits();
+                vals[i] = bits;
+                if bits != 0 {
+                    mask |= 1u8 << i;
+                }
+            }
+            self.buf.push(mask);
+            for (i, &bits) in vals.iter().enumerate().take(chunk.len()) {
+                if (mask & (1u8 << i)) != 0 {
+                    self.buf.extend_from_slice(&bits.to_le_bytes());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn write_f32_xor_sparse8(&mut self, xs: &[f32], base: &[f32]) -> Result<(), PersistError> {
+        if xs.len() != base.len() {
+            return Err(PersistError::InvalidTopology);
+        }
+        for (xc, bc) in xs.chunks(8).zip(base.chunks(8)) {
+            let mut mask = 0u8;
+            let mut xors = [0u32; 8];
+            for i in 0..xc.len() {
+                let v = xc[i];
+                let bv = bc[i];
+                if !v.is_finite() || !bv.is_finite() {
+                    return Err(PersistError::NonFiniteState);
+                }
+                let diff = sanitize(v).to_bits() ^ sanitize(bv).to_bits();
+                xors[i] = diff;
+                if diff != 0 {
+                    mask |= 1u8 << i;
+                }
+            }
+            self.buf.push(mask);
+            for (i, &diff) in xors.iter().enumerate().take(xc.len()) {
+                if (mask & (1u8 << i)) != 0 {
+                    self.buf.extend_from_slice(&diff.to_le_bytes());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 struct ByteReader<'a> {
@@ -190,6 +288,216 @@ impl<'a> ByteReader<'a> {
         }
         Ok(sanitize(v))
     }
+
+    fn read_f32_sparse8(&mut self, dst: &mut [f32]) -> Result<(), PersistError> {
+        for chunk in dst.chunks_mut(8) {
+            let mask = self.read_u8()?;
+            if chunk.len() < 8 && (mask >> chunk.len()) != 0 {
+                return Err(PersistError::InvalidTopology);
+            }
+            for (i, slot) in chunk.iter_mut().enumerate() {
+                if (mask & (1u8 << i)) != 0 {
+                    *slot = self.read_f32()?;
+                } else {
+                    *slot = 0.0;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn read_f32_xor_sparse8(&mut self, dst: &mut [f32], base: &[f32]) -> Result<(), PersistError> {
+        if dst.len() != base.len() {
+            return Err(PersistError::InvalidTopology);
+        }
+        for (dc, bc) in dst.chunks_mut(8).zip(base.chunks(8)) {
+            let mask = self.read_u8()?;
+            if dc.len() < 8 && (mask >> dc.len()) != 0 {
+                return Err(PersistError::InvalidTopology);
+            }
+            for i in 0..dc.len() {
+                let b_bits = sanitize(bc[i]).to_bits();
+                let out_bits = if (mask & (1u8 << i)) != 0 {
+                    b_bits ^ self.read_u32()?
+                } else {
+                    b_bits
+                };
+                let v = f32::from_bits(out_bits);
+                if !v.is_finite() {
+                    return Err(PersistError::NonFiniteState);
+                }
+                dc[i] = sanitize(v);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn lz77_hash3(b0: u8, b1: u8, b2: u8) -> usize {
+    let v = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+    ((v.wrapping_mul(0x1E35_A7BD)) >> 20) as usize
+}
+
+fn lz77_compress(src: &[u8]) -> Vec<u8> {
+    let n = src.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(n / 2 + 16);
+    let mut head = [-1i32; 4096];
+    let mut prev = vec![-1i32; n];
+    let mut flag_pos = 0usize;
+    out.push(0u8);
+    let mut flags = 0u8;
+    let mut bit = 0u8;
+    let mut ip = 0usize;
+
+    while ip < n {
+        let rem = n - ip;
+        let mut best_len = 0usize;
+        let mut best_off = 0usize;
+        if rem >= 3 {
+            let h = lz77_hash3(src[ip], src[ip + 1], src[ip + 2]);
+            let max_l = rem.min(273);
+            let mut cand = head[h];
+            let mut steps = 0usize;
+            while cand >= 0 && steps < 8 {
+                let c = cand as usize;
+                let off = ip - c;
+                if off > 4096 {
+                    break;
+                }
+                if src[c + best_len] == src[ip + best_len]
+                    && src[c] == src[ip]
+                    && src[c + 1] == src[ip + 1]
+                    && src[c + 2] == src[ip + 2]
+                {
+                    let mut l = 3usize;
+                    while l < max_l && src[c + l] == src[ip + l] {
+                        l += 1;
+                    }
+                    if l > best_len {
+                        best_len = l;
+                        best_off = off;
+                        if l == max_l {
+                            break;
+                        }
+                    }
+                }
+                cand = prev[c];
+                steps += 1;
+            }
+        }
+
+        let advance = if best_len >= 3 {
+            flags |= 1u8 << bit;
+            let off_m1 = (best_off - 1) as u16;
+            if best_len < 18 {
+                let pair = (off_m1 << 4) | ((best_len - 3) as u16);
+                out.extend_from_slice(&pair.to_le_bytes());
+            } else {
+                let pair = (off_m1 << 4) | 15u16;
+                out.extend_from_slice(&pair.to_le_bytes());
+                out.push((best_len - 18) as u8);
+            }
+            best_len
+        } else {
+            out.push(src[ip]);
+            1usize
+        };
+
+        let ins_end = (ip + advance).min(n.saturating_sub(2));
+        let mut k = ip;
+        while k < ins_end {
+            let hk = lz77_hash3(src[k], src[k + 1], src[k + 2]);
+            prev[k] = head[hk];
+            head[hk] = k as i32;
+            k += 1;
+        }
+        if ip + advance > ins_end && ip + 2 < n && ip >= ins_end {
+            let hk = lz77_hash3(src[ip], src[ip + 1], src[ip + 2]);
+            prev[ip] = head[hk];
+            head[hk] = ip as i32;
+        }
+        ip += advance;
+
+        bit += 1;
+        if bit == 8 {
+            out[flag_pos] = flags;
+            if ip < n {
+                flag_pos = out.len();
+                out.push(0u8);
+                flags = 0;
+                bit = 0;
+            }
+        }
+    }
+    if bit > 0 && bit < 8 {
+        out[flag_pos] = flags;
+    }
+    out
+}
+
+fn lz77_decompress(src: &[u8], expected_len: usize) -> Result<Vec<u8>, PersistError> {
+    if expected_len == 0 {
+        if src.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut out = Vec::with_capacity(expected_len.min(1 << 22));
+    let mut ip = 0usize;
+    while out.len() < expected_len {
+        if ip >= src.len() {
+            return Err(PersistError::TruncatedInput);
+        }
+        let flags = src[ip];
+        ip += 1;
+        for bit in 0..8u8 {
+            if out.len() == expected_len {
+                if (flags >> bit) != 0 {
+                    return Err(PersistError::InvalidTopology);
+                }
+                break;
+            }
+            if (flags & (1u8 << bit)) == 0 {
+                if ip >= src.len() {
+                    return Err(PersistError::TruncatedInput);
+                }
+                out.push(src[ip]);
+                ip += 1;
+            } else {
+                if ip.saturating_add(2) > src.len() {
+                    return Err(PersistError::TruncatedInput);
+                }
+                let pair = u16::from_le_bytes([src[ip], src[ip + 1]]);
+                ip += 2;
+                let offset = ((pair >> 4) as usize) + 1;
+                let code = (pair & 0x0F) as usize;
+                let match_len = if code < 15 {
+                    code + 3
+                } else {
+                    if ip >= src.len() {
+                        return Err(PersistError::TruncatedInput);
+                    }
+                    let ex = src[ip] as usize;
+                    ip += 1;
+                    18 + ex
+                };
+                if offset > out.len() || out.len().saturating_add(match_len) > expected_len {
+                    return Err(PersistError::InvalidTopology);
+                }
+                for _ in 0..match_len {
+                    let b = out[out.len() - offset];
+                    out.push(b);
+                }
+            }
+        }
+    }
+    if ip != src.len() {
+        return Err(PersistError::InvalidTopology);
+    }
+    Ok(out)
 }
 
 fn append_slab(out: &mut Vec<u8>, tag: u32, payload: &[u8]) -> Result<(), PersistError> {
@@ -211,6 +519,13 @@ fn append_slab(out: &mut Vec<u8>, tag: u32, payload: &[u8]) -> Result<(), Persis
 }
 
 pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
+    encode_organism_with_mode(org, false)
+}
+
+fn encode_organism_with_mode(
+    org: &Alpha11Organism,
+    external_slabs: bool,
+) -> Result<Vec<u8>, PersistError> {
     if org.poisoned {
         return Err(PersistError::PoisonedAfterCorruption);
     }
@@ -308,37 +623,112 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     cell_w.write_f32(org.cells.error_reversal_gate)?;
 
     let mut tube_w = ByteWriter::with_capacity(
-        org.tubes.slots.len() * 64 + 11_200 + striatal_serialized_bytes(org.tubes.striatal.n_act),
+        org.tubes.slots.len() * 64 + 16_384 + striatal_serialized_bytes(org.tubes.striatal.n_act),
     );
     tube_w.write_u32(org.tubes.slots.len() as u32);
     tube_w.write_u32(org.tubes.alive_count as u32);
-    for t in &org.tubes.slots {
-        tube_w.write_bool(t.alive);
-        tube_w.write_u8(t.kind as u8);
-        tube_w.write_u32(t.pre);
-        tube_w.write_u32(t.post);
-        tube_w.write_u8(t.delay);
-        for &uk in &t.u {
-            tube_w.write_f32(uk)?;
-        }
-        tube_w.write_f32(t.w_pred)?;
-        match t.context_gate_cell {
-            None => {
-                tube_w.write_bool(false);
-                tube_w.write_u32(0);
+    tube_w.write_bool(external_slabs);
+    if !external_slabs {
+        for t in &org.tubes.slots {
+            tube_w.write_bool(t.alive);
+            tube_w.write_u8(t.kind as u8);
+            tube_w.write_u32(t.pre);
+            tube_w.write_u32(t.post);
+            tube_w.write_u8(t.delay);
+            for &uk in &t.u {
+                tube_w.write_f32(uk)?;
             }
-            Some(g) => {
-                tube_w.write_bool(true);
-                tube_w.write_u32(g);
+            tube_w.write_f32(t.w_pred)?;
+            match t.context_gate_cell {
+                None => {
+                    tube_w.write_bool(false);
+                    tube_w.write_u32(0);
+                }
+                Some(g) => {
+                    tube_w.write_bool(true);
+                    tube_w.write_u32(g);
+                }
+            }
+            tube_w.write_bool(t.gate_invert);
+            tube_w.write_f32(t.contradiction_accum)?;
+            tube_w.write_f32(t.chain_score)?;
+            tube_w.write_f32(t.myelin_plasticity_accum)?;
+            tube_w.write_u32(t.last_upstream_cell);
+            tube_w.write_f32(t.usage_ema)?;
+            tube_w.write_u32(t.age_ticks);
+        }
+    } else {
+        let compact_ep = org.tubes.slots.iter().all(|t| {
+            !t.alive
+                || (t.pre <= 0xFFFE
+                    && t.post <= 0xFFFE
+                    && t.context_gate_cell.is_none_or(|g| g <= 0xFFFE)
+                    && (t.last_upstream_cell == u32::MAX || t.last_upstream_cell <= 0xFFFE))
+        });
+        tube_w.write_bool(compact_ep);
+        for t in &org.tubes.slots {
+            if !t.alive {
+                tube_w.write_u8(0);
+                continue;
+            }
+            let big_age = t.age_ticks >= 0xFFFF;
+            let mut flags = 1u8;
+            if t.kind == TubeKind::CellToMotor {
+                flags |= 2;
+            }
+            if t.context_gate_cell.is_some() {
+                flags |= 4;
+            }
+            if t.gate_invert {
+                flags |= 8;
+            }
+            if t.last_upstream_cell != u32::MAX {
+                flags |= 16;
+            }
+            if big_age {
+                flags |= 64;
+            }
+            tube_w.write_u8(flags);
+            if compact_ep {
+                tube_w.write_u16(t.pre as u16);
+                tube_w.write_u16(t.post as u16);
+            } else {
+                tube_w.write_u32(t.pre);
+                tube_w.write_u32(t.post);
+            }
+            tube_w.write_u8(t.delay);
+            let oct = [
+                t.u[0],
+                t.u[1],
+                t.u[2],
+                t.u[3],
+                t.w_pred,
+                t.contradiction_accum,
+                t.chain_score,
+                t.myelin_plasticity_accum,
+            ];
+            tube_w.write_f32_sparse8(&oct)?;
+            if let Some(g) = t.context_gate_cell {
+                if compact_ep {
+                    tube_w.write_u16(g as u16);
+                } else {
+                    tube_w.write_u32(g);
+                }
+            }
+            if t.last_upstream_cell != u32::MAX {
+                if compact_ep {
+                    tube_w.write_u16(t.last_upstream_cell as u16);
+                } else {
+                    tube_w.write_u32(t.last_upstream_cell);
+                }
+            }
+            tube_w.write_f32(t.usage_ema)?;
+            if big_age {
+                tube_w.write_u32(t.age_ticks);
+            } else {
+                tube_w.write_u16(t.age_ticks as u16);
             }
         }
-        tube_w.write_bool(t.gate_invert);
-        tube_w.write_f32(t.contradiction_accum)?;
-        tube_w.write_f32(t.chain_score)?;
-        tube_w.write_f32(t.myelin_plasticity_accum)?;
-        tube_w.write_u32(t.last_upstream_cell);
-        tube_w.write_f32(t.usage_ema)?;
-        tube_w.write_u32(t.age_ticks);
     }
     tube_w.write_u32(org.tubes.free_list.len() as u32);
     for &idx in &org.tubes.free_list {
@@ -346,23 +736,36 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     }
     tube_w.write_u32(org.tubes.act_dim() as u32);
     tube_w.write_u32(org.tubes.cell_dim() as u32);
-    for row in &org.tubes.action_sensory_w {
-        for &w in row {
+    if external_slabs {
+        for row in &org.tubes.action_sensory_w {
+            tube_w.write_f32_sparse8(row)?;
+        }
+        for row in &org.tubes.pore_action_w {
+            tube_w.write_f32_sparse8(row)?;
+        }
+        for row in &org.tubes.tectal_map_w {
+            tube_w.write_f32_sparse8(row)?;
+        }
+        tube_w.write_f32_sparse8(&org.tubes.sensory_self_w)?;
+    } else {
+        for row in &org.tubes.action_sensory_w {
+            for &w in row {
+                tube_w.write_f32(w)?;
+            }
+        }
+        for row in &org.tubes.pore_action_w {
+            for &w in row {
+                tube_w.write_f32(w)?;
+            }
+        }
+        for row in &org.tubes.tectal_map_w {
+            for &w in row {
+                tube_w.write_f32(w)?;
+            }
+        }
+        for &w in &org.tubes.sensory_self_w {
             tube_w.write_f32(w)?;
         }
-    }
-    for row in &org.tubes.pore_action_w {
-        for &w in row {
-            tube_w.write_f32(w)?;
-        }
-    }
-    for row in &org.tubes.tectal_map_w {
-        for &w in row {
-            tube_w.write_f32(w)?;
-        }
-    }
-    for &w in &org.tubes.sensory_self_w {
-        tube_w.write_f32(w)?;
     }
     for &w in &org.tubes.pore_self_w {
         tube_w.write_f32(w)?;
@@ -417,133 +820,287 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     tube_w.write_f32(org.tubes.mean_interventional_agency)?;
     let st = &org.tubes.striatal;
     tube_w.write_u32(st.n_act as u32);
-    let before_striatal = tube_w.buf.len();
-    tube_w.write_u8(st.num_ctx);
-    tube_w.write_u8(st.active_ctx);
-    tube_w.write_u8(st.impact_refrac);
-    for &hc in &st.ctx_has_cons {
-        tube_w.write_u8(hc);
-    }
-    for &ct in &st.ctx_ticks {
-        tube_w.write_u32(ct);
-    }
-    for &rp in &st.ctx_r_peak {
-        tube_w.write_f32(rp)?;
-    }
-    for &rb in &st.r_bar_ctx {
-        tube_w.write_f32(rb)?;
-    }
-    for &pc in &st.pore_ch {
-        tube_w.write_u32(pc);
-    }
-    for &pa in &st.pore_age {
-        tube_w.write_u32(pa);
-    }
-    for &pm in &st.pore_mean {
-        tube_w.write_f32(pm)?;
-    }
-    for &vr in &st.pore_var_raw {
-        tube_w.write_f32(vr)?;
-    }
-    for &ve in &st.pore_var_exaff {
-        tube_w.write_f32(ve)?;
-    }
-    for &cg in &st.canc_g {
-        tube_w.write_f32(cg)?;
-    }
-    for &wb in &st.w_birth {
-        tube_w.write_f32(wb)?;
-    }
-    for &wc in &st.w_ctx {
-        tube_w.write_f32(wc)?;
-    }
-    for &ws in &st.w_cons {
-        tube_w.write_f32(ws)?;
-    }
-    for &vc in &st.v_ctx {
-        tube_w.write_f32(vc)?;
-    }
-    for &vs in &st.v_cons {
-        tube_w.write_f32(vs)?;
-    }
-    for &qc in &st.q_ctx {
-        tube_w.write_f32(qc)?;
-    }
-    for &qs in &st.q_cons {
-        tube_w.write_f32(qs)?;
-    }
-    for &fb in &st.fwd_b {
-        tube_w.write_f32(fb)?;
-    }
-    for &fa in &st.fwd_alpha {
-        tube_w.write_f32(fa)?;
-    }
-    for &fj in &st.fwd_j {
-        tube_w.write_f32(fj)?;
-    }
-    for &fjc in &st.fwd_j_ctx {
-        tube_w.write_f32(fjc)?;
-    }
-    for &fjs in &st.fwd_j_cons {
-        tube_w.write_f32(fjs)?;
-    }
-    for &vn in &st.fwd_var_null {
-        tube_w.write_f32(vn)?;
-    }
-    for &va in &st.fwd_var_act {
-        tube_w.write_f32(va)?;
-    }
-    for &fnm in &st.fwd_num {
-        tube_w.write_f32(fnm)?;
-    }
-    for &fdn in &st.fwd_den {
-        tube_w.write_f32(fdn)?;
-    }
-    for &sam in &st.act_mean {
-        tube_w.write_f32(sam)?;
-    }
-    tube_w.write_u32(st.ctx_cooldown);
-    tube_w.write_u32(st.ctx_out_events);
-    for &oe in &st.ctx_out_err {
-        tube_w.write_f32(oe)?;
-    }
-    tube_w.write_f32(st.r_fast_ema)?;
-    tube_w.write_f32(st.r_med200)?;
-    tube_w.write_f32(st.valence_flip_ema)?;
-    for &dr in &st.da_ring {
-        tube_w.write_f32(dr)?;
-    }
-    for &ea in &st.elig_actor {
-        tube_w.write_f32(ea)?;
-    }
-    for &ec in &st.elig_critic {
-        tube_w.write_f32(ec)?;
-    }
-    for &ft in &st.feat {
-        tube_w.write_f32(ft)?;
-    }
-    for &pcf in &st.prev_critic_feat {
-        tube_w.write_f32(pcf)?;
-    }
-    for &pf in &st.prev_feat {
-        tube_w.write_f32(pf)?;
-    }
-    for &pdf in &st.prev_df {
-        tube_w.write_f32(pdf)?;
-    }
-    for &pa in &st.prev_act {
-        tube_w.write_f32(pa)?;
-    }
-    for &nz in &st.noise {
-        tube_w.write_f32(nz)?;
-    }
-    tube_w.write_f32(st.v_prev)?;
-    tube_w.write_bool(st.has_prev);
-    tube_w.write_u64(st.tick);
-    tube_w.write_u64(st.rng.s0);
-    tube_w.write_u64(st.rng.s1);
-    if tube_w.buf.len().saturating_sub(before_striatal) != striatal_serialized_bytes(st.n_act) {
-        return Err(PersistError::InvalidTopology);
+    if !external_slabs {
+        let before_striatal = tube_w.buf.len();
+        tube_w.write_u8(st.num_ctx);
+        tube_w.write_u8(st.active_ctx);
+        tube_w.write_u8(st.impact_refrac);
+        for &hc in &st.ctx_has_cons {
+            tube_w.write_u8(hc);
+        }
+        for &ct in &st.ctx_ticks {
+            tube_w.write_u32(ct);
+        }
+        for &rp in &st.ctx_r_peak {
+            tube_w.write_f32(rp)?;
+        }
+        for &rb in &st.r_bar_ctx {
+            tube_w.write_f32(rb)?;
+        }
+        for &pc in &st.pore_ch {
+            tube_w.write_u32(pc);
+        }
+        for &pa in &st.pore_age {
+            tube_w.write_u32(pa);
+        }
+        for &pm in &st.pore_mean {
+            tube_w.write_f32(pm)?;
+        }
+        for &vr in &st.pore_var_raw {
+            tube_w.write_f32(vr)?;
+        }
+        for &ve in &st.pore_var_exaff {
+            tube_w.write_f32(ve)?;
+        }
+        for &cg in &st.canc_g {
+            tube_w.write_f32(cg)?;
+        }
+        for &wb in &st.w_birth {
+            tube_w.write_f32(wb)?;
+        }
+        for &wc in &st.w_ctx {
+            tube_w.write_f32(wc)?;
+        }
+        for &ws in &st.w_cons {
+            tube_w.write_f32(ws)?;
+        }
+        for &vc in &st.v_ctx {
+            tube_w.write_f32(vc)?;
+        }
+        for &vs in &st.v_cons {
+            tube_w.write_f32(vs)?;
+        }
+        for &qc in &st.q_ctx {
+            tube_w.write_f32(qc)?;
+        }
+        for &qs in &st.q_cons {
+            tube_w.write_f32(qs)?;
+        }
+        for &fb in &st.fwd_b {
+            tube_w.write_f32(fb)?;
+        }
+        for &fa in &st.fwd_alpha {
+            tube_w.write_f32(fa)?;
+        }
+        for &fj in &st.fwd_j {
+            tube_w.write_f32(fj)?;
+        }
+        for &fjc in &st.fwd_j_ctx {
+            tube_w.write_f32(fjc)?;
+        }
+        for &fjs in &st.fwd_j_cons {
+            tube_w.write_f32(fjs)?;
+        }
+        for &vn in &st.fwd_var_null {
+            tube_w.write_f32(vn)?;
+        }
+        for &va in &st.fwd_var_act {
+            tube_w.write_f32(va)?;
+        }
+        for &fnm in &st.fwd_num {
+            tube_w.write_f32(fnm)?;
+        }
+        for &fdn in &st.fwd_den {
+            tube_w.write_f32(fdn)?;
+        }
+        for &sam in &st.act_mean {
+            tube_w.write_f32(sam)?;
+        }
+        tube_w.write_u32(st.ctx_cooldown);
+        tube_w.write_u32(st.ctx_out_events);
+        for &oe in &st.ctx_out_err {
+            tube_w.write_f32(oe)?;
+        }
+        tube_w.write_f32(st.r_fast_ema)?;
+        tube_w.write_f32(st.r_med200)?;
+        tube_w.write_f32(st.valence_flip_ema)?;
+        for &dr in &st.da_ring {
+            tube_w.write_f32(dr)?;
+        }
+        for &ea in &st.elig_actor {
+            tube_w.write_f32(ea)?;
+        }
+        for &ec in &st.elig_critic {
+            tube_w.write_f32(ec)?;
+        }
+        for &ft in &st.feat {
+            tube_w.write_f32(ft)?;
+        }
+        for &pcf in &st.prev_critic_feat {
+            tube_w.write_f32(pcf)?;
+        }
+        for &pf in &st.prev_feat {
+            tube_w.write_f32(pf)?;
+        }
+        for &pdf in &st.prev_df {
+            tube_w.write_f32(pdf)?;
+        }
+        for &pa in &st.prev_act {
+            tube_w.write_f32(pa)?;
+        }
+        for &nz in &st.noise {
+            tube_w.write_f32(nz)?;
+        }
+        tube_w.write_f32(st.v_prev)?;
+        tube_w.write_bool(st.has_prev);
+        tube_w.write_u64(st.tick);
+        tube_w.write_u64(st.rng.s0);
+        tube_w.write_u64(st.rng.s1);
+        if tube_w.buf.len().saturating_sub(before_striatal) != striatal_serialized_bytes(st.n_act) {
+            return Err(PersistError::InvalidTopology);
+        }
+    } else {
+        let (_, _, s_wl, s_fl) = st.dims();
+        tube_w.write_u8(st.num_ctx);
+        tube_w.write_u8(st.active_ctx);
+        tube_w.write_u8(st.impact_refrac);
+        for &hc in &st.ctx_has_cons {
+            tube_w.write_u8(hc);
+        }
+        for &ct in &st.ctx_ticks {
+            tube_w.write_u32(ct);
+        }
+        for &rp in &st.ctx_r_peak {
+            tube_w.write_f32(rp)?;
+        }
+        for &rb in &st.r_bar_ctx {
+            tube_w.write_f32(rb)?;
+        }
+        for &pc in &st.pore_ch {
+            tube_w.write_u32(pc);
+        }
+        for &pa in &st.pore_age {
+            tube_w.write_u32(pa);
+        }
+        for &pm in &st.pore_mean {
+            tube_w.write_f32(pm)?;
+        }
+        for &vr in &st.pore_var_raw {
+            tube_w.write_f32(vr)?;
+        }
+        for &ve in &st.pore_var_exaff {
+            tube_w.write_f32(ve)?;
+        }
+        tube_w.write_f32_sparse8(&st.canc_g)?;
+        for &wb in &st.w_birth {
+            tube_w.write_f32(wb)?;
+        }
+        for &cid in &st.hot_col_id {
+            tube_w.write_u32(cid);
+        }
+        for c in 0..OFC_CONTEXTS {
+            if st.ctx_has_cons[c] == 0 {
+                let w_s = &st.w_cons[c * s_wl..(c + 1) * s_wl];
+                let v_s = &st.v_cons[c * STRIATAL_FEATS..(c + 1) * STRIATAL_FEATS];
+                let q_s = &st.q_cons[c * STRIATAL_CUES..(c + 1) * STRIATAL_CUES];
+                let j_s = &st.fwd_j_cons[c * s_fl..(c + 1) * s_fl];
+                let all_z = slice_all_pos_zero(w_s)
+                    && slice_all_pos_zero(v_s)
+                    && slice_all_pos_zero(q_s)
+                    && slice_all_pos_zero(j_s);
+                tube_w.write_bool(all_z);
+                if !all_z {
+                    tube_w.write_f32_sparse8(w_s)?;
+                    tube_w.write_f32_sparse8(v_s)?;
+                    tube_w.write_f32_sparse8(q_s)?;
+                    tube_w.write_f32_sparse8(j_s)?;
+                }
+            }
+        }
+        for c in 0..OFC_CONTEXTS {
+            let w_c = &st.w_ctx[c * s_wl..(c + 1) * s_wl];
+            let w_s = &st.w_cons[c * s_wl..(c + 1) * s_wl];
+            let w_ref = if st.ctx_has_cons[c] != 0 {
+                w_s
+            } else {
+                &st.w_birth
+            };
+            tube_w.write_f32_xor_sparse8(w_c, w_ref)?;
+
+            let v_c = &st.v_ctx[c * STRIATAL_FEATS..(c + 1) * STRIATAL_FEATS];
+            let v_s = &st.v_cons[c * STRIATAL_FEATS..(c + 1) * STRIATAL_FEATS];
+            if st.ctx_has_cons[c] != 0 {
+                tube_w.write_f32_xor_sparse8(v_c, v_s)?;
+            } else {
+                tube_w.write_f32_sparse8(v_c)?;
+            }
+
+            let q_c = &st.q_ctx[c * STRIATAL_CUES..(c + 1) * STRIATAL_CUES];
+            let q_s = &st.q_cons[c * STRIATAL_CUES..(c + 1) * STRIATAL_CUES];
+            if st.ctx_has_cons[c] != 0 {
+                tube_w.write_f32_xor_sparse8(q_c, q_s)?;
+            } else {
+                tube_w.write_f32_sparse8(q_c)?;
+            }
+
+            let j_c = &st.fwd_j_ctx[c * s_fl..(c + 1) * s_fl];
+            let j_s = &st.fwd_j_cons[c * s_fl..(c + 1) * s_fl];
+            if st.ctx_has_cons[c] != 0 {
+                tube_w.write_f32_xor_sparse8(j_c, j_s)?;
+            } else {
+                tube_w.write_f32_sparse8(j_c)?;
+            }
+        }
+        for &fb in &st.fwd_b {
+            tube_w.write_f32(fb)?;
+        }
+        for &fa in &st.fwd_alpha {
+            tube_w.write_f32(fa)?;
+        }
+        tube_w.write_f32_sparse8(&st.fwd_j)?;
+        for &vn in &st.fwd_var_null {
+            tube_w.write_f32(vn)?;
+        }
+        for &va in &st.fwd_var_act {
+            tube_w.write_f32(va)?;
+        }
+        for &fnm in &st.fwd_num {
+            tube_w.write_f32(fnm)?;
+        }
+        for &fdn in &st.fwd_den {
+            tube_w.write_f32(fdn)?;
+        }
+        for &sam in &st.act_mean {
+            tube_w.write_f32(sam)?;
+        }
+        tube_w.write_u32(st.ctx_cooldown);
+        tube_w.write_u32(st.ctx_out_events);
+        for &oe in &st.ctx_out_err {
+            tube_w.write_f32(oe)?;
+        }
+        tube_w.write_f32(st.r_fast_ema)?;
+        tube_w.write_f32(st.r_med200)?;
+        tube_w.write_f32(st.valence_flip_ema)?;
+        for &dr in &st.da_ring {
+            tube_w.write_f32(dr)?;
+        }
+        tube_w.write_f32_sparse8(&st.elig_actor)?;
+        for &ec in &st.elig_critic {
+            tube_w.write_f32(ec)?;
+        }
+        for &ft in &st.feat {
+            tube_w.write_f32(ft)?;
+        }
+        for &pcf in &st.prev_critic_feat {
+            tube_w.write_f32(pcf)?;
+        }
+        for &pf in &st.prev_feat {
+            tube_w.write_f32(pf)?;
+        }
+        for &pdf in &st.prev_df {
+            tube_w.write_f32(pdf)?;
+        }
+        for &pa in &st.prev_act {
+            tube_w.write_f32(pa)?;
+        }
+        for &nz in &st.noise {
+            tube_w.write_f32(nz)?;
+        }
+        tube_w.write_f32(st.v_prev)?;
+        tube_w.write_bool(st.has_prev);
+        tube_w.write_u64(st.tick);
+        tube_w.write_u64(st.rng.s0);
+        tube_w.write_u64(st.rng.s1);
     }
     for &pfv in &org.tubes.pore_floor_v {
         tube_w.write_f32(pfv)?;
@@ -602,6 +1159,61 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     }
     for &eva in &org.tubes.even_v_acc {
         tube_w.write_f32(eva)?;
+    }
+    tube_w.write_u32(st.total_cols);
+    tube_w.write_u8(st.dend_mismatch_streak);
+    for &cid in &st.hot_col_id {
+        tube_w.write_u32(cid);
+    }
+    for &lu in &st.hot_last_use {
+        tube_w.write_u64(lu);
+    }
+    for c in 0..OFC_CONTEXTS {
+        if !external_slabs || st.ctx_has_cons[c] == 0 {
+            for &ch in &st.hot_dend_ch[c] {
+                tube_w.write_u32(ch);
+            }
+            for &ev in &st.hot_dend_env[c] {
+                tube_w.write_u8(ev);
+            }
+            for &kv in &st.hot_dend_key[c] {
+                tube_w.write_f32(kv)?;
+            }
+        }
+    }
+    for &cm in &st.pore_carr_mean {
+        tube_w.write_f32(cm)?;
+    }
+    for &cv in &st.pore_carr_var {
+        tube_w.write_f32(cv)?;
+    }
+    for &px in &st.pore_prev_x {
+        tube_w.write_f32(px)?;
+    }
+    for &vdx in &st.pore_var_dx {
+        tube_w.write_f32(vdx)?;
+    }
+    for &oe in &st.pore_orb_err {
+        tube_w.write_f32(oe)?;
+    }
+    tube_w.write_u32(st.paged_cols.len() as u32);
+    for pe in &st.paged_cols {
+        tube_w.write_u32(pe.col_id);
+        tube_w.write_f32(pe.r_peak)?;
+        for &ch in &pe.dend_ch {
+            tube_w.write_u32(ch);
+        }
+        for &ev in &pe.dend_env {
+            tube_w.write_u8(ev);
+        }
+        for &kv in &pe.dend_key {
+            tube_w.write_f32(kv)?;
+        }
+        tube_w.write_u32(pe.slab_crc32c);
+        if !external_slabs {
+            tube_w.write_u32(pe.slab_bytes.len() as u32);
+            tube_w.buf.extend_from_slice(&pe.slab_bytes);
+        }
     }
 
     let mut pore_w = ByteWriter::with_capacity(org.membrane.sensor_pores.len() * 112 + 512);
@@ -700,10 +1312,24 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
         scot_w.write_f32(st.alt_ema)?;
     }
 
+    let tube_payload = if external_slabs && tube_w.buf.len() >= 9 {
+        let raw_body = &tube_w.buf[9..];
+        let raw_len_u32 =
+            u32::try_from(raw_body.len()).map_err(|_| PersistError::OversizedInput)?;
+        let comp_body = lz77_compress(raw_body);
+        let mut packed = Vec::with_capacity(13 + comp_body.len());
+        packed.extend_from_slice(&tube_w.buf[..9]);
+        packed.extend_from_slice(&raw_len_u32.to_le_bytes());
+        packed.extend_from_slice(&comp_body);
+        packed
+    } else {
+        tube_w.buf
+    };
+
     let mut slabs_buf = Vec::with_capacity(
         body_w.buf.len()
             + cell_w.buf.len()
-            + tube_w.buf.len()
+            + tube_payload.len()
             + pore_w.buf.len()
             + ring_w.buf.len()
             + scot_w.buf.len()
@@ -711,7 +1337,7 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
     );
     append_slab(&mut slabs_buf, TAG_BODY, &body_w.buf)?;
     append_slab(&mut slabs_buf, TAG_CELL, &cell_w.buf)?;
-    append_slab(&mut slabs_buf, TAG_TUBE, &tube_w.buf)?;
+    append_slab(&mut slabs_buf, TAG_TUBE, &tube_payload)?;
     append_slab(&mut slabs_buf, TAG_PORE, &pore_w.buf)?;
     append_slab(&mut slabs_buf, TAG_RING, &ring_w.buf)?;
     append_slab(&mut slabs_buf, TAG_SCOT, &scot_w.buf)?;
@@ -739,6 +1365,14 @@ pub fn encode_organism(org: &Alpha11Organism) -> Result<Vec<u8>, PersistError> {
 pub fn shadow_decode_organism(
     bytes: &[u8],
     caller_max_state_bytes: usize,
+) -> Result<Alpha11Organism, PersistError> {
+    shadow_decode_organism_with_pages(bytes, caller_max_state_bytes, None)
+}
+
+fn shadow_decode_organism_with_pages(
+    bytes: &[u8],
+    caller_max_state_bytes: usize,
+    pages_dir: Option<&Path>,
 ) -> Result<Alpha11Organism, PersistError> {
     let max_allowed = caller_max_state_bytes.saturating_add(HEADER_OVERHEAD_MARGIN);
     if bytes.len() > max_allowed {
@@ -1211,38 +1845,176 @@ pub fn shadow_decode_organism(
         return Err(PersistError::InvalidTopology);
     }
 
-    let mut tr = ByteReader::new(payloads[2]);
-    let tube_slots_len = tr.read_u32()? as usize;
-    let tube_alive_count = tr.read_u32()? as usize;
+    let mut tr_head = ByteReader::new(payloads[2]);
+    let tube_slots_len = tr_head.read_u32()? as usize;
+    let tube_alive_count = tr_head.read_u32()? as usize;
     if tube_slots_len > config.max_tubes || tube_alive_count > tube_slots_len {
         return Err(PersistError::InvalidTopology);
     }
+    let external_slabs = if version >= 7 {
+        tr_head.read_bool()?
+    } else {
+        false
+    };
+    let decomp_tube_body: Vec<u8>;
+    let mut tr = if external_slabs {
+        let raw_len = tr_head.read_u32()? as usize;
+        if raw_len > max_allowed.saturating_mul(4) {
+            return Err(PersistError::OversizedInput);
+        }
+        let comp_slice = tr_head.take(tr_head.remaining())?;
+        decomp_tube_body = lz77_decompress(comp_slice, raw_len)?;
+        ByteReader::new(&decomp_tube_body)
+    } else {
+        tr_head
+    };
     let mut tube_slots = Vec::with_capacity(tube_slots_len);
     let mut counted_tubes = 0usize;
-    for _ in 0..tube_slots_len {
-        let alive = tr.read_bool()?;
-        let kind = TubeKind::from_u8(tr.read_u8()?).ok_or(PersistError::InvalidTopology)?;
-        let pre = tr.read_u32()?;
-        let post = tr.read_u32()?;
-        let delay = tr.read_u8()?;
-        let mut u = [0.0_f32; 4];
-        for dst in &mut u {
-            *dst = tr.read_f32()?;
-        }
-        let w_pred = tr.read_f32()?;
-        let has_gate = tr.read_bool()?;
-        let gate_raw = tr.read_u32()?;
-        let context_gate_cell = if has_gate { Some(gate_raw) } else { None };
-        let gate_invert = tr.read_bool()?;
-        let contradiction_accum = tr.read_f32()?;
-        let chain_score = tr.read_f32()?;
-        let myelin_plasticity_accum = if version >= 4 { tr.read_f32()? } else { 0.0 };
-        let last_upstream_cell = tr.read_u32()?;
-        let usage_ema = tr.read_f32()?;
-        let age_ticks = tr.read_u32()?;
+    if !external_slabs {
+        for _ in 0..tube_slots_len {
+            let alive = tr.read_bool()?;
+            let kind = TubeKind::from_u8(tr.read_u8()?).ok_or(PersistError::InvalidTopology)?;
+            let pre = tr.read_u32()?;
+            let post = tr.read_u32()?;
+            let delay = tr.read_u8()?;
+            let mut u = [0.0_f32; 4];
+            for dst in &mut u {
+                *dst = tr.read_f32()?;
+            }
+            let w_pred = tr.read_f32()?;
+            let has_gate = tr.read_bool()?;
+            let gate_raw = tr.read_u32()?;
+            let context_gate_cell = if has_gate { Some(gate_raw) } else { None };
+            let gate_invert = tr.read_bool()?;
+            let contradiction_accum = tr.read_f32()?;
+            let chain_score = tr.read_f32()?;
+            let myelin_plasticity_accum = if version >= 4 { tr.read_f32()? } else { 0.0 };
+            let last_upstream_cell = tr.read_u32()?;
+            let usage_ema = tr.read_f32()?;
+            let age_ticks = tr.read_u32()?;
 
-        if alive {
+            if alive {
+                counted_tubes += 1;
+                if !(1..=16).contains(&delay) {
+                    return Err(PersistError::InvalidTopology);
+                }
+                if (pre as usize) >= cells.slots.len() || !cells.slots[pre as usize].alive {
+                    return Err(PersistError::InvalidTopology);
+                }
+                match kind {
+                    TubeKind::CellToCell => {
+                        if (post as usize) >= cells.slots.len() || !cells.slots[post as usize].alive
+                        {
+                            return Err(PersistError::InvalidTopology);
+                        }
+                    }
+                    TubeKind::CellToMotor => {
+                        if (post as usize) >= motor_pores.len() || !motor_pores[post as usize].alive
+                        {
+                            return Err(PersistError::InvalidTopology);
+                        }
+                    }
+                }
+                if let Some(g) = context_gate_cell
+                    && (g as usize) >= cells.slots.len()
+                {
+                    return Err(PersistError::InvalidTopology);
+                }
+            }
+            tube_slots.push(Tube {
+                alive,
+                kind,
+                pre,
+                post,
+                delay,
+                u,
+                w_pred,
+                context_gate_cell,
+                gate_invert,
+                contradiction_accum,
+                chain_score,
+                myelin_plasticity_accum,
+                last_upstream_cell,
+                usage_ema,
+                age_ticks,
+            });
+        }
+    } else {
+        let compact_ep = tr.read_bool()?;
+        for _ in 0..tube_slots_len {
+            let flags = tr.read_u8()?;
+            if (flags & 1) == 0 {
+                if flags != 0 {
+                    return Err(PersistError::InvalidTopology);
+                }
+                tube_slots.push(Tube {
+                    alive: false,
+                    kind: TubeKind::CellToCell,
+                    pre: 0,
+                    post: 0,
+                    delay: 1,
+                    u: [0.0; 4],
+                    w_pred: 0.0,
+                    context_gate_cell: None,
+                    gate_invert: false,
+                    contradiction_accum: 0.0,
+                    chain_score: 0.0,
+                    myelin_plasticity_accum: 0.0,
+                    last_upstream_cell: u32::MAX,
+                    usage_ema: 0.0,
+                    age_ticks: 0,
+                });
+                continue;
+            }
+            if (flags & (32 | 128)) != 0 {
+                return Err(PersistError::InvalidTopology);
+            }
             counted_tubes += 1;
+            let kind = if (flags & 2) != 0 {
+                TubeKind::CellToMotor
+            } else {
+                TubeKind::CellToCell
+            };
+            let (pre, post) = if compact_ep {
+                (u32::from(tr.read_u16()?), u32::from(tr.read_u16()?))
+            } else {
+                (tr.read_u32()?, tr.read_u32()?)
+            };
+            let delay = tr.read_u8()?;
+            let mut oct = [0.0_f32; 8];
+            tr.read_f32_sparse8(&mut oct)?;
+            let u = [oct[0], oct[1], oct[2], oct[3]];
+            let w_pred = oct[4];
+            let contradiction_accum = oct[5];
+            let chain_score = oct[6];
+            let myelin_plasticity_accum = oct[7];
+            let context_gate_cell = if (flags & 4) != 0 {
+                let g = if compact_ep {
+                    u32::from(tr.read_u16()?)
+                } else {
+                    tr.read_u32()?
+                };
+                Some(g)
+            } else {
+                None
+            };
+            let gate_invert = (flags & 8) != 0;
+            let last_upstream_cell = if (flags & 16) != 0 {
+                if compact_ep {
+                    u32::from(tr.read_u16()?)
+                } else {
+                    tr.read_u32()?
+                }
+            } else {
+                u32::MAX
+            };
+            let usage_ema = tr.read_f32()?;
+            let age_ticks = if (flags & 64) != 0 {
+                tr.read_u32()?
+            } else {
+                u32::from(tr.read_u16()?)
+            };
+
             if !(1..=16).contains(&delay) {
                 return Err(PersistError::InvalidTopology);
             }
@@ -1266,24 +2038,24 @@ pub fn shadow_decode_organism(
             {
                 return Err(PersistError::InvalidTopology);
             }
+            tube_slots.push(Tube {
+                alive: true,
+                kind,
+                pre,
+                post,
+                delay,
+                u,
+                w_pred,
+                context_gate_cell,
+                gate_invert,
+                contradiction_accum,
+                chain_score,
+                myelin_plasticity_accum,
+                last_upstream_cell,
+                usage_ema,
+                age_ticks,
+            });
         }
-        tube_slots.push(Tube {
-            alive,
-            kind,
-            pre,
-            post,
-            delay,
-            u,
-            w_pred,
-            context_gate_cell,
-            gate_invert,
-            contradiction_accum,
-            chain_score,
-            myelin_plasticity_accum,
-            last_upstream_cell,
-            usage_ema,
-            age_ticks,
-        });
     }
     if counted_tubes != tube_alive_count {
         return Err(PersistError::InvalidTopology);
@@ -1324,28 +2096,41 @@ pub fn shadow_decode_organism(
         MIN_CELL_DIM
     };
     let mut action_sensory_w = vec![vec![0.0_f32; cell_dim]; act_dim];
-    for row in &mut action_sensory_w {
-        for dst in row {
-            *dst = tr.read_f32()?;
-        }
-    }
     let mut pore_action_w = vec![[0.0_f32; PRED_BUCKETS]; act_dim];
     let mut tectal_map_w = vec![[0.0_f32; PRED_BUCKETS]; act_dim];
-    if version >= 4 {
+    let mut sensory_self_w = vec![0.0_f32; cell_dim];
+    if external_slabs {
+        for row in &mut action_sensory_w {
+            tr.read_f32_sparse8(row)?;
+        }
         for row in &mut pore_action_w {
-            for dst in row {
-                *dst = tr.read_f32()?;
-            }
+            tr.read_f32_sparse8(row)?;
         }
         for row in &mut tectal_map_w {
+            tr.read_f32_sparse8(row)?;
+        }
+        tr.read_f32_sparse8(&mut sensory_self_w)?;
+    } else {
+        for row in &mut action_sensory_w {
             for dst in row {
                 *dst = tr.read_f32()?;
             }
         }
-    }
-    let mut sensory_self_w = vec![0.0_f32; cell_dim];
-    for dst in &mut sensory_self_w {
-        *dst = tr.read_f32()?;
+        if version >= 4 {
+            for row in &mut pore_action_w {
+                for dst in row {
+                    *dst = tr.read_f32()?;
+                }
+            }
+            for row in &mut tectal_map_w {
+                for dst in row {
+                    *dst = tr.read_f32()?;
+                }
+            }
+        }
+        for dst in &mut sensory_self_w {
+            *dst = tr.read_f32()?;
+        }
     }
     let mut pore_self_w = [0.0_f32; PRED_BUCKETS];
     let mut pore_mean_v = [0.0_f32; PRED_BUCKETS];
@@ -1427,7 +2212,7 @@ pub fn shadow_decode_organism(
         *dst = tr.read_f32()?;
     }
     let mean_interventional_agency = tr.read_f32()?;
-    let striatal = if version >= 5 {
+    let mut striatal = if version >= 5 {
         let s_na = if version >= 6 {
             let n = tr.read_u32()? as usize;
             if !(MIN_STRIATAL_ACT..=MAX_ACTUATOR_DIM).contains(&n) {
@@ -1442,228 +2227,530 @@ pub fn shadow_decode_organism(
             s_na * STRIATAL_CUES,
             STRIATAL_CUES * s_na,
         );
-        let num_ctx = tr.read_u8()?;
-        let active_ctx = tr.read_u8()?;
-        let impact_refrac = tr.read_u8()?;
-        if num_ctx == 0 || (num_ctx as usize) > OFC_CONTEXTS || active_ctx >= num_ctx {
-            return Err(PersistError::InvalidTopology);
-        }
-        let mut ctx_has_cons = [0u8; OFC_CONTEXTS];
-        for dst in &mut ctx_has_cons {
-            let v = tr.read_u8()?;
-            if v > 1 {
+        if !external_slabs {
+            let num_ctx = tr.read_u8()?;
+            let active_ctx = tr.read_u8()?;
+            let impact_refrac = tr.read_u8()?;
+            if num_ctx == 0 || (num_ctx as usize) > OFC_CONTEXTS || active_ctx >= num_ctx {
                 return Err(PersistError::InvalidTopology);
             }
-            *dst = v;
-        }
-        let mut ctx_ticks = [0u32; OFC_CONTEXTS];
-        for dst in &mut ctx_ticks {
-            *dst = tr.read_u32()?;
-        }
-        let mut ctx_r_peak = [0.0_f32; OFC_CONTEXTS];
-        for dst in &mut ctx_r_peak {
-            *dst = tr.read_f32()?;
-        }
-        let mut r_bar_ctx = [0.0_f32; OFC_CONTEXTS];
-        for dst in &mut r_bar_ctx {
-            *dst = tr.read_f32()?;
-        }
-        let mut pore_ch = [u32::MAX; STRIATAL_PORES];
-        for dst in &mut pore_ch {
-            *dst = tr.read_u32()?;
-        }
-        let mut pore_age = [0u32; STRIATAL_PORES];
-        for dst in &mut pore_age {
-            *dst = tr.read_u32()?;
-        }
-        let mut pore_mean = [0.0_f32; STRIATAL_PORES];
-        for dst in &mut pore_mean {
-            *dst = tr.read_f32()?;
-        }
-        let mut pore_var_raw = [1.0e-4_f32; STRIATAL_PORES];
-        for dst in &mut pore_var_raw {
-            *dst = tr.read_f32()?;
-        }
-        let mut pore_var_exaff = [1.0e-4_f32; STRIATAL_PORES];
-        for dst in &mut pore_var_exaff {
-            *dst = tr.read_f32()?;
-        }
-        let mut canc_g = vec![0.0_f32; STRIATAL_PORES * s_tap];
-        for dst in &mut canc_g {
-            *dst = tr.read_f32()?;
-        }
-        let mut w_birth = vec![0.0_f32; s_wl];
-        for dst in &mut w_birth {
-            *dst = tr.read_f32()?;
-        }
-        let mut w_ctx = vec![0.0_f32; OFC_CONTEXTS * s_wl];
-        for dst in &mut w_ctx {
-            *dst = tr.read_f32()?;
-        }
-        let mut w_cons = vec![0.0_f32; OFC_CONTEXTS * s_wl];
-        for dst in &mut w_cons {
-            *dst = tr.read_f32()?;
-        }
-        let mut v_ctx = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_FEATS];
-        for dst in &mut v_ctx {
-            *dst = tr.read_f32()?;
-        }
-        let mut v_cons = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_FEATS];
-        for dst in &mut v_cons {
-            *dst = tr.read_f32()?;
-        }
-        let mut q_ctx = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_CUES];
-        for dst in &mut q_ctx {
-            *dst = tr.read_f32()?;
-        }
-        let mut q_cons = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_CUES];
-        for dst in &mut q_cons {
-            *dst = tr.read_f32()?;
-        }
-        let mut fwd_b = [0.0_f32; STRIATAL_CUES];
-        for dst in &mut fwd_b {
-            *dst = tr.read_f32()?;
-        }
-        let mut fwd_alpha = [0.0_f32; STRIATAL_CUES];
-        for dst in &mut fwd_alpha {
-            *dst = tr.read_f32()?;
-        }
-        let mut fwd_j = vec![0.0_f32; s_fl];
-        for dst in &mut fwd_j {
-            *dst = tr.read_f32()?;
-        }
-        let mut fwd_j_ctx = vec![0.0_f32; OFC_CONTEXTS * s_fl];
-        for dst in &mut fwd_j_ctx {
-            *dst = tr.read_f32()?;
-        }
-        let mut fwd_j_cons = vec![0.0_f32; OFC_CONTEXTS * s_fl];
-        for dst in &mut fwd_j_cons {
-            *dst = tr.read_f32()?;
-        }
-        let mut fwd_var_null = [1.0e-4_f32; STRIATAL_CUES];
-        for dst in &mut fwd_var_null {
-            *dst = tr.read_f32()?;
-        }
-        let mut fwd_var_act = [1.0e-4_f32; STRIATAL_CUES];
-        for dst in &mut fwd_var_act {
-            *dst = tr.read_f32()?;
-        }
-        let mut fwd_num = [0.0_f32; OFC_CONTEXTS];
-        for dst in &mut fwd_num {
-            *dst = tr.read_f32()?;
-        }
-        let mut fwd_den = [0.0_f32; OFC_CONTEXTS];
-        for dst in &mut fwd_den {
-            *dst = tr.read_f32()?;
-        }
-        let mut s_act_mean = vec![0.0_f32; s_na];
-        for dst in &mut s_act_mean {
-            *dst = tr.read_f32()?;
-        }
-        let ctx_cooldown = tr.read_u32()?;
-        let ctx_out_events = tr.read_u32()?;
-        let mut ctx_out_err = [0.0_f32; OFC_CONTEXTS];
-        for dst in &mut ctx_out_err {
-            *dst = tr.read_f32()?;
-        }
-        let r_fast_ema = tr.read_f32()?;
-        let r_med200 = tr.read_f32()?;
-        let valence_flip_ema = tr.read_f32()?;
-        let mut da_ring = vec![0.0_f32; s_tap];
-        for dst in &mut da_ring {
-            *dst = tr.read_f32()?;
-        }
-        let mut elig_actor = vec![0.0_f32; s_wl];
-        for dst in &mut elig_actor {
-            *dst = tr.read_f32()?;
-        }
-        let mut elig_critic = [0.0_f32; STRIATAL_FEATS];
-        for dst in &mut elig_critic {
-            *dst = tr.read_f32()?;
-        }
-        let mut feat = [0.0_f32; STRIATAL_FEATS];
-        for dst in &mut feat {
-            *dst = tr.read_f32()?;
-        }
-        let mut prev_critic_feat = [0.0_f32; STRIATAL_FEATS];
-        for dst in &mut prev_critic_feat {
-            *dst = tr.read_f32()?;
-        }
-        let mut prev_feat = [0.0_f32; STRIATAL_CUES];
-        for dst in &mut prev_feat {
-            *dst = tr.read_f32()?;
-        }
-        let mut prev_df = [0.0_f32; STRIATAL_CUES];
-        for dst in &mut prev_df {
-            *dst = tr.read_f32()?;
-        }
-        let mut prev_act = vec![0.0_f32; s_na];
-        for dst in &mut prev_act {
-            *dst = tr.read_f32()?;
-        }
-        let mut noise = vec![0.0_f32; s_na];
-        for dst in &mut noise {
-            *dst = tr.read_f32()?;
-        }
-        let v_prev = tr.read_f32()?;
-        let has_prev = tr.read_bool()?;
-        let s_tick = tr.read_u64()?;
-        let rs0 = tr.read_u64()?;
-        let rs1 = tr.read_u64()?;
-        if (rs0 | rs1) == 0 {
-            return Err(PersistError::InvalidTopology);
-        }
-        StriatalOfc {
-            n_act: s_na,
-            num_ctx,
-            active_ctx,
-            impact_refrac,
-            ctx_has_cons,
-            ctx_ticks,
-            ctx_r_peak,
-            r_bar_ctx,
-            pore_ch,
-            pore_age,
-            pore_mean,
-            pore_var_raw,
-            pore_var_exaff,
-            canc_g,
-            w_birth,
-            w_ctx,
-            w_cons,
-            v_ctx,
-            v_cons,
-            q_ctx,
-            q_cons,
-            fwd_b,
-            fwd_alpha,
-            fwd_j,
-            fwd_j_ctx,
-            fwd_j_cons,
-            fwd_var_null,
-            fwd_var_act,
-            fwd_num,
-            fwd_den,
-            act_mean: s_act_mean,
-            ctx_cooldown,
-            ctx_out_events,
-            ctx_out_err,
-            r_fast_ema,
-            r_med200,
-            valence_flip_ema,
-            da_ring,
-            elig_actor,
-            elig_critic,
-            feat,
-            prev_critic_feat,
-            prev_feat,
-            prev_df,
-            prev_act,
-            noise,
-            v_prev,
-            has_prev,
-            tick: s_tick,
-            rng: Rng64 { s0: rs0, s1: rs1 },
+            let mut ctx_has_cons = [0u8; OFC_CONTEXTS];
+            for dst in &mut ctx_has_cons {
+                let v = tr.read_u8()?;
+                if v > 1 {
+                    return Err(PersistError::InvalidTopology);
+                }
+                *dst = v;
+            }
+            let mut ctx_ticks = [0u32; OFC_CONTEXTS];
+            for dst in &mut ctx_ticks {
+                *dst = tr.read_u32()?;
+            }
+            let mut ctx_r_peak = [0.0_f32; OFC_CONTEXTS];
+            for dst in &mut ctx_r_peak {
+                *dst = tr.read_f32()?;
+            }
+            let mut r_bar_ctx = [0.0_f32; OFC_CONTEXTS];
+            for dst in &mut r_bar_ctx {
+                *dst = tr.read_f32()?;
+            }
+            let mut pore_ch = [u32::MAX; STRIATAL_PORES];
+            for dst in &mut pore_ch {
+                *dst = tr.read_u32()?;
+            }
+            let mut pore_age = [0u32; STRIATAL_PORES];
+            for dst in &mut pore_age {
+                *dst = tr.read_u32()?;
+            }
+            let mut pore_mean = [0.0_f32; STRIATAL_PORES];
+            for dst in &mut pore_mean {
+                *dst = tr.read_f32()?;
+            }
+            let mut pore_var_raw = [1.0e-4_f32; STRIATAL_PORES];
+            for dst in &mut pore_var_raw {
+                *dst = tr.read_f32()?;
+            }
+            let mut pore_var_exaff = [1.0e-4_f32; STRIATAL_PORES];
+            for dst in &mut pore_var_exaff {
+                *dst = tr.read_f32()?;
+            }
+            let mut canc_g = vec![0.0_f32; STRIATAL_PORES * s_tap];
+            for dst in &mut canc_g {
+                *dst = tr.read_f32()?;
+            }
+            let mut w_birth = vec![0.0_f32; s_wl];
+            for dst in &mut w_birth {
+                *dst = tr.read_f32()?;
+            }
+            let mut w_ctx = vec![0.0_f32; OFC_CONTEXTS * s_wl];
+            for dst in &mut w_ctx {
+                *dst = tr.read_f32()?;
+            }
+            let mut w_cons = vec![0.0_f32; OFC_CONTEXTS * s_wl];
+            for dst in &mut w_cons {
+                *dst = tr.read_f32()?;
+            }
+            let mut v_ctx = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_FEATS];
+            for dst in &mut v_ctx {
+                *dst = tr.read_f32()?;
+            }
+            let mut v_cons = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_FEATS];
+            for dst in &mut v_cons {
+                *dst = tr.read_f32()?;
+            }
+            let mut q_ctx = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_CUES];
+            for dst in &mut q_ctx {
+                *dst = tr.read_f32()?;
+            }
+            let mut q_cons = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_CUES];
+            for dst in &mut q_cons {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_b = [0.0_f32; STRIATAL_CUES];
+            for dst in &mut fwd_b {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_alpha = [0.0_f32; STRIATAL_CUES];
+            for dst in &mut fwd_alpha {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_j = vec![0.0_f32; s_fl];
+            for dst in &mut fwd_j {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_j_ctx = vec![0.0_f32; OFC_CONTEXTS * s_fl];
+            for dst in &mut fwd_j_ctx {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_j_cons = vec![0.0_f32; OFC_CONTEXTS * s_fl];
+            for dst in &mut fwd_j_cons {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_var_null = [1.0e-4_f32; STRIATAL_CUES];
+            for dst in &mut fwd_var_null {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_var_act = [1.0e-4_f32; STRIATAL_CUES];
+            for dst in &mut fwd_var_act {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_num = [0.0_f32; OFC_CONTEXTS];
+            for dst in &mut fwd_num {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_den = [0.0_f32; OFC_CONTEXTS];
+            for dst in &mut fwd_den {
+                *dst = tr.read_f32()?;
+            }
+            let mut s_act_mean = vec![0.0_f32; s_na];
+            for dst in &mut s_act_mean {
+                *dst = tr.read_f32()?;
+            }
+            let ctx_cooldown = tr.read_u32()?;
+            let ctx_out_events = tr.read_u32()?;
+            let mut ctx_out_err = [0.0_f32; OFC_CONTEXTS];
+            for dst in &mut ctx_out_err {
+                *dst = tr.read_f32()?;
+            }
+            let r_fast_ema = tr.read_f32()?;
+            let r_med200 = tr.read_f32()?;
+            let valence_flip_ema = tr.read_f32()?;
+            let mut da_ring = vec![0.0_f32; s_tap];
+            for dst in &mut da_ring {
+                *dst = tr.read_f32()?;
+            }
+            let mut elig_actor = vec![0.0_f32; s_wl];
+            for dst in &mut elig_actor {
+                *dst = tr.read_f32()?;
+            }
+            let mut elig_critic = [0.0_f32; STRIATAL_FEATS];
+            for dst in &mut elig_critic {
+                *dst = tr.read_f32()?;
+            }
+            let mut feat = [0.0_f32; STRIATAL_FEATS];
+            for dst in &mut feat {
+                *dst = tr.read_f32()?;
+            }
+            let mut prev_critic_feat = [0.0_f32; STRIATAL_FEATS];
+            for dst in &mut prev_critic_feat {
+                *dst = tr.read_f32()?;
+            }
+            let mut prev_feat = [0.0_f32; STRIATAL_CUES];
+            for dst in &mut prev_feat {
+                *dst = tr.read_f32()?;
+            }
+            let mut prev_df = [0.0_f32; STRIATAL_CUES];
+            for dst in &mut prev_df {
+                *dst = tr.read_f32()?;
+            }
+            let mut prev_act = vec![0.0_f32; s_na];
+            for dst in &mut prev_act {
+                *dst = tr.read_f32()?;
+            }
+            let mut noise = vec![0.0_f32; s_na];
+            for dst in &mut noise {
+                *dst = tr.read_f32()?;
+            }
+            let v_prev = tr.read_f32()?;
+            let has_prev = tr.read_bool()?;
+            let s_tick = tr.read_u64()?;
+            let rs0 = tr.read_u64()?;
+            let rs1 = tr.read_u64()?;
+            if (rs0 | rs1) == 0 {
+                return Err(PersistError::InvalidTopology);
+            }
+            let mut hot_dend_ch = [[u32::MAX; STRIATAL_PORES]; OFC_CONTEXTS];
+            let mut hot_dend_key = [[0.0_f32; STRIATAL_PORES]; OFC_CONTEXTS];
+            if version < 7 {
+                for c in 0..OFC_CONTEXTS {
+                    if ctx_has_cons[c] != 0 {
+                        hot_dend_ch[c] = pore_ch;
+                        for p in 0..STRIATAL_PORES {
+                            if pore_ch[p] != u32::MAX {
+                                hot_dend_key[c][p] = pore_mean[p].clamp(-1.0, 1.0);
+                            }
+                        }
+                    }
+                }
+            }
+            StriatalOfc {
+                n_act: s_na,
+                num_ctx,
+                active_ctx,
+                impact_refrac,
+                ctx_has_cons,
+                ctx_ticks,
+                ctx_r_peak,
+                r_bar_ctx,
+                total_cols: u32::from(num_ctx).max(1),
+                dend_mismatch_streak: 0,
+                hot_col_id: [0, 1, 2, 3],
+                hot_last_use: [0; OFC_CONTEXTS],
+                hot_dend_ch,
+                hot_dend_env: [[0; STRIATAL_PORES]; OFC_CONTEXTS],
+                hot_dend_key,
+                paged_cols: Vec::new(),
+                pore_ch,
+                pore_age,
+                pore_mean,
+                pore_var_raw,
+                pore_var_exaff,
+                pore_carr_mean: [0.0; STRIATAL_PORES],
+                pore_carr_var: [1.0e-4; STRIATAL_PORES],
+                pore_prev_x: [0.0; STRIATAL_PORES],
+                pore_var_dx: [1.0e-5; STRIATAL_PORES],
+                pore_orb_err: [1.0; STRIATAL_PORES],
+                canc_g,
+                w_birth,
+                w_ctx,
+                w_cons,
+                v_ctx,
+                v_cons,
+                q_ctx,
+                q_cons,
+                fwd_b,
+                fwd_alpha,
+                fwd_j,
+                fwd_j_ctx,
+                fwd_j_cons,
+                fwd_var_null,
+                fwd_var_act,
+                fwd_num,
+                fwd_den,
+                act_mean: s_act_mean,
+                ctx_cooldown,
+                ctx_out_events,
+                ctx_out_err,
+                r_fast_ema,
+                r_med200,
+                valence_flip_ema,
+                da_ring,
+                elig_actor,
+                elig_critic,
+                feat,
+                prev_critic_feat,
+                prev_feat,
+                prev_df,
+                prev_act,
+                noise,
+                v_prev,
+                has_prev,
+                tick: s_tick,
+                rng: Rng64 { s0: rs0, s1: rs1 },
+            }
+        } else {
+            let pdir = pages_dir.ok_or(PersistError::IoFailure)?;
+            let num_ctx = tr.read_u8()?;
+            let active_ctx = tr.read_u8()?;
+            let impact_refrac = tr.read_u8()?;
+            if num_ctx == 0 || (num_ctx as usize) > OFC_CONTEXTS || active_ctx >= num_ctx {
+                return Err(PersistError::InvalidTopology);
+            }
+            let mut ctx_has_cons = [0u8; OFC_CONTEXTS];
+            for dst in &mut ctx_has_cons {
+                let v = tr.read_u8()?;
+                if v > 1 {
+                    return Err(PersistError::InvalidTopology);
+                }
+                *dst = v;
+            }
+            let mut ctx_ticks = [0u32; OFC_CONTEXTS];
+            for dst in &mut ctx_ticks {
+                *dst = tr.read_u32()?;
+            }
+            let mut ctx_r_peak = [0.0_f32; OFC_CONTEXTS];
+            for dst in &mut ctx_r_peak {
+                *dst = tr.read_f32()?;
+            }
+            let mut r_bar_ctx = [0.0_f32; OFC_CONTEXTS];
+            for dst in &mut r_bar_ctx {
+                *dst = tr.read_f32()?;
+            }
+            let mut pore_ch = [u32::MAX; STRIATAL_PORES];
+            for dst in &mut pore_ch {
+                *dst = tr.read_u32()?;
+            }
+            let mut pore_age = [0u32; STRIATAL_PORES];
+            for dst in &mut pore_age {
+                *dst = tr.read_u32()?;
+            }
+            let mut pore_mean = [0.0_f32; STRIATAL_PORES];
+            for dst in &mut pore_mean {
+                *dst = tr.read_f32()?;
+            }
+            let mut pore_var_raw = [1.0e-4_f32; STRIATAL_PORES];
+            for dst in &mut pore_var_raw {
+                *dst = tr.read_f32()?;
+            }
+            let mut pore_var_exaff = [1.0e-4_f32; STRIATAL_PORES];
+            for dst in &mut pore_var_exaff {
+                *dst = tr.read_f32()?;
+            }
+            let mut canc_g = vec![0.0_f32; STRIATAL_PORES * s_tap];
+            tr.read_f32_sparse8(&mut canc_g)?;
+            let mut w_birth = vec![0.0_f32; s_wl];
+            for dst in &mut w_birth {
+                *dst = tr.read_f32()?;
+            }
+            let mut hot_col_id = [0u32; OFC_CONTEXTS];
+            for dst in &mut hot_col_id {
+                *dst = tr.read_u32()?;
+            }
+            let mut w_cons = vec![0.0_f32; OFC_CONTEXTS * s_wl];
+            let mut v_cons = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_FEATS];
+            let mut q_cons = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_CUES];
+            let mut fwd_j_cons = vec![0.0_f32; OFC_CONTEXTS * s_fl];
+            let mut hot_dend_ch = [[u32::MAX; STRIATAL_PORES]; OFC_CONTEXTS];
+            let mut hot_dend_env = [[0u8; STRIATAL_PORES]; OFC_CONTEXTS];
+            let mut hot_dend_key = [[0.0_f32; STRIATAL_PORES]; OFC_CONTEXTS];
+            for c in 0..OFC_CONTEXTS {
+                if ctx_has_cons[c] != 0 {
+                    let sb =
+                        read_bounded_file(&slab_path_for(pdir, hot_col_id[c]), MAX_SLAB_FILE_BYTES)?;
+                    let dec = decode_column_slab(&sb)?;
+                    if dec.col_id != hot_col_id[c] || dec.na != s_na {
+                        return Err(PersistError::InvalidTopology);
+                    }
+                    hot_dend_ch[c] = dec.dend_ch;
+                    hot_dend_env[c] = dec.dend_env;
+                    hot_dend_key[c] = dec.dend_key;
+                    w_cons[c * s_wl..(c + 1) * s_wl].copy_from_slice(&dec.w_cons);
+                    v_cons[c * STRIATAL_FEATS..(c + 1) * STRIATAL_FEATS]
+                        .copy_from_slice(&dec.v_cons);
+                    q_cons[c * STRIATAL_CUES..(c + 1) * STRIATAL_CUES]
+                        .copy_from_slice(&dec.q_cons);
+                    fwd_j_cons[c * s_fl..(c + 1) * s_fl].copy_from_slice(&dec.fwd_j_cons);
+                } else {
+                    let all_z = tr.read_bool()?;
+                    if !all_z {
+                        tr.read_f32_sparse8(&mut w_cons[c * s_wl..(c + 1) * s_wl])?;
+                        tr.read_f32_sparse8(
+                            &mut v_cons[c * STRIATAL_FEATS..(c + 1) * STRIATAL_FEATS],
+                        )?;
+                        tr.read_f32_sparse8(
+                            &mut q_cons[c * STRIATAL_CUES..(c + 1) * STRIATAL_CUES],
+                        )?;
+                        tr.read_f32_sparse8(&mut fwd_j_cons[c * s_fl..(c + 1) * s_fl])?;
+                    }
+                }
+            }
+            let mut w_ctx = vec![0.0_f32; OFC_CONTEXTS * s_wl];
+            let mut v_ctx = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_FEATS];
+            let mut q_ctx = vec![0.0_f32; OFC_CONTEXTS * STRIATAL_CUES];
+            let mut fwd_j_ctx = vec![0.0_f32; OFC_CONTEXTS * s_fl];
+            for c in 0..OFC_CONTEXTS {
+                if ctx_has_cons[c] != 0 {
+                    tr.read_f32_xor_sparse8(
+                        &mut w_ctx[c * s_wl..(c + 1) * s_wl],
+                        &w_cons[c * s_wl..(c + 1) * s_wl],
+                    )?;
+                    tr.read_f32_xor_sparse8(
+                        &mut v_ctx[c * STRIATAL_FEATS..(c + 1) * STRIATAL_FEATS],
+                        &v_cons[c * STRIATAL_FEATS..(c + 1) * STRIATAL_FEATS],
+                    )?;
+                    tr.read_f32_xor_sparse8(
+                        &mut q_ctx[c * STRIATAL_CUES..(c + 1) * STRIATAL_CUES],
+                        &q_cons[c * STRIATAL_CUES..(c + 1) * STRIATAL_CUES],
+                    )?;
+                    tr.read_f32_xor_sparse8(
+                        &mut fwd_j_ctx[c * s_fl..(c + 1) * s_fl],
+                        &fwd_j_cons[c * s_fl..(c + 1) * s_fl],
+                    )?;
+                } else {
+                    tr.read_f32_xor_sparse8(&mut w_ctx[c * s_wl..(c + 1) * s_wl], &w_birth)?;
+                    tr.read_f32_sparse8(
+                        &mut v_ctx[c * STRIATAL_FEATS..(c + 1) * STRIATAL_FEATS],
+                    )?;
+                    tr.read_f32_sparse8(&mut q_ctx[c * STRIATAL_CUES..(c + 1) * STRIATAL_CUES])?;
+                    tr.read_f32_sparse8(&mut fwd_j_ctx[c * s_fl..(c + 1) * s_fl])?;
+                }
+            }
+            let mut fwd_b = [0.0_f32; STRIATAL_CUES];
+            for dst in &mut fwd_b {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_alpha = [0.0_f32; STRIATAL_CUES];
+            for dst in &mut fwd_alpha {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_j = vec![0.0_f32; s_fl];
+            tr.read_f32_sparse8(&mut fwd_j)?;
+            let mut fwd_var_null = [1.0e-4_f32; STRIATAL_CUES];
+            for dst in &mut fwd_var_null {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_var_act = [1.0e-4_f32; STRIATAL_CUES];
+            for dst in &mut fwd_var_act {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_num = [0.0_f32; OFC_CONTEXTS];
+            for dst in &mut fwd_num {
+                *dst = tr.read_f32()?;
+            }
+            let mut fwd_den = [0.0_f32; OFC_CONTEXTS];
+            for dst in &mut fwd_den {
+                *dst = tr.read_f32()?;
+            }
+            let mut s_act_mean = vec![0.0_f32; s_na];
+            for dst in &mut s_act_mean {
+                *dst = tr.read_f32()?;
+            }
+            let ctx_cooldown = tr.read_u32()?;
+            let ctx_out_events = tr.read_u32()?;
+            let mut ctx_out_err = [0.0_f32; OFC_CONTEXTS];
+            for dst in &mut ctx_out_err {
+                *dst = tr.read_f32()?;
+            }
+            let r_fast_ema = tr.read_f32()?;
+            let r_med200 = tr.read_f32()?;
+            let valence_flip_ema = tr.read_f32()?;
+            let mut da_ring = vec![0.0_f32; s_tap];
+            for dst in &mut da_ring {
+                *dst = tr.read_f32()?;
+            }
+            let mut elig_actor = vec![0.0_f32; s_wl];
+            tr.read_f32_sparse8(&mut elig_actor)?;
+            let mut elig_critic = [0.0_f32; STRIATAL_FEATS];
+            for dst in &mut elig_critic {
+                *dst = tr.read_f32()?;
+            }
+            let mut feat = [0.0_f32; STRIATAL_FEATS];
+            for dst in &mut feat {
+                *dst = tr.read_f32()?;
+            }
+            let mut prev_critic_feat = [0.0_f32; STRIATAL_FEATS];
+            for dst in &mut prev_critic_feat {
+                *dst = tr.read_f32()?;
+            }
+            let mut prev_feat = [0.0_f32; STRIATAL_CUES];
+            for dst in &mut prev_feat {
+                *dst = tr.read_f32()?;
+            }
+            let mut prev_df = [0.0_f32; STRIATAL_CUES];
+            for dst in &mut prev_df {
+                *dst = tr.read_f32()?;
+            }
+            let mut prev_act = vec![0.0_f32; s_na];
+            for dst in &mut prev_act {
+                *dst = tr.read_f32()?;
+            }
+            let mut noise = vec![0.0_f32; s_na];
+            for dst in &mut noise {
+                *dst = tr.read_f32()?;
+            }
+            let v_prev = tr.read_f32()?;
+            let has_prev = tr.read_bool()?;
+            let s_tick = tr.read_u64()?;
+            let rs0 = tr.read_u64()?;
+            let rs1 = tr.read_u64()?;
+            if (rs0 | rs1) == 0 {
+                return Err(PersistError::InvalidTopology);
+            }
+            StriatalOfc {
+                n_act: s_na,
+                num_ctx,
+                active_ctx,
+                impact_refrac,
+                ctx_has_cons,
+                ctx_ticks,
+                ctx_r_peak,
+                r_bar_ctx,
+                total_cols: u32::from(num_ctx).max(1),
+                dend_mismatch_streak: 0,
+                hot_col_id,
+                hot_last_use: [0; OFC_CONTEXTS],
+                hot_dend_ch,
+                hot_dend_env,
+                hot_dend_key,
+                paged_cols: Vec::new(),
+                pore_ch,
+                pore_age,
+                pore_mean,
+                pore_var_raw,
+                pore_var_exaff,
+                pore_carr_mean: [0.0; STRIATAL_PORES],
+                pore_carr_var: [1.0e-4; STRIATAL_PORES],
+                pore_prev_x: [0.0; STRIATAL_PORES],
+                pore_var_dx: [1.0e-5; STRIATAL_PORES],
+                pore_orb_err: [1.0; STRIATAL_PORES],
+                canc_g,
+                w_birth,
+                w_ctx,
+                w_cons,
+                v_ctx,
+                v_cons,
+                q_ctx,
+                q_cons,
+                fwd_b,
+                fwd_alpha,
+                fwd_j,
+                fwd_j_ctx,
+                fwd_j_cons,
+                fwd_var_null,
+                fwd_var_act,
+                fwd_num,
+                fwd_den,
+                act_mean: s_act_mean,
+                ctx_cooldown,
+                ctx_out_events,
+                ctx_out_err,
+                r_fast_ema,
+                r_med200,
+                valence_flip_ema,
+                da_ring,
+                elig_actor,
+                elig_critic,
+                feat,
+                prev_critic_feat,
+                prev_feat,
+                prev_df,
+                prev_act,
+                noise,
+                v_prev,
+                has_prev,
+                tick: s_tick,
+                rng: Rng64 { s0: rs0, s1: rs1 },
+            }
         }
     } else {
         StriatalOfc::from_seed(seed)
@@ -1767,6 +2854,113 @@ pub fn shadow_decode_organism(
             }
             (0.0, 0.0, 0.0, mean_interventional_agency.clamp(-0.20, 1.0))
         };
+    if version >= 7 {
+        striatal.total_cols = tr.read_u32()?;
+        if striatal.total_cols == 0 || (striatal.total_cols as usize) > MAX_CORTICAL_COLUMNS {
+            return Err(PersistError::InvalidTopology);
+        }
+        striatal.dend_mismatch_streak = tr.read_u8()?;
+        let mut tr_hot_col_id = [0u32; OFC_CONTEXTS];
+        for dst in &mut tr_hot_col_id {
+            *dst = tr.read_u32()?;
+        }
+        if external_slabs && tr_hot_col_id != striatal.hot_col_id {
+            return Err(PersistError::InvalidTopology);
+        }
+        striatal.hot_col_id = tr_hot_col_id;
+        for dst in &mut striatal.hot_last_use {
+            *dst = tr.read_u64()?;
+        }
+        for c in 0..OFC_CONTEXTS {
+            if !external_slabs || striatal.ctx_has_cons[c] == 0 {
+                for dst in &mut striatal.hot_dend_ch[c] {
+                    *dst = tr.read_u32()?;
+                }
+                for dst in &mut striatal.hot_dend_env[c] {
+                    let ev = tr.read_u8()?;
+                    if ev > 3 {
+                        return Err(PersistError::InvalidTopology);
+                    }
+                    *dst = ev;
+                }
+                for dst in &mut striatal.hot_dend_key[c] {
+                    *dst = tr.read_f32()?;
+                }
+            }
+        }
+        for dst in &mut striatal.pore_carr_mean {
+            *dst = tr.read_f32()?;
+        }
+        for dst in &mut striatal.pore_carr_var {
+            *dst = tr.read_f32()?;
+        }
+        for dst in &mut striatal.pore_prev_x {
+            *dst = tr.read_f32()?;
+        }
+        for dst in &mut striatal.pore_var_dx {
+            *dst = tr.read_f32()?;
+        }
+        for dst in &mut striatal.pore_orb_err {
+            *dst = tr.read_f32()?;
+        }
+        let paged_len = tr.read_u32()? as usize;
+        if paged_len > MAX_CORTICAL_COLUMNS {
+            return Err(PersistError::OversizedInput);
+        }
+        let mut paged_cols = Vec::with_capacity(paged_len);
+        for _ in 0..paged_len {
+            let col_id = tr.read_u32()?;
+            let r_peak = tr.read_f32()?;
+            let mut dend_ch = [u32::MAX; STRIATAL_PORES];
+            for dst in &mut dend_ch {
+                *dst = tr.read_u32()?;
+            }
+            let mut dend_env = [0u8; STRIATAL_PORES];
+            for dst in &mut dend_env {
+                let ev = tr.read_u8()?;
+                if ev > 3 {
+                    return Err(PersistError::InvalidTopology);
+                }
+                *dst = ev;
+            }
+            let mut dend_key = [0.0_f32; STRIATAL_PORES];
+            for dst in &mut dend_key {
+                *dst = tr.read_f32()?;
+            }
+            let slab_crc32c = tr.read_u32()?;
+            let sb = if !external_slabs {
+                let sb_len = tr.read_u32()? as usize;
+                if sb_len > MAX_SLAB_FILE_BYTES {
+                    return Err(PersistError::OversizedInput);
+                }
+                tr.take(sb_len)?.to_vec()
+            } else {
+                let pdir = pages_dir.ok_or(PersistError::IoFailure)?;
+                read_bounded_file(&slab_path_for(pdir, col_id), MAX_SLAB_FILE_BYTES)?
+            };
+            let dec = decode_column_slab(&sb)?;
+            if dec.col_id != col_id || sb.len() < 4 {
+                return Err(PersistError::InvalidTopology);
+            }
+            let actual_crc = crc32c(&sb[..sb.len() - 4]);
+            if actual_crc != slab_crc32c {
+                return Err(PersistError::ChecksumMismatch);
+            }
+            paged_cols.push(PagedColumnEntry {
+                col_id,
+                r_peak,
+                dend_ch,
+                dend_env,
+                dend_key,
+                slab_crc32c,
+                slab_bytes: sb,
+            });
+        }
+        if !paged_cols.windows(2).all(|w| w[0].col_id < w[1].col_id) {
+            return Err(PersistError::InvalidTopology);
+        }
+        striatal.paged_cols = paged_cols;
+    }
     if tr.remaining() != 0 {
         return Err(PersistError::InvalidTopology);
     }
@@ -2082,6 +3276,38 @@ fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), PersistError> {
     Ok(())
 }
 
+fn sync_dir_if_present(dir: &Path) {
+    if !dir.as_os_str().is_empty()
+        && let Ok(dir_file) = File::open(dir)
+    {
+        let _ = dir_file.sync_all();
+    }
+}
+
+fn copy_pages_dir_atomic(src_pages: &Path, dst_pages: &Path) -> Result<(), PersistError> {
+    let stage = pages_dir_for(dst_pages);
+    let _ = fs::remove_dir_all(&stage);
+    fs::create_dir_all(&stage).map_err(|_| PersistError::IoFailure)?;
+    let rd = fs::read_dir(src_pages).map_err(|_| PersistError::IoFailure)?;
+    for ent_res in rd {
+        let ent = ent_res.map_err(|_| PersistError::IoFailure)?;
+        let ftype = ent.file_type().map_err(|_| PersistError::IoFailure)?;
+        if !ftype.is_file() {
+            continue;
+        }
+        let raw = read_bounded_file(&ent.path(), MAX_SLAB_FILE_BYTES)?;
+        write_synced_file(&stage.join(ent.file_name()), &raw)?;
+    }
+    sync_dir_if_present(&stage);
+    let _ = fs::remove_dir_all(dst_pages);
+    if let Err(err) = fs::rename(&stage, dst_pages) {
+        let _ = fs::remove_dir_all(&stage);
+        let _ = err;
+        return Err(PersistError::IoFailure);
+    }
+    Ok(())
+}
+
 pub fn save_transactional_files(
     org: &Alpha11Organism,
     primary: &Path,
@@ -2091,9 +3317,6 @@ pub fn save_transactional_files(
     if org.poisoned {
         return Err(PersistError::PoisonedAfterCorruption);
     }
-    let bytes = encode_organism(org)?;
-    // Fail closed if the freshly encoded generation does not shadow-decode cleanly.
-    shadow_decode_organism(&bytes, org.config.max_state_bytes)?;
 
     for p in [tmp, primary, prev] {
         if let Some(parent) = p.parent()
@@ -2103,28 +3326,93 @@ pub fn save_transactional_files(
         }
     }
 
-    // Rotate `primary -> prev` ONLY after `primary` passes a bounded read + full CRC32C shadow decode.
-    // A corrupted `primary` is never allowed to overwrite the last known-good `prev` generation.
+    let tmp_pages = pages_dir_for(tmp);
+    let primary_pages = pages_dir_for(primary);
+    let prev_pages = pages_dir_for(prev);
+    let _ = fs::remove_dir_all(&tmp_pages);
+    fs::create_dir_all(&tmp_pages).map_err(|_| PersistError::IoFailure)?;
+
+    let write_res = (|| -> Result<Vec<u8>, PersistError> {
+        let st = &org.tubes.striatal;
+        for c in 0..OFC_CONTEXTS {
+            if st.ctx_has_cons[c] != 0 {
+                let (sb, _) = st.encode_hot_slot_slab(c)?;
+                let _ = decode_column_slab(&sb)?;
+                write_synced_file(&slab_path_for(&tmp_pages, st.hot_col_id[c]), &sb)?;
+            }
+        }
+        for pe in &st.paged_cols {
+            let dec = decode_column_slab(&pe.slab_bytes)?;
+            if dec.col_id != pe.col_id || pe.slab_bytes.len() < 4 {
+                return Err(PersistError::InvalidTopology);
+            }
+            let crc = crc32c(&pe.slab_bytes[..pe.slab_bytes.len() - 4]);
+            if crc != pe.slab_crc32c {
+                return Err(PersistError::ChecksumMismatch);
+            }
+            write_synced_file(&slab_path_for(&tmp_pages, pe.col_id), &pe.slab_bytes)?;
+        }
+        sync_dir_if_present(&tmp_pages);
+
+        let bytes = encode_organism_with_mode(org, true)?;
+        let shadow =
+            shadow_decode_organism_with_pages(&bytes, org.config.max_state_bytes, Some(&tmp_pages))?;
+        if shadow.learned_parameter_hash() != org.learned_parameter_hash() {
+            return Err(PersistError::InvalidTopology);
+        }
+        Ok(bytes)
+    })();
+
+    let bytes = match write_res {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&tmp_pages);
+            return Err(e);
+        }
+    };
+
+    // Rotate primary -> prev ONLY after primary + primary.pages pass bounded read + full CRC32C shadow decode.
     if primary.exists() {
         let cap = org
             .config
             .max_state_bytes
             .saturating_add(HEADER_OVERHEAD_MARGIN);
         if let Ok(existing) = read_bounded_file(primary, cap)
-            && shadow_decode_organism(&existing, org.config.max_state_bytes).is_ok()
+            && shadow_decode_organism_with_pages(
+                &existing,
+                org.config.max_state_bytes,
+                Some(&primary_pages),
+            )
+            .is_ok()
         {
-            write_synced_file(tmp, &existing)?;
-            fs::rename(tmp, prev).map_err(|_| PersistError::IoFailure)?;
+            if primary_pages.exists() {
+                if let Err(e) = copy_pages_dir_atomic(&primary_pages, &prev_pages) {
+                    let _ = fs::remove_dir_all(&tmp_pages);
+                    return Err(e);
+                }
+            } else {
+                let _ = fs::remove_dir_all(&prev_pages);
+            }
+            if let Err(e) = write_synced_file(tmp, &existing) {
+                let _ = fs::remove_dir_all(&tmp_pages);
+                return Err(e);
+            }
+            if fs::rename(tmp, prev).is_err() {
+                let _ = fs::remove_dir_all(&tmp_pages);
+                return Err(PersistError::IoFailure);
+            }
         }
     }
 
+    let _ = fs::remove_dir_all(&primary_pages);
+    if fs::rename(&tmp_pages, &primary_pages).is_err() {
+        let _ = fs::remove_dir_all(&tmp_pages);
+        return Err(PersistError::IoFailure);
+    }
     write_synced_file(tmp, &bytes)?;
     fs::rename(tmp, primary).map_err(|_| PersistError::IoFailure)?;
-    if let Some(parent) = primary.parent()
-        && !parent.as_os_str().is_empty()
-        && let Ok(dir_file) = File::open(parent)
-    {
-        let _ = dir_file.sync_all();
+    if let Some(parent) = primary.parent() {
+        sync_dir_if_present(parent);
     }
     Ok(())
 }
@@ -2141,9 +3429,15 @@ pub fn load_transactional_files(
         .config
         .max_state_bytes
         .saturating_add(HEADER_OVERHEAD_MARGIN);
+    let primary_pages = pages_dir_for(primary);
+    let prev_pages = pages_dir_for(prev);
 
     let primary_err = match read_bounded_file(primary, cap) {
-        Ok(bytes) => match shadow_decode_organism(&bytes, org.config.max_state_bytes) {
+        Ok(bytes) => match shadow_decode_organism_with_pages(
+            &bytes,
+            org.config.max_state_bytes,
+            Some(&primary_pages),
+        ) {
             Ok(decoded) => {
                 *org = decoded;
                 org.poisoned = false;
@@ -2155,7 +3449,11 @@ pub fn load_transactional_files(
     };
 
     match read_bounded_file(prev, cap) {
-        Ok(prev_bytes) => match shadow_decode_organism(&prev_bytes, org.config.max_state_bytes) {
+        Ok(prev_bytes) => match shadow_decode_organism_with_pages(
+            &prev_bytes,
+            org.config.max_state_bytes,
+            Some(&prev_pages),
+        ) {
             Ok(decoded) => {
                 *org = decoded;
                 org.poisoned = false;

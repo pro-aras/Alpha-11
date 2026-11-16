@@ -366,7 +366,7 @@ impl OrganismEngine for Alpha11Organism {
             self.mode,
         );
 
-        let (striatal_pulse, ofc_splits) = self.tubes.step_striatal_ofc(
+        let (striatal_pulse, ofc_splits) = match self.tubes.step_striatal_ofc(
             view.ambient_in,
             view.metabolic_influx,
             view.tissue_stress,
@@ -374,7 +374,13 @@ impl OrganismEngine for Alpha11Organism {
             emb_eco,
             &mut self.membrane,
             self.mode,
-        );
+        ) {
+            Ok(pair) => pair,
+            Err(err) => {
+                self.poisoned = true;
+                return Err(err);
+            }
+        };
         self.contradiction_splits = self.contradiction_splits.saturating_add(ofc_splits);
 
         if self.mode == ControlMode::Natural {
@@ -1261,6 +1267,49 @@ mod tests {
         full
     }
 
+    fn downgrade_v7_checkpoint_to_v6(v7: &[u8]) -> Vec<u8> {
+        use crate::persistence::TAG_TUBE;
+        let rd = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        let payload_end = v7.len() - 4;
+        let mut slabs: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut pos = 24usize;
+        while pos < payload_end {
+            let tag = rd(v7, pos);
+            let len = rd(v7, pos + 4) as usize;
+            let src = &v7[pos + 8..pos + 8 + len];
+            let payload = if tag == TAG_TUBE {
+                assert_eq!(src[8], 0);
+                let v7_trailer = 3_641usize;
+                assert!(src.len() > 9 + v7_trailer);
+                let mut q = src[..8].to_vec();
+                q.extend_from_slice(&src[9..src.len() - v7_trailer]);
+                q
+            } else {
+                src.to_vec()
+            };
+            slabs.push((tag, payload));
+            pos += 8 + len + 4;
+        }
+        assert_eq!(slabs.len(), 6);
+        let mut slabs_buf = Vec::new();
+        for (tag, p) in &slabs {
+            let start = slabs_buf.len();
+            slabs_buf.extend_from_slice(&tag.to_le_bytes());
+            slabs_buf.extend_from_slice(&(p.len() as u32).to_le_bytes());
+            slabs_buf.extend_from_slice(p);
+            let scrc = crc32c(&slabs_buf[start..]);
+            slabs_buf.extend_from_slice(&scrc.to_le_bytes());
+        }
+        let mut full = v7[..8].to_vec();
+        full.extend_from_slice(&6u32.to_le_bytes());
+        full.extend_from_slice(&v7[12..16]);
+        full.extend_from_slice(&(slabs_buf.len() as u64).to_le_bytes());
+        full.extend_from_slice(&slabs_buf);
+        let fcrc = crc32c(&full);
+        full.extend_from_slice(&fcrc.to_le_bytes());
+        full
+    }
+
     #[test]
     fn v3_checkpoint_upgrades_to_v4_and_keeps_stepping() {
         let cfg = OrganismConfig::default();
@@ -1286,8 +1335,11 @@ mod tests {
         for t in 0..150u64 {
             let _ = drive(&mut org, t, &mut ambient);
         }
-        let v6 = org.encode_checkpoint().expect("encode v6");
+        let v7 = org.encode_checkpoint().expect("encode v7");
+        assert_eq!(u32::from_le_bytes([v7[8], v7[9], v7[10], v7[11]]), 7);
+        let v6 = downgrade_v7_checkpoint_to_v6(&v7);
         assert_eq!(u32::from_le_bytes([v6[8], v6[9], v6[10], v6[11]]), 6);
+        assert!(v6.len() < v7.len());
         let v5 = downgrade_v6_checkpoint_to_v5(&v6);
         assert_eq!(u32::from_le_bytes([v5[8], v5[9], v5[10], v5[11]]), 5);
         assert!(v5.len() < v6.len());
@@ -1297,6 +1349,10 @@ mod tests {
         let v3 = downgrade_v4_checkpoint_to_v3(&v4);
         assert_eq!(u32::from_le_bytes([v3[8], v3[9], v3[10], v3[11]]), 3);
         assert!(v3.len() < v4.len());
+
+        let mut upgraded_v6 = Alpha11Organism::new(1, cfg);
+        upgraded_v6.restore_checkpoint(&v6).expect("v6 restore");
+        assert!(!upgraded_v6.is_poisoned());
 
         let mut upgraded_v5 = Alpha11Organism::new(1, cfg);
         upgraded_v5.restore_checkpoint(&v5).expect("v5 restore");
@@ -1316,7 +1372,7 @@ mod tests {
         assert_eq!(a.tube_count, b.tube_count);
 
         let re = upgraded.encode_checkpoint().expect("re-encode");
-        assert_eq!(u32::from_le_bytes([re[8], re[9], re[10], re[11]]), 6);
+        assert_eq!(u32::from_le_bytes([re[8], re[9], re[10], re[11]]), 7);
         let mut corrupt = v3.clone();
         let mid = corrupt.len() / 2;
         corrupt[mid] ^= 0x01;
@@ -1330,6 +1386,115 @@ mod tests {
             let _ = drive(&mut upgraded, t, &mut ambient);
         }
         assert_eq!(upgraded.snapshot().tick, a.tick + 80);
+    }
+
+    #[test]
+    fn column_slab_crc32c_roundtrip_and_bitflip_reject() {
+        use crate::tubes::{
+            COL_SLAB_MAGIC, STRIATAL_CUES, STRIATAL_FEATS, STRIATAL_PORES, decode_column_slab,
+            encode_column_slab,
+        };
+        let na = 12usize;
+        let dend_ch: [u32; STRIATAL_PORES] = std::array::from_fn(|i| (i * 3) as u32);
+        let dend_env: [u8; STRIATAL_PORES] = std::array::from_fn(|i| (i % 4) as u8);
+        let dend_key: [f32; STRIATAL_PORES] =
+            std::array::from_fn(|i| ((i as f32) * 0.02 - 0.5).clamp(-1.0, 1.0));
+        let w_cons: Vec<f32> = (0..(na * STRIATAL_CUES))
+            .map(|i| ((i as f32) * 0.001).sin() * 0.3)
+            .collect();
+        let v_cons: [f32; STRIATAL_FEATS] =
+            std::array::from_fn(|i| ((i as f32) * 0.03).cos() * 0.1);
+        let q_cons: [f32; STRIATAL_CUES] =
+            std::array::from_fn(|i| ((i as f32) * 0.05).sin() * 0.08);
+        let fwd_j_cons: Vec<f32> = (0..(STRIATAL_CUES * na))
+            .map(|i| ((i as f32) * 0.002).cos() * 0.2)
+            .collect();
+
+        let (mut bytes, crc) = encode_column_slab(
+            7,
+            na,
+            1_450,
+            0.095,
+            0.042,
+            &dend_ch,
+            &dend_env,
+            &dend_key,
+            &w_cons,
+            &v_cons,
+            &q_cons,
+            &fwd_j_cons,
+        )
+        .expect("encode slab");
+        assert_eq!(
+            u64::from_le_bytes(bytes[0..8].try_into().expect("magic")),
+            COL_SLAB_MAGIC
+        );
+        let dec = decode_column_slab(&bytes).expect("decode slab");
+        assert_eq!(dec.col_id, 7);
+        assert_eq!(dec.na, na);
+        assert_eq!(dec.ticks, 1_450);
+        assert_eq!(dec.dend_ch, dend_ch);
+        assert_eq!(dec.dend_env, dend_env);
+        assert_eq!(dec.w_cons, w_cons);
+        assert_eq!(dec.fwd_j_cons, fwd_j_cons);
+        assert_eq!(crc32c(&bytes[..bytes.len() - 4]), crc);
+
+        bytes[20] ^= 0x01;
+        assert_eq!(decode_column_slab(&bytes), Err(PersistError::ChecksumMismatch));
+    }
+
+    #[test]
+    fn prony_harmonic_dc_recovers_exact_mean_and_rejects_steps() {
+        use crate::tubes::harmonic_dc_from_history;
+        let mu_true = 0.43_f32;
+        let amp = 0.21_f32;
+        let omega = 0.082_f32;
+        let mut hist = [0.0_f32; 16];
+        for (k, slot) in hist.iter_mut().enumerate() {
+            *slot = mu_true + amp * (omega * (k as f32) + 1.1).sin();
+        }
+        let (est, ok) = harmonic_dc_from_history(&hist, 0, 64);
+        assert!(ok);
+        assert!((est - mu_true).abs() < 1.0e-4);
+
+        let mut step_hist = [-0.2_f32; 16];
+        step_hist[12] = 0.65;
+        step_hist[13] = 0.65;
+        step_hist[14] = 0.65;
+        step_hist[15] = 0.65;
+        let (step_est, step_ok) = harmonic_dc_from_history(&step_hist, 0, 64);
+        assert!(!step_ok);
+        assert!((step_est - 0.65).abs() < 1.0e-5);
+
+        let mut post_jump = [-0.30_f32; 16];
+        for (j, slot) in post_jump[10..16].iter_mut().enumerate() {
+            *slot = 0.52 + 0.18 * (0.09 * (j as f32) + 0.4).sin();
+        }
+        let (pj_est, pj_ok) = harmonic_dc_from_history(&post_jump, 0, 64);
+        assert!(pj_ok);
+        assert!((pj_est - 0.52).abs() < 2.0e-3);
+
+        let mut subtle_t7 = [0.0_f32; 16];
+        for (k, slot) in subtle_t7[..8].iter_mut().enumerate() {
+            *slot = 0.60 + 0.22 * (0.065 * ((k + 808) as f32) + 0.30).sin();
+        }
+        for (j, slot) in subtle_t7[8..16].iter_mut().enumerate() {
+            *slot = 0.60 + 0.22 * (0.065 * (j as f32) + 0.49).sin();
+        }
+        let (st_est, st_ok) = harmonic_dc_from_history(&subtle_t7, 0, 64);
+        assert!(st_ok);
+        assert!((st_est - 0.60).abs() < 0.015);
+    }
+
+    #[test]
+    fn cell_arena_k_wta_bounded_at_64() {
+        let mut rng = Rng64::from_seed(123);
+        let mut arena = CellArena::new(600, 1_024, &mut rng);
+        let ext = vec![0.9_f32; 600];
+        let pred = vec![0.0_f32; 600];
+        let troph = vec![0.5_f32; 600];
+        arena.integrate_step(&ext, &pred, &troph, 0.0, ControlMode::Natural);
+        assert!(arena.active_indices.len() <= 64);
     }
 
     #[test]

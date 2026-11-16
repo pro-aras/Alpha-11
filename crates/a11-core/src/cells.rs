@@ -85,7 +85,7 @@ impl CellArena {
             slots,
             free_list: Vec::new(),
             alive_count: count,
-            active_indices: Vec::with_capacity(96),
+            active_indices: Vec::with_capacity(64),
             min_cells_floor: count,
             theta_phase: init_theta,
             error_reversal_gate: 0.0,
@@ -103,7 +103,7 @@ impl CellArena {
     #[must_use]
     pub fn k_winners_target(&self) -> usize {
         let base = (self.alive_count / 2).max(self.alive_count.min(24));
-        base.clamp(4, 96).min(self.alive_count.max(1))
+        base.clamp(4, 64).min(self.alive_count.max(1))
     }
 
     pub fn integrate_step(
@@ -247,8 +247,38 @@ impl CellArena {
         };
         self.active_indices.clear();
         if candidates.len() > k {
-            candidates.select_nth_unstable_by(k - 1, |a, b| compare_candidate(b, a));
-            candidates.truncate(k);
+            if self.alive_count > 128 {
+                let l4_floor = self.min_cells_floor.min(self.alive_count);
+                let l4_guard = (k / 3).min(l4_floor / 2);
+                let mut l4_sensory: Vec<(f32, u32)> = Vec::with_capacity(l4_floor);
+                let mut rest_pool: Vec<(f32, u32)> = Vec::with_capacity(candidates.len());
+                for &(sal, idx) in &candidates {
+                    let ci = idx as usize;
+                    if ci < self.min_cells_floor && self.slots[ci].sensory_trophic_ema > 0.02 {
+                        l4_sensory.push((sal, idx));
+                    } else {
+                        rest_pool.push((sal, idx));
+                    }
+                }
+                l4_sensory.sort_unstable_by(|a, b| compare_candidate(b, a));
+                let taken_l4 = l4_sensory.len().min(l4_guard);
+                for &item in &l4_sensory[taken_l4..] {
+                    rest_pool.push(item);
+                }
+                let rem_k = k.saturating_sub(taken_l4);
+                if rest_pool.len() > rem_k && rem_k > 0 {
+                    rest_pool.select_nth_unstable_by(rem_k - 1, |a, b| compare_candidate(b, a));
+                    rest_pool.truncate(rem_k);
+                } else if rem_k == 0 {
+                    rest_pool.clear();
+                }
+                candidates.clear();
+                candidates.extend_from_slice(&l4_sensory[..taken_l4]);
+                candidates.extend_from_slice(&rest_pool);
+            } else {
+                candidates.select_nth_unstable_by(k - 1, |a, b| compare_candidate(b, a));
+                candidates.truncate(k);
+            }
         }
         candidates.sort_unstable_by(|a, b| compare_candidate(b, a));
         for &(_, idx) in &candidates {
@@ -262,11 +292,26 @@ impl CellArena {
                     *flag = true;
                 }
             }
-            let target_rate = (k as f32) / (self.alive_count.max(1) as f32);
+            let flat_rate = (k as f32) / (self.alive_count.max(1) as f32);
+            let (l4_rate, assoc_rate) = if self.alive_count > 128 {
+                let l4_n = self.min_cells_floor.min(self.alive_count);
+                let assoc_n = self.alive_count.saturating_sub(l4_n).max(1);
+                let r_l4 = (0.44 * ((k as f32) / 64.0)).clamp(flat_rate, 0.50);
+                let rem_spikes = ((k as f32) - r_l4 * (l4_n as f32)).max(4.0);
+                let r_as = (rem_spikes / (assoc_n as f32)).clamp(0.001, 0.50);
+                (r_l4, r_as)
+            } else {
+                (flat_rate, flat_rate)
+            };
             for (i, cell) in self.slots.iter_mut().enumerate() {
                 if !cell.alive {
                     continue;
                 }
+                let target_rate = if i < self.min_cells_floor {
+                    l4_rate
+                } else {
+                    assoc_rate
+                };
                 let fired = if is_winner[i] { 1.0 } else { 0.0 };
                 cell.firing_rate_ema =
                     sanitize_clamp(0.97 * cell.firing_rate_ema + 0.03 * fired, 0.0, 1.0);
