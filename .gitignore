@@ -6,6 +6,8 @@
 *.chk
 *.prev
 *.tmp
+*.pages/
+*.slab
 *.wav
 .env
 .env.*
@@ -13,4 +15,5 @@
 /.judge_locked
 /.vault_authorized
 /.vault_authorized_next
+/.vault_authorized_phase1b
 .DS_Store

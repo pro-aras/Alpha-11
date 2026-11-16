@@ -1,0 +1,4 @@
+judge=crates/a11-observe/src/bin/alpha11-phase1b.rs
+sha256=fcf3492ae5198283aa37123e561180b8cdc6846ba132f691bc7feaf870dd32c5
+base=e65d93a
+baseline=FAIL(2/12_pass:G3,I1;G1a=-96.58,G2_fg=-0.9866_peak=-9.223,G4_shuf_ag=0.1129,G5=+0.16_p=0.88,I2_max_active=96,I3_ckpt=798381_0slabs,I4_ver=6)
