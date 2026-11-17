@@ -1499,8 +1499,30 @@ fn main() -> ExitCode {
             let _ = fs::write(&marker, b"opened\n");
             (500..530).collect()
         }
+        "heldout2" => {
+            if !open_vault {
+                eprintln!("Refusing: heldout2 requires --open-vault.");
+                return ExitCode::from(2);
+            }
+            if !ws_root.join(".vault_authorized_phase1b_v2").exists() {
+                eprintln!("Refusing: .vault_authorized_phase1b_v2 missing in workspace root.");
+                return ExitCode::from(2);
+            }
+            let dir = ws_root.join("observations/heldout_vault");
+            let _ = fs::create_dir_all(&dir);
+            let marker = dir.join("phase1b_v2.opened");
+            if marker.exists() {
+                eprintln!(
+                    "Refusing: Phase-1B held-out-v2 vault already opened ({}).",
+                    marker.display()
+                );
+                return ExitCode::from(3);
+            }
+            let _ = fs::write(&marker, b"opened\n");
+            (600..630).collect()
+        }
         other => {
-            eprintln!("Unknown split '{other}' (expected dev, dev30, or heldout)");
+            eprintln!("Unknown split '{other}' (expected dev, dev30, heldout, or heldout2)");
             return ExitCode::from(2);
         }
     };
