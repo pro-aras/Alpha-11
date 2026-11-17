@@ -921,6 +921,7 @@ impl StriatalOfc {
     fn consolidate_active_context_with_dend(
         &mut self,
         tonic_valid: &[bool; STRIATAL_PORES],
+        prony_valid: &[bool; STRIATAL_PORES],
         tonic_now: &[f32; STRIATAL_PORES],
         apical_carrier: &[bool; STRIATAL_PORES],
         feat_active: &[bool; STRIATAL_PORES],
@@ -940,6 +941,8 @@ impl StriatalOfc {
         let mut env_cnt = 0usize;
         for p in 0..STRIATAL_PORES {
             if tonic_valid[p]
+                && prony_valid[p]
+                && self.pore_orb_err[p] < 0.38
                 && self.pore_ch[p] != u32::MAX
                 && (self.consolidated_role_for_channel(self.pore_ch[p]) & 1) != 0
                 && env_cnt < 16
@@ -951,6 +954,8 @@ impl StriatalOfc {
         for p in 0..STRIATAL_PORES {
             if !env_pick[p]
                 && tonic_valid[p]
+                && prony_valid[p]
+                && self.pore_orb_err[p] < 0.38
                 && self.pore_ch[p] != u32::MAX
                 && self.pore_age[p] >= 36
                 && apical_carrier[p]
@@ -968,15 +973,21 @@ impl StriatalOfc {
                 continue;
             }
             let is_env = env_pick[p];
-            let prev_same_ch = prev_had && self.hot_dend_ch[c][p] == self.pore_ch[p];
+            let prev_same_ch = prev_had
+                && self.hot_dend_ch[c][p] == self.pore_ch[p]
+                && (self.hot_dend_env[c][p] & 1) != 0;
             let dc_est = sanitize_clamp(tonic_now[p], -1.0, 1.0);
             self.hot_dend_ch[c][p] = self.pore_ch[p];
             self.hot_dend_env[c][p] =
                 u8::from(is_env) | (u8::from(!is_env && feat_active[p]) << 1);
-            self.hot_dend_key[c][p] = if prev_same_ch {
-                sanitize_clamp(0.50 * self.hot_dend_key[c][p] + 0.50 * dc_est, -1.0, 1.0)
+            self.hot_dend_key[c][p] = if is_env {
+                if prev_same_ch {
+                    sanitize_clamp(0.50 * self.hot_dend_key[c][p] + 0.50 * dc_est, -1.0, 1.0)
+                } else {
+                    dc_est
+                }
             } else {
-                dc_est
+                0.0
             };
         }
         self.ctx_has_cons[c] = 1;
@@ -7882,6 +7893,19 @@ impl TubeGraph {
             let raw_x = sanitize_clamp(ambient_in.get(ch_u).copied().unwrap_or(0.0), -1.0, 1.0);
             raw_x_arr[p] = raw_x;
 
+            let mut pr_ok = false;
+            if membrane.sensor_pores[p].age_ticks >= 1 {
+                let (dc_v, ok) = harmonic_dc_from_history(
+                    &membrane.sensor_pores[p].history,
+                    membrane.sensor_pores[p].hist_head,
+                    membrane.sensor_pores[p].age_ticks,
+                );
+                tonic_now[p] = dc_v;
+                tonic_valid[p] = true;
+                prony_valid_arr[p] = ok;
+                pr_ok = ok;
+            }
+
             if is_plastic {
                 if self.striatal.pore_age[p] == 0 {
                     self.striatal.pore_carr_mean[p] = raw_x;
@@ -7907,22 +7931,16 @@ impl TubeGraph {
                         sanitize(0.96 * self.striatal.pore_var_dx[p] + 0.04 * dx * dx);
                     let r2 = (mid * mid) / (2.0 * self.striatal.pore_carr_var[p].max(1.0e-7))
                         + (dx * dx) / (2.0 * self.striatal.pore_var_dx[p].max(1.0e-8));
-                    let r_dev = (r2 - 1.0).abs().min(4.0);
+                    let r_dev_raw = (r2 - 1.0).abs().min(4.0);
+                    let r_dev = if membrane.sensor_pores[p].age_ticks >= 16 && !pr_ok {
+                        r_dev_raw.max(1.25)
+                    } else {
+                        r_dev_raw
+                    };
                     self.striatal.pore_orb_err[p] =
                         sanitize(0.96 * self.striatal.pore_orb_err[p] + 0.04 * r_dev);
                     self.striatal.pore_prev_x[p] = raw_x;
                 }
-            }
-
-            if membrane.sensor_pores[p].age_ticks >= 1 {
-                let (dc_v, pr_ok) = harmonic_dc_from_history(
-                    &membrane.sensor_pores[p].history,
-                    membrane.sensor_pores[p].hist_head,
-                    membrane.sensor_pores[p].age_ticks,
-                );
-                tonic_now[p] = dc_v;
-                tonic_valid[p] = true;
-                prony_valid_arr[p] = pr_ok;
             }
 
             let is_white = ch_u < n_scout
@@ -7960,7 +7978,10 @@ impl TubeGraph {
         if carrier_bank {
             for p in 0..STRIATAL_PORES {
                 apical_carrier[p] = quad_cand[p]
-                    || (self.striatal.consolidated_role_for_channel(live_pore_ch[p]) & 1) != 0;
+                    || ((self.striatal.consolidated_role_for_channel(live_pore_ch[p]) & 1) != 0
+                        && (!is_plastic
+                            || self.striatal.pore_age[p] < 36
+                            || self.striatal.pore_orb_err[p] < 0.42));
             }
             if is_plastic && n_quad_cand > 16 && (self.striatal.tick & 3) == 0 {
                 let mut victim_p: Option<usize> = None;
@@ -8156,10 +8177,10 @@ impl TubeGraph {
                     n_ro_prony += 1;
                 }
             }
-            let (ro_mad_max, ro_cos_min) = if n_ro_prony >= 5 {
-                (0.115, 0.72)
+            let (ro_mad_max, ro_cos_min, ro_valid) = if n_ro_prony >= 5 {
+                (0.085, 0.80, &prony_valid_arr)
             } else {
-                (0.28, 0.56)
+                (0.28, 0.56, &tonic_valid)
             };
             let mut best_hot: Option<(usize, f32)> = None;
             for c in 0..num_c_ro {
@@ -8171,7 +8192,7 @@ impl TubeGraph {
                     &self.striatal.hot_dend_env[c],
                     &self.striatal.hot_dend_key[c],
                     &live_pore_ch,
-                    &tonic_valid,
+                    ro_valid,
                     &tonic_now,
                 );
                 if cnt >= 5 && mad < ro_mad_max && cos > ro_cos_min {
@@ -8188,7 +8209,7 @@ impl TubeGraph {
                     &entry.dend_env,
                     &entry.dend_key,
                     &live_pore_ch,
-                    &tonic_valid,
+                    ro_valid,
                     &tonic_now,
                 );
                 if cnt >= 5 && mad < ro_mad_max && cos > ro_cos_min {
@@ -8431,6 +8452,11 @@ impl TubeGraph {
             self.striatal.r_med200 =
                 sanitize(0.992 * self.striatal.r_med200 + 0.008 * reward).min(0.022);
 
+            let pl_match_valid = if n_prony_env >= 5 {
+                &prony_valid_arr
+            } else {
+                &tonic_valid
+            };
             let (act_env_cnt, act_mad, act_cos) = if self.striatal.ctx_has_cons[act_c] != 0 {
                 let cur_ch = self.striatal.pore_ch;
                 StriatalOfc::dendritic_match_stats(
@@ -8438,13 +8464,13 @@ impl TubeGraph {
                     &self.striatal.hot_dend_env[act_c],
                     &self.striatal.hot_dend_key[act_c],
                     &cur_ch,
-                    &tonic_valid,
+                    pl_match_valid,
                     &tonic_now,
                 )
             } else {
                 (0, 0.0, 1.0)
             };
-            let env_mismatch_raw = act_env_cnt >= 5 && (act_mad > 0.115 || act_cos < 0.76);
+            let env_mismatch_raw = act_env_cnt >= 5 && (act_mad > 0.070 || act_cos < 0.86);
             act_mismatch_inst = env_mismatch_raw && n_prony_env >= 5;
             if act_mismatch_inst {
                 self.striatal.dend_mismatch_streak =
@@ -8505,6 +8531,7 @@ impl TubeGraph {
                             self.striatal.ctx_r_peak[act_c] = self.striatal.r_med200;
                             self.striatal.consolidate_active_context_with_dend(
                                 &tonic_valid,
+                                &prony_valid_arr,
                                 &tonic_now,
                                 &apical_carrier,
                                 &basal_coherent,
@@ -8524,6 +8551,7 @@ impl TubeGraph {
                             self.striatal.ctx_r_peak[act_c].max(self.striatal.r_med200);
                         self.striatal.consolidate_active_context_with_dend(
                             &tonic_valid,
+                            &prony_valid_arr,
                             &tonic_now,
                             &apical_carrier,
                             &basal_coherent,
@@ -8535,6 +8563,7 @@ impl TubeGraph {
                         self.striatal.ctx_r_peak[act_c] = self.striatal.r_med200;
                         self.striatal.consolidate_active_context_with_dend(
                             &tonic_valid,
+                            &prony_valid_arr,
                             &tonic_now,
                             &apical_carrier,
                             &basal_coherent,
@@ -8557,6 +8586,7 @@ impl TubeGraph {
                         self.striatal.ctx_r_peak[act_c].max(self.striatal.r_med200);
                     self.striatal.consolidate_active_context_with_dend(
                         &tonic_valid,
+                        &prony_valid_arr,
                         &tonic_now,
                         &apical_carrier,
                         &feat_active,
@@ -8573,6 +8603,7 @@ impl TubeGraph {
                     self.striatal.ctx_r_peak[act_c] = self.striatal.r_med200;
                     self.striatal.consolidate_active_context_with_dend(
                         &tonic_valid,
+                        &prony_valid_arr,
                         &tonic_now,
                         &apical_carrier,
                         &feat_active,
@@ -8607,10 +8638,10 @@ impl TubeGraph {
                                 &self.striatal.hot_dend_env[c],
                                 &self.striatal.hot_dend_key[c],
                                 &cur_ch,
-                                &tonic_valid,
+                                pl_match_valid,
                                 &tonic_now,
                             );
-                            if cnt >= 5 && mad < 0.065 && cos > 0.90 {
+                            if cnt >= 5 && mad < 0.055 && cos > 0.90 {
                                 let sc = cos - 2.0 * mad;
                                 if best_hot.is_none_or(|(_, b)| sc > b) {
                                     best_hot = Some((c, sc));
@@ -8625,10 +8656,10 @@ impl TubeGraph {
                             &entry.dend_env,
                             &entry.dend_key,
                             &cur_ch,
-                            &tonic_valid,
+                            pl_match_valid,
                             &tonic_now,
                         );
-                        if cnt >= 5 && mad < 0.065 && cos > 0.90 {
+                        if cnt >= 5 && mad < 0.055 && cos > 0.90 {
                             let sc = cos - 2.0 * mad;
                             if best_cold.is_none_or(|(_, b)| sc > b) {
                                 best_cold = Some((idx, sc));
