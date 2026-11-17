@@ -1,0 +1,5 @@
+phase: Phase 2 — Prefrontal Relational Working Memory, Prioritized Episodic Replay & System-2 World-Model Search
+judge: crates/a11-observe/src/bin/alpha11-phase2.rs
+sha256: 91a4d8918fadf7da0920af34c1b3422c76acfa2e0a62449a3aa67bc421f7e081
+vault_marker: observations/heldout_vault/phase2.opened (seeds 800..829, sealed)
+locked_at: 2026-11-17T16:57:00+04:00
