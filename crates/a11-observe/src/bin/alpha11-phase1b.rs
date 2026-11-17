@@ -1477,6 +1477,7 @@ fn main() -> ExitCode {
     let seeds: Vec<u64> = match split {
         "dev" => DEFAULT_TWELVE_SEEDS.to_vec(),
         "dev30" => (0..30).collect(),
+        "dev90" => (0..90).collect(),
         "heldout" => {
             if !open_vault {
                 eprintln!("Refusing: heldout requires --open-vault.");
@@ -1521,8 +1522,32 @@ fn main() -> ExitCode {
             let _ = fs::write(&marker, b"opened\n");
             (600..630).collect()
         }
+        "heldout3" => {
+            if !open_vault {
+                eprintln!("Refusing: heldout3 requires --open-vault.");
+                return ExitCode::from(2);
+            }
+            if !ws_root.join(".vault_authorized_phase1b_v3").exists() {
+                eprintln!("Refusing: .vault_authorized_phase1b_v3 missing in workspace root.");
+                return ExitCode::from(2);
+            }
+            let dir = ws_root.join("observations/heldout_vault");
+            let _ = fs::create_dir_all(&dir);
+            let marker = dir.join("phase1b_v3.opened");
+            if marker.exists() {
+                eprintln!(
+                    "Refusing: Phase-1B held-out-v3 vault already opened ({}).",
+                    marker.display()
+                );
+                return ExitCode::from(3);
+            }
+            let _ = fs::write(&marker, b"opened\n");
+            (700..730).collect()
+        }
         other => {
-            eprintln!("Unknown split '{other}' (expected dev, dev30, heldout, or heldout2)");
+            eprintln!(
+                "Unknown split '{other}' (expected dev, dev30, dev90, heldout, heldout2, or heldout3)"
+            );
             return ExitCode::from(2);
         }
     };
