@@ -150,6 +150,9 @@ impl ChannelScoutStat {
         if !self.is_structured() {
             return 0.0;
         }
+        let n_s = i32::from(self.samples.min(256));
+        let c2 = (1.0 - 0.93_f32.powi(n_s)).max(1.0e-3);
+        let v_corr = self.var_ema / c2;
         let roughness = self.diff_sq_ema / self.var_ema.max(1.0e-8);
         let ar1_ratio = self.ar1_err_ema / self.var_ema.max(1.0e-8);
         let vel_corr = self.cov_dx_ema / self.diff_sq_ema.max(1.0e-8);
@@ -161,15 +164,22 @@ impl ChannelScoutStat {
         // Real physical waves, cochlear hair cells, viscoelastic limbs, and sparse wave echoes
         // exhibit C1 inertial flow (vel_corr > 0.12), non-Gaussian wave arrivals (kurtosis > 5.4),
         // or direct efference contingency (motor_r > 0.16).
-        let is_c1_wave =
-            self.var_ema >= 1.5e-5 && roughness < 0.72 && ar1_ratio < 0.78 && vel_corr > 0.12;
+        let is_c1_wave = self.var_ema >= 1.5e-5
+            && self.diff_sq_ema >= 4.0e-7
+            && roughness < 0.72
+            && ar1_ratio < 0.78
+            && vel_corr > 0.12;
         let is_sparse_echo = !self.is_smooth_spatial_field()
             && roughness > 0.72
             && roughness < 2.25
             && vel_corr < 0.06
             && kurtosis > 4.5
-            && self.var_ema < 0.050;
-        let is_motor_contingent = self.var_ema >= 1.5e-5 && roughness < 1.35 && motor_r > 0.16;
+            && v_corr < 0.050;
+        let is_motor_contingent = self.var_ema >= 1.5e-5
+            && self.diff_sq_ema >= 4.0e-7
+            && roughness < 1.35
+            && vel_corr > -0.22
+            && motor_r > 0.16;
 
         if !(is_c1_wave || is_sparse_echo || is_motor_contingent) {
             return 0.0;
@@ -203,7 +213,10 @@ impl ChannelScoutStat {
     #[inline]
     #[must_use]
     pub fn is_sparse_impulse(&self) -> bool {
-        if !self.is_structured() || self.var_ema >= 0.050 || self.is_smooth_spatial_field() {
+        let n_s = i32::from(self.samples.min(256));
+        let c2 = (1.0 - 0.93_f32.powi(n_s)).max(1.0e-3);
+        let v_corr = self.var_ema / c2;
+        if !self.is_structured() || v_corr >= 0.050 || self.is_smooth_spatial_field() {
             return false;
         }
         let roughness = self.diff_sq_ema / self.var_ema.max(1.0e-8);
@@ -560,6 +573,7 @@ impl PoreMembrane {
         &mut self,
         max_pores: usize,
         alive_cell_indices: &[u32],
+        quarantined_channels: &[u16],
         rng: &mut Rng64,
     ) -> u64 {
         let mut atrophied = 0u64;
@@ -586,13 +600,17 @@ impl PoreMembrane {
             return atrophied;
         }
 
+        let is_quarantined = |ch: usize| -> bool {
+            ch <= (u16::MAX as usize) && quarantined_channels.contains(&(ch as u16))
+        };
+
         let mut best_candidate: Option<(f32, usize)> = None;
         let start = ((self.scout_cohort_idx as usize) * SCOUT_COHORT_WIDTH).min(n_stats);
         let end = (start + SCOUT_COHORT_WIDTH).min(n_stats);
 
         for (offset, st) in self.scout_stats[start..end].iter().enumerate() {
             let c = start + offset;
-            if self.has_sensor_on_channel(c as u32) {
+            if is_quarantined(c) || self.has_sensor_on_channel(c as u32) {
                 continue;
             }
             let score = st.passive_quality();
@@ -608,7 +626,7 @@ impl PoreMembrane {
         if best_candidate.is_none() {
             for _ in 0..SCOUT_COHORT_WIDTH {
                 let c = rng.next_index(n_stats);
-                if self.has_sensor_on_channel(c as u32) {
+                if is_quarantined(c) || self.has_sensor_on_channel(c as u32) {
                     continue;
                 }
                 let score = self.scout_stats[c].passive_quality();

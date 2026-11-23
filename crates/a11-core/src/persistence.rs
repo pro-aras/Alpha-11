@@ -18,13 +18,15 @@ use crate::pores::{
 use crate::rng::{Rng64, sanitize};
 pub use crate::tubes::COL_SLAB_MAGIC;
 use crate::tubes::{
-    EfferenceEntry, EfferenceRing, MIN_ACTUATOR_DIM, MIN_CELL_DIM, MIN_STRIATAL_ACT, OFC_CONTEXTS,
-    PRED_BUCKETS, PagedColumnEntry, RING_LEN, STRIATAL_CUES, STRIATAL_FEATS, STRIATAL_PORES,
-    STRIATAL_TAPS, StriatalOfc, Tube, TubeGraph, TubeKind, decode_column_slab,
+    COMPASS_DIRS, EPISODIC_CAP, EfferenceEntry, EfferenceRing, EpisodicStep, MIN_ACTUATOR_DIM,
+    MIN_CELL_DIM, MIN_STRIATAL_ACT, OFC_CONTEXTS, OPP_CUE_DIM, PLACE_CAP, PRED_BUCKETS,
+    PagedColumnEntry, QUARANTINE_CAP, RING_LEN, STAGE1_CAP, STRIATAL_CUES, STRIATAL_FEATS,
+    STRIATAL_PORES, STRIATAL_TAPS, StriatalOfc, Tube, TubeGraph, TubeKind, WM_RULE_SLOTS,
+    decode_column_slab,
 };
 
 pub const FILE_MAGIC: u64 = 0x4131_3143_484B_5031;
-pub const FORMAT_VERSION: u32 = 7;
+pub const FORMAT_VERSION: u32 = 8;
 pub const MIN_COMPAT_FORMAT_VERSION: u32 = 3;
 pub const SLAB_COUNT: u32 = 6;
 /// Upper bound on decoded per-actuator width (fail-closed against corrupt lengths).
@@ -1215,6 +1217,103 @@ fn encode_organism_with_mode(
             tube_w.buf.extend_from_slice(&pe.slab_bytes);
         }
     }
+    let v8_start = tube_w.buf.len();
+    let q_len = (st.quarantine_len as usize).min(QUARANTINE_CAP);
+    tube_w.write_u8(q_len as u8);
+    for &qch in &st.quarantine_ch[..q_len] {
+        tube_w.write_u16(qch);
+    }
+    for &bt in &st.wm_bank_tag {
+        tube_w.write_u8(bt);
+    }
+    for &ss in &st.wm_step_streak {
+        tube_w.write_u8(ss);
+    }
+    for &br in &st.wm_burst_rising {
+        tube_w.write_u8(br);
+    }
+    tube_w.write_f32_sparse8(&st.wm_burst_peak)?;
+    tube_w.write_f32_sparse8(&st.wm_occ)?;
+    tube_w.write_f32_sparse8(&st.wm_occ_cent)?;
+    tube_w.write_f32_sparse8(&st.wm_cue_cent)?;
+    tube_w.write_u16(st.wm_burst_age);
+    tube_w.write_u16(st.wm_occ_age);
+    tube_w.write_u16(st.wm_silent_gap);
+    tube_w.write_bool(st.wm_ever_latched);
+    tube_w.write_bool(st.wm_ever_probed);
+    tube_w.write_bool(st.wm_saw_probe);
+    tube_w.write_bool(st.wm_bout_replayed);
+    tube_w.write_bool(st.wm_subgoal_latched);
+    tube_w.write_f32(st.wm_prev_subgoal)?;
+    tube_w.write_u8(st.wm_active_rule);
+    tube_w.write_f32_sparse8(&st.wm_bout_pert)?;
+    tube_w.write_f32_sparse8(&st.rel_c)?;
+    for r in 0..WM_RULE_SLOTS {
+        tube_w.write_u8(st.tonic_rule_valid[r]);
+        for &rch in &st.tonic_rule_ch[r] {
+            tube_w.write_u32(rch);
+        }
+        tube_w.write_f32_sparse8(&st.tonic_rule_key[r])?;
+        tube_w.write_f32_sparse8(&st.w_pfc_rule[r])?;
+        tube_w.write_f32(st.pfc_r_ema[r])?;
+    }
+    tube_w.write_f32_sparse8(&st.prev_rel_match1)?;
+    tube_w.write_f32_sparse8(&st.prev_probe_pert1)?;
+    tube_w.write_u16(st.kin_cal_ticks);
+    tube_w.write_f32_sparse8(&st.kin_min)?;
+    tube_w.write_f32_sparse8(&st.kin_max)?;
+    tube_w.write_f32_sparse8(&st.kin_r2)?;
+    tube_w.write_f32_sparse8(&st.kin_r2_peak)?;
+    tube_w.write_f32_sparse8(&st.kin_resp)?;
+    tube_w.write_f32_sparse8(&st.kin_j1)?;
+    tube_w.write_f32_sparse8(&st.g_kin)?;
+    tube_w.write_f32_sparse8(&st.syn_s1)?;
+    tube_w.write_f32_sparse8(&st.syn_s2)?;
+    tube_w.write_f32_sparse8(&st.w_latch_act)?;
+    tube_w.write_u8(st.n_places1);
+    tube_w.write_u8(st.n_places2);
+    for &pm in &st.place_mask {
+        tube_w.write_u64(pm);
+    }
+    for row in &st.place_proto {
+        tube_w.write_f32_sparse8(row)?;
+    }
+    tube_w.write_f32_sparse8(&st.trans1)?;
+    tube_w.write_f32_sparse8(&st.trans2)?;
+    tube_w.write_f32_sparse8(&st.n_kc1)?;
+    tube_w.write_f32_sparse8(&st.n_kc2)?;
+    tube_w.write_f32_sparse8(&st.stall_kc1)?;
+    tube_w.write_f32_sparse8(&st.stall_kc2)?;
+    tube_w.write_f32_sparse8(&st.r_bridge)?;
+    tube_w.write_f32_sparse8(&st.v_place1)?;
+    tube_w.write_f32_sparse8(&st.r_place_uncond)?;
+    tube_w.write_f32_sparse8(&st.place_term_visits)?;
+    tube_w.write_f32_sparse8(&st.w_place_opp)?;
+    tube_w.write_f32_sparse8(&st.prev_raw_kin)?;
+    tube_w.write_f32_sparse8(&st.prev_phi1)?;
+    tube_w.write_f32_sparse8(&st.prev_phi2)?;
+    tube_w.write_bool(st.prev_kin_valid);
+    tube_w.write_bool(st.prev_subgoal_state);
+    tube_w.write_u8(st.prev_dir);
+    tube_w.write_u8(st.explore_dir);
+    tube_w.write_u8(st.explore_hold);
+    tube_w.write_u8(st.s1_sweep_idx);
+    tube_w.write_u8(st.s2_sweep_idx);
+    tube_w.write_u8(st.s1_dwell);
+    tube_w.write_u8(st.s1_last_win);
+    tube_w.write_u8(st.epi_head);
+    tube_w.write_u8(st.epi_len);
+    for step in &st.epi_ring {
+        tube_w.write_u8(step.valid);
+        if step.valid != 0 {
+            tube_w.write_u8(step.boundary);
+            tube_w.write_f32(step.s_subgoal)?;
+            tube_w.write_f32_sparse8(&step.phi)?;
+            tube_w.write_f32_sparse8(&step.cue_opp)?;
+        }
+    }
+    let v8_trailer_bytes = (tube_w.buf.len().saturating_sub(v8_start) + 4) as u32;
+    tube_w.write_u32(v8_trailer_bytes);
 
     let mut pore_w = ByteWriter::with_capacity(org.membrane.sensor_pores.len() * 112 + 512);
     pore_w.write_u32(org.membrane.sensor_pores.len() as u32);
@@ -2477,6 +2576,75 @@ fn shadow_decode_organism_with_pages(
                 has_prev,
                 tick: s_tick,
                 rng: Rng64 { s0: rs0, s1: rs1 },
+                quarantine_ch: [u16::MAX; QUARANTINE_CAP],
+                quarantine_len: 0,
+                wm_bank_tag: [0; STRIATAL_PORES],
+                wm_step_streak: [0; STRIATAL_PORES],
+                wm_burst_rising: [0; STRIATAL_PORES],
+                wm_burst_peak: [0.0; STRIATAL_PORES],
+                wm_occ: [0.0; STRIATAL_PORES],
+                wm_occ_cent: [0.0; STRIATAL_PORES],
+                wm_cue_cent: [0.0; STRIATAL_PORES],
+                wm_burst_age: 0,
+                wm_occ_age: 0,
+                wm_silent_gap: 0,
+                wm_ever_latched: false,
+                wm_ever_probed: false,
+                wm_saw_probe: false,
+                wm_bout_replayed: false,
+                wm_subgoal_latched: false,
+                wm_prev_subgoal: 0.0,
+                wm_active_rule: 0,
+                wm_bout_pert: vec![0.0; s_na],
+                rel_c: vec![0.0; STRIATAL_PORES * STRIATAL_PORES],
+                tonic_rule_valid: [0; WM_RULE_SLOTS],
+                tonic_rule_ch: vec![[u32::MAX; STRIATAL_PORES]; WM_RULE_SLOTS],
+                tonic_rule_key: vec![[0.0; STRIATAL_PORES]; WM_RULE_SLOTS],
+                w_pfc_rule: std::array::from_fn(|_| vec![0.0; s_na * STRIATAL_PORES]),
+                pfc_r_ema: [0.0; WM_RULE_SLOTS],
+                prev_rel_match1: [0.0; STRIATAL_PORES],
+                prev_probe_pert1: vec![0.0; s_na],
+                kin_cal_ticks: 0,
+                kin_min: [0.0; STRIATAL_PORES],
+                kin_max: [0.0; STRIATAL_PORES],
+                kin_r2: [0.0; STRIATAL_PORES],
+                kin_r2_peak: [0.0; STRIATAL_PORES],
+                kin_resp: [0.5; STRIATAL_PORES],
+                kin_j1: vec![0.0; STRIATAL_PORES * s_na],
+                g_kin: vec![0.0; s_na * s_na],
+                syn_s1: vec![0.0; s_na],
+                syn_s2: vec![0.0; s_na],
+                w_latch_act: vec![0.0; s_na],
+                n_places1: 0,
+                n_places2: STAGE1_CAP as u8,
+                place_mask: [0; PLACE_CAP],
+                place_proto: vec![[0.0; STRIATAL_PORES]; PLACE_CAP],
+                trans1: vec![0.0; STAGE1_CAP * COMPASS_DIRS * STAGE1_CAP],
+                trans2: vec![0.0; PLACE_CAP * COMPASS_DIRS * PLACE_CAP],
+                n_kc1: vec![0.0; STAGE1_CAP * COMPASS_DIRS],
+                n_kc2: vec![0.0; PLACE_CAP * COMPASS_DIRS],
+                stall_kc1: vec![0.0; STAGE1_CAP * COMPASS_DIRS],
+                stall_kc2: vec![0.0; PLACE_CAP * COMPASS_DIRS],
+                r_bridge: [0.0; STAGE1_CAP],
+                v_place1: [0.0; STAGE1_CAP],
+                r_place_uncond: [0.0; PLACE_CAP],
+                place_term_visits: [0.0; PLACE_CAP],
+                w_place_opp: vec![0.0; PLACE_CAP * OPP_CUE_DIM],
+                prev_raw_kin: [0.0; STRIATAL_PORES],
+                prev_phi1: [0.0; STAGE1_CAP],
+                prev_phi2: [0.0; PLACE_CAP],
+                prev_kin_valid: false,
+                prev_subgoal_state: false,
+                prev_dir: 255,
+                explore_dir: 0,
+                explore_hold: 0,
+                s1_sweep_idx: 0,
+                s2_sweep_idx: 0,
+                s1_dwell: 0,
+                s1_last_win: 255,
+                epi_ring: vec![EpisodicStep::empty(); EPISODIC_CAP],
+                epi_head: 0,
+                epi_len: 0,
             }
         } else {
             let pdir = pages_dir.ok_or(PersistError::IoFailure)?;
@@ -2750,6 +2918,75 @@ fn shadow_decode_organism_with_pages(
                 has_prev,
                 tick: s_tick,
                 rng: Rng64 { s0: rs0, s1: rs1 },
+                quarantine_ch: [u16::MAX; QUARANTINE_CAP],
+                quarantine_len: 0,
+                wm_bank_tag: [0; STRIATAL_PORES],
+                wm_step_streak: [0; STRIATAL_PORES],
+                wm_burst_rising: [0; STRIATAL_PORES],
+                wm_burst_peak: [0.0; STRIATAL_PORES],
+                wm_occ: [0.0; STRIATAL_PORES],
+                wm_occ_cent: [0.0; STRIATAL_PORES],
+                wm_cue_cent: [0.0; STRIATAL_PORES],
+                wm_burst_age: 0,
+                wm_occ_age: 0,
+                wm_silent_gap: 0,
+                wm_ever_latched: false,
+                wm_ever_probed: false,
+                wm_saw_probe: false,
+                wm_bout_replayed: false,
+                wm_subgoal_latched: false,
+                wm_prev_subgoal: 0.0,
+                wm_active_rule: 0,
+                wm_bout_pert: vec![0.0; s_na],
+                rel_c: vec![0.0; STRIATAL_PORES * STRIATAL_PORES],
+                tonic_rule_valid: [0; WM_RULE_SLOTS],
+                tonic_rule_ch: vec![[u32::MAX; STRIATAL_PORES]; WM_RULE_SLOTS],
+                tonic_rule_key: vec![[0.0; STRIATAL_PORES]; WM_RULE_SLOTS],
+                w_pfc_rule: std::array::from_fn(|_| vec![0.0; s_na * STRIATAL_PORES]),
+                pfc_r_ema: [0.0; WM_RULE_SLOTS],
+                prev_rel_match1: [0.0; STRIATAL_PORES],
+                prev_probe_pert1: vec![0.0; s_na],
+                kin_cal_ticks: 0,
+                kin_min: [0.0; STRIATAL_PORES],
+                kin_max: [0.0; STRIATAL_PORES],
+                kin_r2: [0.0; STRIATAL_PORES],
+                kin_r2_peak: [0.0; STRIATAL_PORES],
+                kin_resp: [0.5; STRIATAL_PORES],
+                kin_j1: vec![0.0; STRIATAL_PORES * s_na],
+                g_kin: vec![0.0; s_na * s_na],
+                syn_s1: vec![0.0; s_na],
+                syn_s2: vec![0.0; s_na],
+                w_latch_act: vec![0.0; s_na],
+                n_places1: 0,
+                n_places2: STAGE1_CAP as u8,
+                place_mask: [0; PLACE_CAP],
+                place_proto: vec![[0.0; STRIATAL_PORES]; PLACE_CAP],
+                trans1: vec![0.0; STAGE1_CAP * COMPASS_DIRS * STAGE1_CAP],
+                trans2: vec![0.0; PLACE_CAP * COMPASS_DIRS * PLACE_CAP],
+                n_kc1: vec![0.0; STAGE1_CAP * COMPASS_DIRS],
+                n_kc2: vec![0.0; PLACE_CAP * COMPASS_DIRS],
+                stall_kc1: vec![0.0; STAGE1_CAP * COMPASS_DIRS],
+                stall_kc2: vec![0.0; PLACE_CAP * COMPASS_DIRS],
+                r_bridge: [0.0; STAGE1_CAP],
+                v_place1: [0.0; STAGE1_CAP],
+                r_place_uncond: [0.0; PLACE_CAP],
+                place_term_visits: [0.0; PLACE_CAP],
+                w_place_opp: vec![0.0; PLACE_CAP * OPP_CUE_DIM],
+                prev_raw_kin: [0.0; STRIATAL_PORES],
+                prev_phi1: [0.0; STAGE1_CAP],
+                prev_phi2: [0.0; PLACE_CAP],
+                prev_kin_valid: false,
+                prev_subgoal_state: false,
+                prev_dir: 255,
+                explore_dir: 0,
+                explore_hold: 0,
+                s1_sweep_idx: 0,
+                s2_sweep_idx: 0,
+                s1_dwell: 0,
+                s1_last_win: 255,
+                epi_ring: vec![EpisodicStep::empty(); EPISODIC_CAP],
+                epi_head: 0,
+                epi_len: 0,
             }
         }
     } else {
@@ -2960,6 +3197,184 @@ fn shadow_decode_organism_with_pages(
             return Err(PersistError::InvalidTopology);
         }
         striatal.paged_cols = paged_cols;
+    }
+    if version >= 8 {
+        let v8_start = tr.pos;
+        let q_len = tr.read_u8()? as usize;
+        if q_len > QUARANTINE_CAP {
+            return Err(PersistError::InvalidTopology);
+        }
+        striatal.quarantine_ch = [u16::MAX; QUARANTINE_CAP];
+        striatal.quarantine_len = q_len as u8;
+        for i in 0..q_len {
+            striatal.quarantine_ch[i] = tr.read_u16()?;
+        }
+        for dst in &mut striatal.wm_bank_tag {
+            let b = tr.read_u8()?;
+            if b > 7 {
+                return Err(PersistError::InvalidTopology);
+            }
+            *dst = b;
+        }
+        for dst in &mut striatal.wm_step_streak {
+            *dst = tr.read_u8()?;
+        }
+        for dst in &mut striatal.wm_burst_rising {
+            let b = tr.read_u8()?;
+            if b > 1 {
+                return Err(PersistError::InvalidTopology);
+            }
+            *dst = b;
+        }
+        tr.read_f32_sparse8(&mut striatal.wm_burst_peak)?;
+        tr.read_f32_sparse8(&mut striatal.wm_occ)?;
+        tr.read_f32_sparse8(&mut striatal.wm_occ_cent)?;
+        tr.read_f32_sparse8(&mut striatal.wm_cue_cent)?;
+        striatal.wm_burst_age = tr.read_u16()?;
+        striatal.wm_occ_age = tr.read_u16()?;
+        striatal.wm_silent_gap = tr.read_u16()?;
+        striatal.wm_ever_latched = tr.read_bool()?;
+        striatal.wm_ever_probed = tr.read_bool()?;
+        striatal.wm_saw_probe = tr.read_bool()?;
+        striatal.wm_bout_replayed = tr.read_bool()?;
+        striatal.wm_subgoal_latched = tr.read_bool()?;
+        let psg = tr.read_f32()?;
+        if !(0.0..=1.0).contains(&psg) {
+            return Err(PersistError::InvalidTopology);
+        }
+        striatal.wm_prev_subgoal = psg;
+        let ar = tr.read_u8()?;
+        if (ar as usize) >= WM_RULE_SLOTS {
+            return Err(PersistError::InvalidTopology);
+        }
+        striatal.wm_active_rule = ar;
+        tr.read_f32_sparse8(&mut striatal.wm_bout_pert)?;
+        tr.read_f32_sparse8(&mut striatal.rel_c)?;
+        for r in 0..WM_RULE_SLOTS {
+            let rv = tr.read_u8()?;
+            if rv > 1 {
+                return Err(PersistError::InvalidTopology);
+            }
+            striatal.tonic_rule_valid[r] = rv;
+            for dst in &mut striatal.tonic_rule_ch[r] {
+                *dst = tr.read_u32()?;
+            }
+            tr.read_f32_sparse8(&mut striatal.tonic_rule_key[r])?;
+            tr.read_f32_sparse8(&mut striatal.w_pfc_rule[r])?;
+            let pre = tr.read_f32()?;
+            if pre.abs() > 16.0 {
+                return Err(PersistError::InvalidTopology);
+            }
+            striatal.pfc_r_ema[r] = pre;
+        }
+        tr.read_f32_sparse8(&mut striatal.prev_rel_match1)?;
+        tr.read_f32_sparse8(&mut striatal.prev_probe_pert1)?;
+        striatal.kin_cal_ticks = tr.read_u16()?;
+        tr.read_f32_sparse8(&mut striatal.kin_min)?;
+        tr.read_f32_sparse8(&mut striatal.kin_max)?;
+        tr.read_f32_sparse8(&mut striatal.kin_r2)?;
+        tr.read_f32_sparse8(&mut striatal.kin_r2_peak)?;
+        tr.read_f32_sparse8(&mut striatal.kin_resp)?;
+        if !striatal.kin_r2.iter().all(|&v| (-1.01..=1.01).contains(&v))
+            || !striatal
+                .kin_r2_peak
+                .iter()
+                .all(|&v| (-1.01..=1.01).contains(&v))
+            || !striatal
+                .kin_resp
+                .iter()
+                .all(|&v| (-0.01..=1.01).contains(&v))
+        {
+            return Err(PersistError::InvalidTopology);
+        }
+        tr.read_f32_sparse8(&mut striatal.kin_j1)?;
+        tr.read_f32_sparse8(&mut striatal.g_kin)?;
+        tr.read_f32_sparse8(&mut striatal.syn_s1)?;
+        tr.read_f32_sparse8(&mut striatal.syn_s2)?;
+        tr.read_f32_sparse8(&mut striatal.w_latch_act)?;
+        let np1 = tr.read_u8()? as usize;
+        let np2 = tr.read_u8()? as usize;
+        if np1 > STAGE1_CAP || !(STAGE1_CAP..=PLACE_CAP).contains(&np2) {
+            return Err(PersistError::InvalidTopology);
+        }
+        striatal.n_places1 = np1 as u8;
+        striatal.n_places2 = np2 as u8;
+        for pm in &mut striatal.place_mask {
+            *pm = tr.read_u64()?;
+        }
+        for row in &mut striatal.place_proto {
+            tr.read_f32_sparse8(row)?;
+        }
+        tr.read_f32_sparse8(&mut striatal.trans1)?;
+        tr.read_f32_sparse8(&mut striatal.trans2)?;
+        tr.read_f32_sparse8(&mut striatal.n_kc1)?;
+        tr.read_f32_sparse8(&mut striatal.n_kc2)?;
+        tr.read_f32_sparse8(&mut striatal.stall_kc1)?;
+        tr.read_f32_sparse8(&mut striatal.stall_kc2)?;
+        tr.read_f32_sparse8(&mut striatal.r_bridge)?;
+        tr.read_f32_sparse8(&mut striatal.v_place1)?;
+        tr.read_f32_sparse8(&mut striatal.r_place_uncond)?;
+        tr.read_f32_sparse8(&mut striatal.place_term_visits)?;
+        tr.read_f32_sparse8(&mut striatal.w_place_opp)?;
+        tr.read_f32_sparse8(&mut striatal.prev_raw_kin)?;
+        tr.read_f32_sparse8(&mut striatal.prev_phi1)?;
+        tr.read_f32_sparse8(&mut striatal.prev_phi2)?;
+        striatal.prev_kin_valid = tr.read_bool()?;
+        striatal.prev_subgoal_state = tr.read_bool()?;
+        striatal.prev_dir = tr.read_u8()?;
+        let ed = tr.read_u8()?;
+        if ed > 7 {
+            return Err(PersistError::InvalidTopology);
+        }
+        striatal.explore_dir = ed;
+        striatal.explore_hold = tr.read_u8()?;
+        striatal.s1_sweep_idx = tr.read_u8()? & 7;
+        striatal.s2_sweep_idx = tr.read_u8()? & 7;
+        let s1_dw = tr.read_u8()?;
+        if s1_dw > 50 {
+            return Err(PersistError::InvalidTopology);
+        }
+        striatal.s1_dwell = s1_dw;
+        striatal.s1_last_win = tr.read_u8()?;
+        let eh = tr.read_u8()?;
+        let el = tr.read_u8()?;
+        if (eh as usize) >= EPISODIC_CAP || (el as usize) > EPISODIC_CAP {
+            return Err(PersistError::InvalidTopology);
+        }
+        striatal.epi_head = eh;
+        striatal.epi_len = el;
+        striatal.epi_ring.fill(EpisodicStep::empty());
+        for dst_step in &mut striatal.epi_ring {
+            let valid = tr.read_u8()?;
+            if valid > 1 {
+                return Err(PersistError::InvalidTopology);
+            }
+            if valid != 0 {
+                let boundary = tr.read_u8()?;
+                if boundary > 1 {
+                    return Err(PersistError::InvalidTopology);
+                }
+                let s_subgoal = tr.read_f32()?;
+                if !(0.0..=1.0).contains(&s_subgoal) {
+                    return Err(PersistError::InvalidTopology);
+                }
+                let mut phi = [0.0_f32; PLACE_CAP];
+                tr.read_f32_sparse8(&mut phi)?;
+                let mut cue_opp = [0.0_f32; OPP_CUE_DIM];
+                tr.read_f32_sparse8(&mut cue_opp)?;
+                *dst_step = EpisodicStep {
+                    valid,
+                    boundary,
+                    s_subgoal,
+                    phi,
+                    cue_opp,
+                };
+            }
+        }
+        let v8_len = tr.read_u32()? as usize;
+        if tr.pos.saturating_sub(v8_start) != v8_len {
+            return Err(PersistError::InvalidTopology);
+        }
     }
     if tr.remaining() != 0 {
         return Err(PersistError::InvalidTopology);

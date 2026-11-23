@@ -415,9 +415,14 @@ impl OrganismEngine for Alpha11Organism {
                     .filter(|(_, c)| c.alive)
                     .map(|(i, _)| i as u32)
                     .collect();
-                let atrophied_pores =
-                    self.membrane
-                        .morph_pores(self.config.max_pores, &alive_cells, &mut self.rng);
+                let q_len = (self.tubes.striatal.quarantine_len as usize)
+                    .min(crate::tubes::QUARANTINE_CAP);
+                let atrophied_pores = self.membrane.morph_pores(
+                    self.config.max_pores,
+                    &alive_cells,
+                    &self.tubes.striatal.quarantine_ch[..q_len],
+                    &mut self.rng,
+                );
                 self.atrophied_structures =
                     self.atrophied_structures.saturating_add(atrophied_pores);
             }
@@ -1310,6 +1315,47 @@ mod tests {
         full
     }
 
+    fn downgrade_v8_checkpoint_to_v7(v8: &[u8]) -> Vec<u8> {
+        use crate::persistence::TAG_TUBE;
+        let rd = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        let payload_end = v8.len() - 4;
+        let mut slabs: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut pos = 24usize;
+        while pos < payload_end {
+            let tag = rd(v8, pos);
+            let len = rd(v8, pos + 4) as usize;
+            let src = &v8[pos + 8..pos + 8 + len];
+            let payload = if tag == TAG_TUBE {
+                assert!(src.len() > 16);
+                let v8_trailer = rd(src, src.len() - 4) as usize;
+                assert!(v8_trailer >= 64 && src.len() > v8_trailer);
+                src[..src.len() - v8_trailer].to_vec()
+            } else {
+                src.to_vec()
+            };
+            slabs.push((tag, payload));
+            pos += 8 + len + 4;
+        }
+        assert_eq!(slabs.len(), 6);
+        let mut slabs_buf = Vec::new();
+        for (tag, p) in &slabs {
+            let start = slabs_buf.len();
+            slabs_buf.extend_from_slice(&tag.to_le_bytes());
+            slabs_buf.extend_from_slice(&(p.len() as u32).to_le_bytes());
+            slabs_buf.extend_from_slice(p);
+            let scrc = crc32c(&slabs_buf[start..]);
+            slabs_buf.extend_from_slice(&scrc.to_le_bytes());
+        }
+        let mut full = v8[..8].to_vec();
+        full.extend_from_slice(&7u32.to_le_bytes());
+        full.extend_from_slice(&v8[12..16]);
+        full.extend_from_slice(&(slabs_buf.len() as u64).to_le_bytes());
+        full.extend_from_slice(&slabs_buf);
+        let fcrc = crc32c(&full);
+        full.extend_from_slice(&fcrc.to_le_bytes());
+        full
+    }
+
     #[test]
     fn v3_checkpoint_upgrades_to_v4_and_keeps_stepping() {
         let cfg = OrganismConfig::default();
@@ -1335,8 +1381,11 @@ mod tests {
         for t in 0..150u64 {
             let _ = drive(&mut org, t, &mut ambient);
         }
-        let v7 = org.encode_checkpoint().expect("encode v7");
+        let v8 = org.encode_checkpoint().expect("encode v8");
+        assert_eq!(u32::from_le_bytes([v8[8], v8[9], v8[10], v8[11]]), 8);
+        let v7 = downgrade_v8_checkpoint_to_v7(&v8);
         assert_eq!(u32::from_le_bytes([v7[8], v7[9], v7[10], v7[11]]), 7);
+        assert!(v7.len() < v8.len());
         let v6 = downgrade_v7_checkpoint_to_v6(&v7);
         assert_eq!(u32::from_le_bytes([v6[8], v6[9], v6[10], v6[11]]), 6);
         assert!(v6.len() < v7.len());
@@ -1349,6 +1398,10 @@ mod tests {
         let v3 = downgrade_v4_checkpoint_to_v3(&v4);
         assert_eq!(u32::from_le_bytes([v3[8], v3[9], v3[10], v3[11]]), 3);
         assert!(v3.len() < v4.len());
+
+        let mut upgraded_v7 = Alpha11Organism::new(1, cfg);
+        upgraded_v7.restore_checkpoint(&v7).expect("v7 restore");
+        assert!(!upgraded_v7.is_poisoned());
 
         let mut upgraded_v6 = Alpha11Organism::new(1, cfg);
         upgraded_v6.restore_checkpoint(&v6).expect("v6 restore");
@@ -1372,7 +1425,7 @@ mod tests {
         assert_eq!(a.tube_count, b.tube_count);
 
         let re = upgraded.encode_checkpoint().expect("re-encode");
-        assert_eq!(u32::from_le_bytes([re[8], re[9], re[10], re[11]]), 7);
+        assert_eq!(u32::from_le_bytes([re[8], re[9], re[10], re[11]]), 8);
         let mut corrupt = v3.clone();
         let mid = corrupt.len() / 2;
         corrupt[mid] ^= 0x01;

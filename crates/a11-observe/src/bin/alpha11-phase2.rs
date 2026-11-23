@@ -1,4 +1,4 @@
-//! Pre-registered locked Phase-2 judge (`P2-G1..G7` + `P2-I1..I4`).
+//! Pre-registered locked Phase-2 Pure Brain judge (`P2-G1..G5` + `P2-I1..I4`, 13/13 Brain Gates; 3D organs decoupled to `alpha11-embodied-organs`).
 //!
 //! Enforces Prefrontal Relational Working Memory (`slot_0..slot_K` content-addressable
 //! variable binding), Surprise-Prioritized Hippocampal Episodic Replay (`EVB = Gain * Need`),
@@ -41,13 +41,8 @@ use a11_core::{Alpha11Organism, OrganismConfig};
 use a11_medium::{ControlMode, FieldPulse, FieldView, OrganismEngine, PersistError, WorldMedium};
 use a11_observe::gates::{PairedGate, holm_adjust, paired_gate};
 use a11_observe::{DEFAULT_TWELVE_SEEDS, PulseTemporalChannelShuffler, scan_crate_source};
-use a11_portals::{
-    CompositePortalMedium, EMBODIED_ORGAN_ACTUATORS, EMBODIED_ORGAN_CHANNELS, EmbodiedBodyOrgans,
-};
-use a11_worlds::{
-    BrightRadiantWorld, DenseFieldWorld, DeterministicRng, EARTH_AUDIO_FRAME_SAMPLES,
-    MultiGenTerrarium, TERRARIUM_ACTUATORS, TERRARIUM_CHANNELS, YokedMedium,
-};
+use a11_portals::CompositePortalMedium;
+use a11_worlds::{BrightRadiantWorld, DenseFieldWorld, DeterministicRng, YokedMedium};
 
 const P2_AMBIENT_CHANNELS: usize = 192;
 const P2_ACTUATORS: usize = 20;
@@ -67,10 +62,6 @@ const ROLE_ZEROSHOT_BOUTS: usize = 48;
 const ROLE_REV_B_BOUTS: usize = 48;
 const ROLE_REV_RETURN_BOUTS: usize = 16;
 
-const OPEN_CHANNELS: usize = TERRARIUM_CHANNELS + EMBODIED_ORGAN_CHANNELS;
-const OPEN_ACTUATORS: usize = TERRARIUM_ACTUATORS + EMBODIED_ORGAN_ACTUATORS;
-const ELDER_WARMUP_TICKS: usize = 640;
-const EMBODIED_DEV_TICKS: usize = 8_000;
 
 const DETOUR_SENSOR_SALT: u64 = 0xD201_5E45_0A9E_2026;
 const DETOUR_MOTOR_SALT: u64 = 0xD201_4D07_0A9E_2026;
@@ -91,11 +82,6 @@ const SHUFFLE_SALT_ROLE: u64 = 0x5A17_A01E_20AC_2026;
 #[inline]
 fn clamp_unit(v: f32) -> f32 {
     if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 }
-}
-
-#[inline]
-fn clamp_nonneg(v: f32) -> f32 {
-    if v.is_finite() && v > 0.0 { v } else { 0.0 }
 }
 
 /// Seed-specific sensor/motor permutation (`PermutedWire` invariance).
@@ -764,447 +750,7 @@ impl WorldMedium for SymmetricRoleSwapMedium {
 }
 
 // =============================================================================
-// Suite 3: Embodied 2-Organism OpenSocialHabitat (Gate 9 Occlusion & Gate 10 Role-Swap)
-// =============================================================================
-
-#[derive(Clone, Copy, Debug, Default)]
-struct RoleBoutAccum {
-    sum: [f64; 6],
-    count: u64,
-}
-
-struct EmbodiedSocialHabitat {
-    terrarium: MultiGenTerrarium,
-    mute_peer_voice: bool,
-    elder_brain: Alpha11Organism,
-    elder_body: EmbodiedBodyOrgans,
-    elder_ambient: [f32; OPEN_CHANNELS],
-    elder_influx: f32,
-    elder_stress: f32,
-    focal_body: EmbodiedBodyOrgans,
-    focal_ambient: [f32; OPEN_CHANNELS],
-    focal_influx: f32,
-    focal_stress: f32,
-    prev_coop_grove_pods: u64,
-    window_ticks: u64,
-    occluded_pair_ticks: u64,
-    occluded_closing_sum: f64,
-    prev_elder_pos: Option<(f32, f32)>,
-    last_role_tick: [[u64; 2]; 2],
-    role_bout_idx: [[u64; 2]; 2],
-    role_acc: [[[RoleBoutAccum; 2]; 2]; 2],
-}
-
-impl EmbodiedSocialHabitat {
-    fn new(seed: u64, mute_peer_voice: bool) -> Self {
-        let mut terrarium = MultiGenTerrarium::new_earth_ecology(seed, 1);
-        let mut elder_brain =
-            Alpha11Organism::new(seed ^ 0xE1DE_A110_2026_0001, OrganismConfig::default());
-        let mut elder_body = EmbodiedBodyOrgans::new_adult(seed ^ 0xE1DE_B0D1_2026_0002);
-        let mut elder_ambient = [0.0_f32; OPEN_CHANNELS];
-
-        for _ in 0..ELDER_WARMUP_TICKS {
-            let tv = terrarium.agent_view(0);
-            for (i, slot) in elder_ambient[..TERRARIUM_CHANNELS].iter_mut().enumerate() {
-                *slot = clamp_unit(tv.ambient_in.get(i).copied().unwrap_or(0.0));
-            }
-            elder_ambient[TERRARIUM_CHANNELS..].copy_from_slice(elder_body.sensory_channels());
-            let view = FieldView {
-                ambient_in: &elder_ambient,
-                metabolic_influx: clamp_nonneg(tv.metabolic_influx),
-                tissue_stress: clamp_nonneg(tv.tissue_stress + elder_body.last_organ_stress()),
-                num_actuators: OPEN_ACTUATORS,
-            };
-            let ep = elder_brain
-                .step(view)
-                .unwrap_or_else(|_| FieldPulse::silent(OPEN_ACTUATORS));
-            let mut eb = [0.0_f32; EMBODIED_ORGAN_ACTUATORS];
-            for (j, slot) in eb.iter_mut().enumerate() {
-                *slot = clamp_unit(
-                    ep.actuator_out
-                        .get(TERRARIUM_ACTUATORS + j)
-                        .copied()
-                        .unwrap_or(0.0),
-                );
-            }
-            let _ = elder_body.step_limbs_and_radiate_voice(&eb);
-            let (es, eh) = elder_body.embodied_kinematics();
-            terrarium.set_agent_embodied_kinematics(0, es, eh);
-            terrarium.set_agent_embodied_voice_rms(0, elder_body.vocal().last_radiated_rms());
-            let mut ew = FieldPulse {
-                actuator_out: Vec::with_capacity(TERRARIUM_ACTUATORS),
-            };
-            for i in 0..TERRARIUM_ACTUATORS {
-                ew.actuator_out
-                    .push(clamp_unit(ep.actuator_out.get(i).copied().unwrap_or(0.0)));
-            }
-            terrarium.apply_population_pulses(&[ew]);
-            elder_body.apply_terrain_sway(terrarium.agent_lateral_sway(0));
-            let mut env_l = [0.0_f32; EARTH_AUDIO_FRAME_SAMPLES];
-            let mut env_r = [0.0_f32; EARTH_AUDIO_FRAME_SAMPLES];
-            let enc = terrarium.binaural_earth_waves_for_agent(0, &mut env_l, &mut env_r);
-            elder_body.finish_binaural_ecology_transduction(None, Some((&env_l, &env_r)), enc);
-        }
-
-        elder_body.vocal_mut().reset_window_observations();
-        terrarium.respawn_newborn_in_slot(1);
-        let focal_body = EmbodiedBodyOrgans::new_infant(seed ^ 0xF0CA_1B0D_2026_0003);
-        let init_coop = terrarium.ecology_metrics().coop_grove_pods_cracked;
-        let init_e_pos = terrarium.metrics().agent_positions.first().copied();
-
-        let mut hab = Self {
-            terrarium,
-            mute_peer_voice,
-            elder_brain,
-            elder_body,
-            elder_ambient,
-            elder_influx: 0.0,
-            elder_stress: 0.0,
-            focal_body,
-            focal_ambient: [0.0; OPEN_CHANNELS],
-            focal_influx: 0.0,
-            focal_stress: 0.0,
-            prev_coop_grove_pods: init_coop,
-            window_ticks: 0,
-            occluded_pair_ticks: 0,
-            occluded_closing_sum: 0.0,
-            prev_elder_pos: init_e_pos,
-            last_role_tick: [[0; 2]; 2],
-            role_bout_idx: [[0; 2]; 2],
-            role_acc: [[[RoleBoutAccum::default(); 2]; 2]; 2],
-        };
-        hab.refresh_views();
-        hab
-    }
-
-    fn reset_stage_window(&mut self) {
-        self.window_ticks = 0;
-        self.occluded_pair_ticks = 0;
-        self.occluded_closing_sum = 0.0;
-        self.last_role_tick = [[0; 2]; 2];
-        self.role_bout_idx = [[0; 2]; 2];
-        self.role_acc = [[[RoleBoutAccum::default(); 2]; 2]; 2];
-        self.prev_coop_grove_pods = self.terrarium.ecology_metrics().coop_grove_pods_cracked;
-        self.focal_body.vocal_mut().reset_window_observations();
-        self.elder_body.vocal_mut().reset_window_observations();
-    }
-
-    fn referential_coord_score(&self) -> f64 {
-        let occ_rate = if self.occluded_pair_ticks > 0 {
-            self.occluded_closing_sum / (self.occluded_pair_ticks as f64)
-        } else {
-            0.0
-        };
-        let coop_pods = self
-            .terrarium
-            .ecology_metrics()
-            .coop_grove_pods_cracked
-            .saturating_sub(self.prev_coop_grove_pods) as f64;
-        occ_rate + 0.015 * coop_pods
-    }
-
-    fn role_swap_cv_separation(&self) -> f64 {
-        let mut sum_sep = 0.0_f64;
-        let mut valid_bins = 0_usize;
-        for bin in 0..2 {
-            let a_ev = &self.role_acc[bin][0][0];
-            let a_od = &self.role_acc[bin][0][1];
-            let b_ev = &self.role_acc[bin][1][0];
-            let b_od = &self.role_acc[bin][1][1];
-            if a_ev.count >= 2 && a_od.count >= 2 && b_ev.count >= 2 && b_od.count >= 2 {
-                let mut dot = 0.0_f64;
-                for k in 0..6 {
-                    let d_ev = (a_ev.sum[k] / (a_ev.count as f64))
-                        - (b_ev.sum[k] / (b_ev.count as f64));
-                    let d_od = (a_od.sum[k] / (a_od.count as f64))
-                        - (b_od.sum[k] / (b_od.count as f64));
-                    dot += d_ev * d_od;
-                }
-                sum_sep += dot;
-                valid_bins += 1;
-            }
-        }
-        if valid_bins > 0 {
-            sum_sep / (valid_bins as f64)
-        } else {
-            0.0
-        }
-    }
-
-    fn refresh_views(&mut self) {
-        let ev = self.terrarium.agent_view(0);
-        for (i, slot) in self.elder_ambient[..TERRARIUM_CHANNELS].iter_mut().enumerate() {
-            *slot = clamp_unit(ev.ambient_in.get(i).copied().unwrap_or(0.0));
-        }
-        self.elder_ambient[TERRARIUM_CHANNELS..].copy_from_slice(self.elder_body.sensory_channels());
-        self.elder_influx = clamp_nonneg(ev.metabolic_influx);
-        self.elder_stress = clamp_nonneg(ev.tissue_stress + self.elder_body.last_organ_stress());
-
-        let fv = self.terrarium.agent_view(1);
-        for (i, slot) in self.focal_ambient[..TERRARIUM_CHANNELS].iter_mut().enumerate() {
-            *slot = clamp_unit(fv.ambient_in.get(i).copied().unwrap_or(0.0));
-        }
-        self.focal_ambient[TERRARIUM_CHANNELS..].copy_from_slice(self.focal_body.sensory_channels());
-        self.focal_influx = clamp_nonneg(fv.metabolic_influx);
-        self.focal_stress = clamp_nonneg(fv.tissue_stress + self.focal_body.last_organ_stress());
-    }
-
-    fn sync_vocal_ontogeny(&mut self, org: &Alpha11Organism) {
-        let s = org.snapshot();
-        let items = org.motor_maturation_by_channel();
-        let mut sum = 0.0_f64;
-        let mut cnt = 0usize;
-        for &(ch, mastery, _) in &items {
-            if (12..17).contains(&ch) {
-                sum += f64::from(mastery);
-                cnt += 1;
-            }
-        }
-        let voc_m = if cnt > 0 { (sum / (cnt as f64)) as f32 } else { 0.0 };
-        self.focal_body
-            .advance_vocal_ontogeny(s.tick, s.mitosis_births, voc_m);
-    }
-}
-
-impl WorldMedium for EmbodiedSocialHabitat {
-    fn num_ambient_channels(&self) -> usize {
-        OPEN_CHANNELS
-    }
-
-    fn num_actuators(&self) -> usize {
-        OPEN_ACTUATORS
-    }
-
-    fn current_view(&self) -> FieldView<'_> {
-        FieldView {
-            ambient_in: &self.focal_ambient,
-            metabolic_influx: self.focal_influx,
-            tissue_stress: self.focal_stress,
-            num_actuators: OPEN_ACTUATORS,
-        }
-    }
-
-    fn apply_pulse(&mut self, focal_pulse: &FieldPulse) {
-        let mut focal_world = FieldPulse {
-            actuator_out: Vec::with_capacity(TERRARIUM_ACTUATORS),
-        };
-        for i in 0..TERRARIUM_ACTUATORS {
-            focal_world.actuator_out.push(clamp_unit(
-                focal_pulse.actuator_out.get(i).copied().unwrap_or(0.0),
-            ));
-        }
-        let mut focal_body_act = [0.0_f32; EMBODIED_ORGAN_ACTUATORS];
-        for (j, slot) in focal_body_act.iter_mut().enumerate() {
-            *slot = clamp_unit(
-                focal_pulse
-                    .actuator_out
-                    .get(TERRARIUM_ACTUATORS + j)
-                    .copied()
-                    .unwrap_or(0.0),
-            );
-        }
-
-        let pre_positions = self.terrarium.metrics().agent_positions.clone();
-        let e_prev_opt = pre_positions.first().copied();
-        let f_prev_opt = pre_positions.get(1).copied();
-
-        if let (Some(e_prev), Some(f_prev), Some(e_old)) =
-            (e_prev_opt, f_prev_opt, self.prev_elder_pos)
-            && self.terrarium.has_line_of_sight(f_prev, e_prev)
-        {
-            let dx = e_prev.0 - f_prev.0;
-            let dy = e_prev.1 - f_prev.1;
-            let dist = dx.hypot(dy);
-            if (1.4..=10.5).contains(&dist) {
-                let ux = dx / dist;
-                let uy = dy / dist;
-                let e_vx = e_prev.0 - e_old.0;
-                let e_vy = e_prev.1 - e_old.1;
-                let v_peer_to_self = -(e_vx * ux + e_vy * uy);
-                let class_opt = if v_peer_to_self > 0.025 {
-                    Some(0_usize)
-                } else if v_peer_to_self < -0.025 {
-                    Some(1_usize)
-                } else {
-                    None
-                };
-                if let Some(cls) = class_opt {
-                    let bin = usize::from(dist >= 5.0);
-                    if self.window_ticks > self.last_role_tick[bin][cls].saturating_add(8) {
-                        self.role_bout_idx[bin][cls] =
-                            self.role_bout_idx[bin][cls].saturating_add(1);
-                    }
-                    self.last_role_tick[bin][cls] = self.window_ticks;
-                    let parity = (self.role_bout_idx[bin][cls] & 1) as usize;
-                    let fx = focal_world.actuator_out.first().copied().unwrap_or(0.0);
-                    let fy = focal_world.actuator_out.get(1).copied().unwrap_or(0.0);
-                    let gx = focal_world.actuator_out.get(2).copied().unwrap_or(0.0);
-                    let gy = focal_world.actuator_out.get(3).copied().unwrap_or(0.0);
-                    let ping = focal_world.actuator_out.get(4).copied().unwrap_or(0.0).abs();
-                    let hand_e = 0.25
-                        * (focal_body_act[0].abs()
-                            + focal_body_act[1].abs()
-                            + focal_body_act[2].abs()
-                            + focal_body_act[3].abs());
-                    let voc_e = 0.20
-                        * (ping
-                            + focal_body_act[6].abs()
-                            + focal_body_act[7].abs()
-                            + focal_body_act[8].abs()
-                            + focal_body_act[9].abs());
-                    let y = [
-                        f64::from(fx * ux + fy * uy),
-                        f64::from(-fx * uy + fy * ux),
-                        f64::from(gx * ux + gy * uy),
-                        f64::from(-gx * uy + gy * ux),
-                        f64::from(hand_e),
-                        f64::from(voc_e),
-                    ];
-                    let acc = &mut self.role_acc[bin][cls][parity];
-                    for k in 0..6 {
-                        acc.sum[k] += y[k];
-                    }
-                    acc.count = acc.count.saturating_add(1);
-                }
-            }
-        }
-        if let Some(e_prev) = e_prev_opt {
-            self.prev_elder_pos = Some(e_prev);
-        }
-
-        let e_view = FieldView {
-            ambient_in: &self.elder_ambient,
-            metabolic_influx: self.elder_influx,
-            tissue_stress: self.elder_stress,
-            num_actuators: OPEN_ACTUATORS,
-        };
-        let ep = self
-            .elder_brain
-            .step(e_view)
-            .unwrap_or_else(|_| FieldPulse::silent(OPEN_ACTUATORS));
-        let mut elder_world = FieldPulse {
-            actuator_out: Vec::with_capacity(TERRARIUM_ACTUATORS),
-        };
-        for i in 0..TERRARIUM_ACTUATORS {
-            elder_world
-                .actuator_out
-                .push(clamp_unit(ep.actuator_out.get(i).copied().unwrap_or(0.0)));
-        }
-        let mut e_body_act = [0.0_f32; EMBODIED_ORGAN_ACTUATORS];
-        for (j, slot) in e_body_act.iter_mut().enumerate() {
-            *slot = clamp_unit(
-                ep.actuator_out
-                    .get(TERRARIUM_ACTUATORS + j)
-                    .copied()
-                    .unwrap_or(0.0),
-            );
-        }
-        let e_wave = self.elder_body.step_limbs_and_radiate_voice(&e_body_act);
-        let f_wave = self.focal_body.step_limbs_and_radiate_voice(&focal_body_act);
-
-        let (es, eh) = self.elder_body.embodied_kinematics();
-        let (fs_stab, fh) = self.focal_body.embodied_kinematics();
-        self.terrarium.set_agent_embodied_kinematics(0, es, eh);
-        self.terrarium.set_agent_embodied_kinematics(1, fs_stab, fh);
-        let (e_vrms, f_vrms) = if self.mute_peer_voice {
-            (0.0, 0.0)
-        } else {
-            (
-                self.elder_body.vocal().last_radiated_rms(),
-                self.focal_body.vocal().last_radiated_rms(),
-            )
-        };
-        self.terrarium.set_agent_embodied_voice_rms(0, e_vrms);
-        self.terrarium.set_agent_embodied_voice_rms(1, f_vrms);
-
-        if self.mute_peer_voice {
-            if elder_world.actuator_out.len() >= 6 {
-                elder_world.actuator_out[4] = 0.0;
-                elder_world.actuator_out[5] = 0.0;
-            }
-            if focal_world.actuator_out.len() >= 6 {
-                focal_world.actuator_out[4] = 0.0;
-                focal_world.actuator_out[5] = 0.0;
-            }
-        }
-
-        self.terrarium
-            .apply_population_pulses(&[elder_world, focal_world]);
-
-        let positions = &self.terrarium.metrics().agent_positions;
-        let e_pos = positions.first().copied().unwrap_or((0.0, 0.0));
-        let f_pos = positions.get(1).copied().unwrap_or((0.0, 0.0));
-        let rel_e = (e_pos.0 - f_pos.0, e_pos.1 - f_pos.1);
-        let rel_f = (f_pos.0 - e_pos.0, f_pos.1 - e_pos.1);
-        let peer_diff = self.terrarium.acoustic_transmittance(f_pos, e_pos);
-        let mut e_wave_diff = e_wave;
-        let mut f_wave_diff = f_wave;
-        if peer_diff < 0.999 {
-            for s in &mut e_wave_diff {
-                *s *= peer_diff;
-            }
-            for s in &mut f_wave_diff {
-                *s *= peer_diff;
-            }
-        }
-        let peer_for_focal = (!self.mute_peer_voice).then_some((&e_wave_diff, rel_e));
-        let peer_for_elder = (!self.mute_peer_voice).then_some((&f_wave_diff, rel_f));
-
-        self.elder_body
-            .apply_terrain_sway(self.terrarium.agent_lateral_sway(0));
-        self.focal_body
-            .apply_terrain_sway(self.terrarium.agent_lateral_sway(1));
-
-        let dist = rel_e.0.hypot(rel_e.1);
-        if dist <= 3.6 {
-            let coupling = 0.26 * (1.0 - dist / 3.6);
-            EmbodiedBodyOrgans::couple_shared_hands(
-                &mut self.elder_body,
-                &mut self.focal_body,
-                coupling,
-            );
-        }
-
-        let mut f_el = [0.0_f32; EARTH_AUDIO_FRAME_SAMPLES];
-        let mut f_er = [0.0_f32; EARTH_AUDIO_FRAME_SAMPLES];
-        let f_enc = self
-            .terrarium
-            .binaural_earth_waves_for_agent(1, &mut f_el, &mut f_er);
-        self.focal_body.finish_binaural_ecology_transduction(
-            peer_for_focal,
-            Some((&f_el, &f_er)),
-            f_enc,
-        );
-
-        let mut e_el = [0.0_f32; EARTH_AUDIO_FRAME_SAMPLES];
-        let mut e_er = [0.0_f32; EARTH_AUDIO_FRAME_SAMPLES];
-        let e_enc = self
-            .terrarium
-            .binaural_earth_waves_for_agent(0, &mut e_el, &mut e_er);
-        self.elder_body.finish_binaural_ecology_transduction(
-            peer_for_elder,
-            Some((&e_el, &e_er)),
-            e_enc,
-        );
-
-        if let (Some(e_prev), Some(f_prev)) = (e_prev_opt, f_prev_opt)
-            && !self.terrarium.has_line_of_sight(f_prev, e_prev)
-        {
-            let d_prev = (e_prev.0 - f_prev.0).hypot(e_prev.1 - f_prev.1);
-            let d_now = (e_pos.0 - f_pos.0).hypot(e_pos.1 - f_pos.1);
-            if d_prev > 1.0 {
-                self.occluded_pair_ticks = self.occluded_pair_ticks.saturating_add(1);
-                self.occluded_closing_sum += f64::from(d_prev - d_now);
-            }
-        }
-
-        self.refresh_views();
-        self.window_ticks = self.window_ticks.saturating_add(1);
-    }
-}
-
-// =============================================================================
-// Per-Seed Full 6-Arm + Zero-Shot + ABAB + Embodied Phase-2 Runner
+// Per-Seed Full 6-Arm + Zero-Shot + ABAB Phase-2 Brain Runner
 // =============================================================================
 
 #[derive(Clone, Copy, Debug)]
@@ -1234,10 +780,6 @@ struct Phase2SeedRow {
     nat_agency: f64,
     shf_agency: f64,
 
-    emb_occ_nat: f64,
-    emb_occ_muted: f64,
-    emb_rolesep_nat: f64,
-    emb_rolesep_frz: f64,
 }
 
 fn step_medium<M: WorldMedium>(org: &mut Alpha11Organism, m: &mut M, ticks: u64) {
@@ -1566,64 +1108,6 @@ fn run_phase2_seed(seed: u64) -> Phase2SeedRow {
     step_medium(&mut r_nb_plastic, &mut r_nb_ret_w, ret_ticks);
     let abab_newborn = r_nb_ret_w.net_valence_sum;
 
-    // --- Part 3: Embodied 2-Organism OpenSocialHabitat (Gate 9 Occlusion & Gate 10 Role-Swap) ---
-    let world_seed = seed ^ 0xA110_09E7_2026_0011;
-    let stage_ends = [
-        EMBODIED_DEV_TICKS / 16,
-        EMBODIED_DEV_TICKS / 4,
-        (EMBODIED_DEV_TICKS * 5) / 8,
-    ];
-
-    let mut e_nat_org = Alpha11Organism::new(seed, OrganismConfig::default());
-    let mut e_nat_hab = EmbodiedSocialHabitat::new(world_seed, false);
-    for t in 1..=EMBODIED_DEV_TICKS {
-        let p = e_nat_org
-            .step(e_nat_hab.current_view())
-            .unwrap_or_else(|_| FieldPulse::silent(OPEN_ACTUATORS));
-        e_nat_hab.apply_pulse(&p);
-        if (t & 15) == 0 {
-            e_nat_hab.sync_vocal_ontogeny(&e_nat_org);
-        }
-        if stage_ends.contains(&t) {
-            e_nat_hab.reset_stage_window();
-        }
-    }
-    let emb_occ_nat = e_nat_hab.referential_coord_score();
-    let emb_rolesep_nat = e_nat_hab.role_swap_cv_separation();
-
-    let mut e_mut_org = Alpha11Organism::new(seed, OrganismConfig::default());
-    let mut e_mut_hab = EmbodiedSocialHabitat::new(world_seed, true);
-    for t in 1..=EMBODIED_DEV_TICKS {
-        let p = e_mut_org
-            .step(e_mut_hab.current_view())
-            .unwrap_or_else(|_| FieldPulse::silent(OPEN_ACTUATORS));
-        e_mut_hab.apply_pulse(&p);
-        if (t & 15) == 0 {
-            e_mut_hab.sync_vocal_ontogeny(&e_mut_org);
-        }
-        if stage_ends.contains(&t) {
-            e_mut_hab.reset_stage_window();
-        }
-    }
-    let emb_occ_muted = e_mut_hab.referential_coord_score();
-
-    let mut e_frz_org = Alpha11Organism::new(seed, OrganismConfig::default());
-    e_frz_org.set_control_mode(ControlMode::FrozenPlasticity);
-    let mut e_frz_hab = EmbodiedSocialHabitat::new(world_seed, false);
-    for t in 1..=EMBODIED_DEV_TICKS {
-        let p = e_frz_org
-            .step(e_frz_hab.current_view())
-            .unwrap_or_else(|_| FieldPulse::silent(OPEN_ACTUATORS));
-        e_frz_hab.apply_pulse(&p);
-        if (t & 15) == 0 {
-            e_frz_hab.sync_vocal_ontogeny(&e_frz_org);
-        }
-        if stage_ends.contains(&t) {
-            e_frz_hab.reset_stage_window();
-        }
-    }
-    let emb_rolesep_frz = e_frz_hab.role_swap_cv_separation();
-
     Phase2SeedRow {
         detour_nat,
         detour_frz,
@@ -1645,10 +1129,6 @@ fn run_phase2_seed(seed: u64) -> Phase2SeedRow {
         distractor_share: 0.5 * (dst_detour + dst_role),
         nat_agency: 0.5 * (ag_detour_nat + ag_role_nat),
         shf_agency: 0.5 * (ag_detour_shf + ag_role_shf),
-        emb_occ_nat,
-        emb_occ_muted,
-        emb_rolesep_nat,
-        emb_rolesep_frz,
     }
 }
 
@@ -2561,11 +2041,6 @@ fn main() -> ExitCode {
     let ag_nat: Vec<f64> = rows.iter().map(|r| r.nat_agency).collect();
     let ag_shf: Vec<f64> = rows.iter().map(|r| r.shf_agency).collect();
 
-    let e_occ_nat: Vec<f64> = rows.iter().map(|r| r.emb_occ_nat).collect();
-    let e_occ_mut: Vec<f64> = rows.iter().map(|r| r.emb_occ_muted).collect();
-    let e_rs_nat: Vec<f64> = rows.iter().map(|r| r.emb_rolesep_nat).collect();
-    let e_rs_frz: Vec<f64> = rows.iter().map(|r| r.emb_rolesep_frz).collect();
-
     let g1a = conservative_paired_gate(&d_nat, &d_frz);
     let g1b = conservative_paired_gate(&d_nat, &d_yok);
     let g1c = conservative_paired_gate(&d_nat, &d_shf);
@@ -2577,8 +2052,7 @@ fn main() -> ExitCode {
     let g3 = conservative_paired_gate(&ab_ret, &ab_nb);
     let g4 = conservative_paired_gate(&dst_chance, &dst_vec);
     let g5 = conservative_paired_gate(&ag_nat, &ag_shf);
-    let g6 = conservative_paired_gate(&e_occ_nat, &e_occ_mut);
-    let g7 = conservative_paired_gate(&e_rs_nat, &e_rs_frz);
+
 
     let raw_p = [
         g1a.p_two_sided,
@@ -2590,8 +2064,6 @@ fn main() -> ExitCode {
         g3.p_two_sided,
         g4.p_two_sided,
         g5.p_two_sided,
-        g6.p_two_sided,
-        g7.p_two_sided,
     ];
     let p_holm = holm_adjust(&raw_p);
 
@@ -2618,8 +2090,7 @@ fn main() -> ExitCode {
     let pass_g3 = g3.mean_diff > 0.0 && p_holm[6] < 0.05;
     let pass_g4 = g4.mean_diff > 0.0 && p_holm[7] < 0.05 && mean_dst < 0.05;
     let pass_g5 = g5.mean_diff > 0.015 && p_holm[8] < 0.05 && mean_shf_ag <= 0.05;
-    let pass_g6 = g6.mean_diff > 0.0 && p_holm[9] < 0.05;
-    let pass_g7 = g7.mean_diff > 0.0 && p_holm[10] < 0.05;
+
 
     let gates_print = [
         ("P2-G1a OccludedDetour20 Nat > Frozen", g1a, p_holm[0], pass_g1a),
@@ -2631,11 +2102,9 @@ fn main() -> ExitCode {
         ("P2-G3  RoleSwap ABAB Return-A > Newborn", g3, p_holm[6], pass_g3),
         ("P2-G4  Distractor Chance(33.3%) > Nat(<5%)", g4, p_holm[7], pass_g4),
         ("P2-G5  Agency Purity Nat > ActionShuffled", g5, p_holm[8], pass_g5),
-        ("P2-G6  Embodied Gate9 Occluded Nat>Muted", g6, p_holm[9], pass_g6),
-        ("P2-G7  Embodied Gate10 RoleSep Nat>Frozen", g7, p_holm[10], pass_g7),
     ];
 
-    println!("\n--- Behavioral, Working-Memory, System-2 & Embodied Gates (Exact Sign-Flip + Student-t, Holm m=11) ---");
+    println!("\n--- Behavioral, Working-Memory, System-2 & Embodied Gates (Exact Sign-Flip + Student-t, Holm m=9, Pure Brain) ---");
     for (name, g, ph, ok) in gates_print {
         println!(
             "  [{:<4}] {:<45} A={:+.4} B={:+.4} diff={:+.4} wins={}/{} t={:+.2} p_holm={:.4e}",
@@ -2722,8 +2191,6 @@ fn main() -> ExitCode {
         && pass_g3
         && pass_g4
         && pass_g5
-        && pass_g6
-        && pass_g7
         && pass_i1
         && pass_i2
         && pass_i3

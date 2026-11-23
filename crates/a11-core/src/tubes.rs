@@ -33,7 +33,38 @@ const STRIATAL_BIRTH_SALT: u64 = 0x5781_A7A1_0FC0_5EED;
 
 /// Binary magic header on every paged cortical column `.slab` file (`A11CSLAB` LE).
 pub const COL_SLAB_MAGIC: u64 = 0x4131_3143_534C_4142;
-pub const CORTICAL_SLAB_VERSION: u32 = 7;
+pub const CORTICAL_SLAB_VERSION: u32 = 8;
+
+pub const QUARANTINE_CAP: usize = 96;
+pub const WM_RULE_SLOTS: usize = 2;
+pub const STAGE1_CAP: usize = 24;
+pub const PLACE_CAP: usize = 56;
+pub const COMPASS_DIRS: usize = 8;
+pub const EPISODIC_CAP: usize = 48;
+pub const OPP_CUE_DIM: usize = 2 * STRIATAL_PORES;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EpisodicStep {
+    pub valid: u8,
+    pub boundary: u8,
+    pub s_subgoal: f32,
+    pub phi: [f32; PLACE_CAP],
+    pub cue_opp: [f32; OPP_CUE_DIM],
+}
+
+impl EpisodicStep {
+    #[inline]
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            valid: 0,
+            boundary: 0,
+            s_subgoal: 0.0,
+            phi: [0.0; PLACE_CAP],
+            cue_opp: [0.0; OPP_CUE_DIM],
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PagedColumnEntry {
@@ -144,7 +175,7 @@ pub fn decode_column_slab(bytes: &[u8]) -> Result<DecodedColumnSlab, PersistErro
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
     ]);
     let ver = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-    if magic != COL_SLAB_MAGIC || ver != CORTICAL_SLAB_VERSION {
+    if magic != COL_SLAB_MAGIC || (ver != 7 && ver != CORTICAL_SLAB_VERSION) {
         return Err(PersistError::BadMagicOrVersion);
     }
     let col_id = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
@@ -518,6 +549,75 @@ pub struct StriatalOfc {
     pub has_prev: bool,
     pub tick: u64,
     pub rng: Rng64,
+    pub quarantine_ch: [u16; QUARANTINE_CAP],
+    pub quarantine_len: u8,
+    pub wm_bank_tag: [u8; STRIATAL_PORES],
+    pub wm_step_streak: [u8; STRIATAL_PORES],
+    pub wm_burst_rising: [u8; STRIATAL_PORES],
+    pub wm_burst_peak: [f32; STRIATAL_PORES],
+    pub wm_occ: [f32; STRIATAL_PORES],
+    pub wm_occ_cent: [f32; STRIATAL_PORES],
+    pub wm_cue_cent: [f32; STRIATAL_PORES],
+    pub wm_burst_age: u16,
+    pub wm_occ_age: u16,
+    pub wm_silent_gap: u16,
+    pub wm_ever_latched: bool,
+    pub wm_ever_probed: bool,
+    pub wm_saw_probe: bool,
+    pub wm_bout_replayed: bool,
+    pub wm_subgoal_latched: bool,
+    pub wm_prev_subgoal: f32,
+    pub wm_active_rule: u8,
+    pub wm_bout_pert: Vec<f32>,
+    pub rel_c: Vec<f32>,
+    pub tonic_rule_valid: [u8; WM_RULE_SLOTS],
+    pub tonic_rule_ch: Vec<[u32; STRIATAL_PORES]>,
+    pub tonic_rule_key: Vec<[f32; STRIATAL_PORES]>,
+    pub w_pfc_rule: [Vec<f32>; WM_RULE_SLOTS],
+    pub pfc_r_ema: [f32; WM_RULE_SLOTS],
+    pub prev_rel_match1: [f32; STRIATAL_PORES],
+    pub prev_probe_pert1: Vec<f32>,
+    pub kin_cal_ticks: u16,
+    pub kin_min: [f32; STRIATAL_PORES],
+    pub kin_max: [f32; STRIATAL_PORES],
+    pub kin_r2: [f32; STRIATAL_PORES],
+    pub kin_r2_peak: [f32; STRIATAL_PORES],
+    pub kin_resp: [f32; STRIATAL_PORES],
+    pub kin_j1: Vec<f32>,
+    pub g_kin: Vec<f32>,
+    pub syn_s1: Vec<f32>,
+    pub syn_s2: Vec<f32>,
+    pub w_latch_act: Vec<f32>,
+    pub n_places1: u8,
+    pub n_places2: u8,
+    pub place_mask: [u64; PLACE_CAP],
+    pub place_proto: Vec<[f32; STRIATAL_PORES]>,
+    pub trans1: Vec<f32>,
+    pub trans2: Vec<f32>,
+    pub n_kc1: Vec<f32>,
+    pub n_kc2: Vec<f32>,
+    pub stall_kc1: Vec<f32>,
+    pub stall_kc2: Vec<f32>,
+    pub r_bridge: [f32; STAGE1_CAP],
+    pub v_place1: [f32; STAGE1_CAP],
+    pub r_place_uncond: [f32; PLACE_CAP],
+    pub place_term_visits: [f32; PLACE_CAP],
+    pub w_place_opp: Vec<f32>,
+    pub prev_raw_kin: [f32; STRIATAL_PORES],
+    pub prev_phi1: [f32; STAGE1_CAP],
+    pub prev_phi2: [f32; PLACE_CAP],
+    pub prev_kin_valid: bool,
+    pub prev_subgoal_state: bool,
+    pub prev_dir: u8,
+    pub explore_dir: u8,
+    pub explore_hold: u8,
+    pub s1_sweep_idx: u8,
+    pub s2_sweep_idx: u8,
+    pub s1_dwell: u8,
+    pub s1_last_win: u8,
+    pub epi_ring: Vec<EpisodicStep>,
+    pub epi_head: u8,
+    pub epi_len: u8,
 }
 
 impl StriatalOfc {
@@ -556,7 +656,15 @@ impl StriatalOfc {
             + 3 * 4 * STRIATAL_FEATS
             + 2 * 4 * STRIATAL_CUES
             + paged_meta
-            + 80
+            + 2 * QUARANTINE_CAP
+            + 4 * STRIATAL_PORES * STRIATAL_PORES
+            + WM_RULE_SLOTS * 4 * (2 + na) * STRIATAL_PORES
+            + 4 * STRIATAL_PORES * na
+            + 4 * na * na
+            + 4 * PLACE_CAP * (STRIATAL_PORES + OPP_CUE_DIM + 2)
+            + 4 * (STAGE1_CAP * COMPASS_DIRS * STAGE1_CAP + PLACE_CAP * COMPASS_DIRS * PLACE_CAP)
+            + EPISODIC_CAP * 744
+            + 1024
     }
 
     /// Grows every actuator-strided table to `num_actuators` columns. Existing columns keep
@@ -614,6 +722,21 @@ impl StriatalOfc {
         );
         self.canc_g = restride(&self.canc_g, STRIATAL_PORES * STRIATAL_TAPS, old_na, new_na);
         self.da_ring = restride(&self.da_ring, STRIATAL_TAPS, old_na, new_na);
+        self.kin_j1 = restride(&self.kin_j1, STRIATAL_PORES, old_na, new_na);
+        let mut new_g = vec![0.0_f32; new_na * new_na];
+        for r in 0..old_na {
+            new_g[r * new_na..r * new_na + old_na]
+                .copy_from_slice(&self.g_kin[r * old_na..(r + 1) * old_na]);
+        }
+        self.g_kin = new_g;
+        for r in 0..WM_RULE_SLOTS {
+            self.w_pfc_rule[r].resize(new_na * STRIATAL_PORES, 0.0);
+        }
+        self.syn_s1.resize(new_na, 0.0);
+        self.syn_s2.resize(new_na, 0.0);
+        self.w_latch_act.resize(new_na, 0.0);
+        self.wm_bout_pert.resize(new_na, 0.0);
+        self.prev_probe_pert1.resize(new_na, 0.0);
         self.act_mean.resize(new_na, 0.0);
         self.prev_act.resize(new_na, 0.0);
         self.noise.resize(new_na, 0.0);
@@ -700,6 +823,75 @@ impl StriatalOfc {
             has_prev: false,
             tick: 0,
             rng: birth_rng,
+            quarantine_ch: [u16::MAX; QUARANTINE_CAP],
+            quarantine_len: 0,
+            wm_bank_tag: [0; STRIATAL_PORES],
+            wm_step_streak: [0; STRIATAL_PORES],
+            wm_burst_rising: [0; STRIATAL_PORES],
+            wm_burst_peak: [0.0; STRIATAL_PORES],
+            wm_occ: [0.0; STRIATAL_PORES],
+            wm_occ_cent: [0.0; STRIATAL_PORES],
+            wm_cue_cent: [0.0; STRIATAL_PORES],
+            wm_burst_age: 0,
+            wm_occ_age: 0,
+            wm_silent_gap: 0,
+            wm_ever_latched: false,
+            wm_ever_probed: false,
+            wm_saw_probe: false,
+            wm_bout_replayed: false,
+            wm_subgoal_latched: false,
+            wm_prev_subgoal: 0.0,
+            wm_active_rule: 0,
+            wm_bout_pert: vec![0.0; na],
+            rel_c: vec![0.0; STRIATAL_PORES * STRIATAL_PORES],
+            tonic_rule_valid: [0; WM_RULE_SLOTS],
+            tonic_rule_ch: vec![[u32::MAX; STRIATAL_PORES]; WM_RULE_SLOTS],
+            tonic_rule_key: vec![[0.0; STRIATAL_PORES]; WM_RULE_SLOTS],
+            w_pfc_rule: std::array::from_fn(|_| vec![0.0; na * STRIATAL_PORES]),
+            pfc_r_ema: [0.0; WM_RULE_SLOTS],
+            prev_rel_match1: [0.0; STRIATAL_PORES],
+            prev_probe_pert1: vec![0.0; na],
+            kin_cal_ticks: 0,
+            kin_min: [0.0; STRIATAL_PORES],
+            kin_max: [0.0; STRIATAL_PORES],
+            kin_r2: [0.0; STRIATAL_PORES],
+            kin_r2_peak: [0.0; STRIATAL_PORES],
+            kin_resp: [0.5; STRIATAL_PORES],
+            kin_j1: vec![0.0; STRIATAL_PORES * na],
+            g_kin: vec![0.0; na * na],
+            syn_s1: vec![0.0; na],
+            syn_s2: vec![0.0; na],
+            w_latch_act: vec![0.0; na],
+            n_places1: 0,
+            n_places2: STAGE1_CAP as u8,
+            place_mask: [0; PLACE_CAP],
+            place_proto: vec![[0.0; STRIATAL_PORES]; PLACE_CAP],
+            trans1: vec![0.0; STAGE1_CAP * COMPASS_DIRS * STAGE1_CAP],
+            trans2: vec![0.0; PLACE_CAP * COMPASS_DIRS * PLACE_CAP],
+            n_kc1: vec![0.0; STAGE1_CAP * COMPASS_DIRS],
+            n_kc2: vec![0.0; PLACE_CAP * COMPASS_DIRS],
+            stall_kc1: vec![0.0; STAGE1_CAP * COMPASS_DIRS],
+            stall_kc2: vec![0.0; PLACE_CAP * COMPASS_DIRS],
+            r_bridge: [0.0; STAGE1_CAP],
+            v_place1: [0.0; STAGE1_CAP],
+            r_place_uncond: [0.0; PLACE_CAP],
+            place_term_visits: [0.0; PLACE_CAP],
+            w_place_opp: vec![0.0; PLACE_CAP * OPP_CUE_DIM],
+            prev_raw_kin: [0.0; STRIATAL_PORES],
+            prev_phi1: [0.0; STAGE1_CAP],
+            prev_phi2: [0.0; PLACE_CAP],
+            prev_kin_valid: false,
+            prev_subgoal_state: false,
+            prev_dir: 255,
+            explore_dir: 0,
+            explore_hold: 0,
+            s1_sweep_idx: 0,
+            s2_sweep_idx: 0,
+            s1_dwell: 0,
+            s1_last_win: 255,
+            epi_ring: vec![EpisodicStep::empty(); EPISODIC_CAP],
+            epi_head: 0,
+            epi_len: 0,
         }
     }
 
@@ -768,6 +960,77 @@ impl StriatalOfc {
         self.v_prev = 0.0;
         self.has_prev = false;
         self.tick = 0;
+        self.quarantine_ch = [u16::MAX; QUARANTINE_CAP];
+        self.quarantine_len = 0;
+        self.wm_bank_tag = [0; STRIATAL_PORES];
+        self.wm_step_streak = [0; STRIATAL_PORES];
+        self.wm_burst_rising = [0; STRIATAL_PORES];
+        self.wm_burst_peak = [0.0; STRIATAL_PORES];
+        self.wm_occ = [0.0; STRIATAL_PORES];
+        self.wm_occ_cent = [0.0; STRIATAL_PORES];
+        self.wm_cue_cent = [0.0; STRIATAL_PORES];
+        self.wm_burst_age = 0;
+        self.wm_occ_age = 0;
+        self.wm_silent_gap = 0;
+        self.wm_ever_latched = false;
+        self.wm_ever_probed = false;
+        self.wm_saw_probe = false;
+        self.wm_bout_replayed = false;
+        self.wm_subgoal_latched = false;
+        self.wm_prev_subgoal = 0.0;
+        self.wm_active_rule = 0;
+        self.wm_bout_pert = vec![0.0; na];
+        self.rel_c.fill(0.0);
+        self.tonic_rule_valid = [0; WM_RULE_SLOTS];
+        self.tonic_rule_ch.fill([u32::MAX; STRIATAL_PORES]);
+        self.tonic_rule_key.fill([0.0; STRIATAL_PORES]);
+        for r in 0..WM_RULE_SLOTS {
+            self.w_pfc_rule[r].fill(0.0);
+        }
+        self.pfc_r_ema = [0.0; WM_RULE_SLOTS];
+        self.prev_rel_match1 = [0.0; STRIATAL_PORES];
+        self.prev_probe_pert1 = vec![0.0; na];
+        self.kin_cal_ticks = 0;
+        self.kin_min = [0.0; STRIATAL_PORES];
+        self.kin_max = [0.0; STRIATAL_PORES];
+        self.kin_r2 = [0.0; STRIATAL_PORES];
+        self.kin_r2_peak = [0.0; STRIATAL_PORES];
+        self.kin_resp = [0.5; STRIATAL_PORES];
+        self.kin_j1.fill(0.0);
+        self.g_kin.fill(0.0);
+        self.syn_s1.fill(0.0);
+        self.syn_s2.fill(0.0);
+        self.w_latch_act.fill(0.0);
+        self.n_places1 = 0;
+        self.n_places2 = STAGE1_CAP as u8;
+        self.place_mask = [0; PLACE_CAP];
+        self.place_proto.fill([0.0; STRIATAL_PORES]);
+        self.trans1.fill(0.0);
+        self.trans2.fill(0.0);
+        self.n_kc1.fill(0.0);
+        self.n_kc2.fill(0.0);
+        self.stall_kc1.fill(0.0);
+        self.stall_kc2.fill(0.0);
+        self.r_bridge = [0.0; STAGE1_CAP];
+        self.v_place1 = [0.0; STAGE1_CAP];
+        self.r_place_uncond = [0.0; PLACE_CAP];
+        self.place_term_visits = [0.0; PLACE_CAP];
+        self.w_place_opp.fill(0.0);
+        self.prev_raw_kin = [0.0; STRIATAL_PORES];
+        self.prev_phi1 = [0.0; STAGE1_CAP];
+        self.prev_phi2 = [0.0; PLACE_CAP];
+        self.prev_kin_valid = false;
+        self.prev_subgoal_state = false;
+        self.prev_dir = 255;
+        self.explore_dir = 0;
+        self.explore_hold = 0;
+        self.s1_sweep_idx = 0;
+        self.s2_sweep_idx = 0;
+        self.s1_dwell = 0;
+        self.s1_last_win = 255;
+        self.epi_ring.fill(EpisodicStep::empty());
+        self.epi_head = 0;
+        self.epi_len = 0;
     }
 
     #[inline]
@@ -821,6 +1084,808 @@ impl StriatalOfc {
             self.fwd_var_act[fi] = 1.0e-6;
             let j_off = fi * na;
             self.fwd_j[j_off..j_off + na].fill(0.0);
+        }
+        self.wm_bank_tag[p] = 0;
+        self.wm_step_streak[p] = 0;
+        self.wm_burst_rising[p] = 0;
+        self.wm_burst_peak[p] = 0.0;
+        self.wm_occ[p] = 0.0;
+        self.wm_occ_cent[p] = 0.0;
+        self.wm_cue_cent[p] = 0.0;
+        self.prev_rel_match1[p] = 0.0;
+        self.kin_min[p] = 0.0;
+        self.kin_max[p] = 0.0;
+        self.kin_r2[p] = 0.0;
+        self.kin_r2_peak[p] = 0.0;
+        self.kin_resp[p] = 0.5;
+        self.prev_raw_kin[p] = 0.0;
+        let k_off = p * na;
+        self.kin_j1[k_off..k_off + na].fill(0.0);
+        for q in 0..STRIATAL_PORES {
+            self.rel_c[p * STRIATAL_PORES + q] = 0.0;
+            self.rel_c[q * STRIATAL_PORES + p] = 0.0;
+        }
+        for r in 0..WM_RULE_SLOTS {
+            for m in 0..na {
+                self.w_pfc_rule[r][m * STRIATAL_PORES + p] = 0.0;
+            }
+        }
+        let clr_bit = !(1u64 << p);
+        for k in 0..PLACE_CAP {
+            self.place_mask[k] &= clr_bit;
+            self.place_proto[k][p] = 0.0;
+            self.w_place_opp[k * OPP_CUE_DIM + p] = 0.0;
+            self.w_place_opp[k * OPP_CUE_DIM + STRIATAL_PORES + p] = 0.0;
+        }
+    }
+
+    #[inline]
+    pub fn quarantine_channel(&mut self, ch: u32) {
+        if ch > u32::from(u16::MAX) {
+            return;
+        }
+        let ch16 = ch as u16;
+        let q_len = (self.quarantine_len as usize).min(QUARANTINE_CAP);
+        if self.quarantine_ch[..q_len].contains(&ch16) {
+            return;
+        }
+        if q_len < QUARANTINE_CAP {
+            self.quarantine_ch[q_len] = ch16;
+            self.quarantine_len = (q_len + 1) as u8;
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn cos_shared_place(
+        &self,
+        k: usize,
+        is_kin: &[bool; STRIATAL_PORES],
+        z_kin: &[f32; STRIATAL_PORES],
+    ) -> f32 {
+        let pm = self.place_mask[k];
+        if pm == 0 {
+            return -2.0;
+        }
+        let pp = &self.place_proto[k];
+        let mut dot = 0.0_f32;
+        let mut psq = 0.0_f32;
+        let mut zsq = 0.0_f32;
+        let mut cnt = 0usize;
+        for p in 0..STRIATAL_PORES {
+            if is_kin[p] && ((pm >> p) & 1) != 0 {
+                let vp = pp[p];
+                let vz = z_kin[p];
+                dot += vp * vz;
+                psq += vp * vp;
+                zsq += vz * vz;
+                cnt += 1;
+            }
+        }
+        if cnt < 4 || psq <= 1.0e-6 || zsq <= 1.0e-6 {
+            -2.0
+        } else {
+            sanitize_clamp(dot / (psq * zsq).sqrt(), -1.5, 1.5)
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn read_wm_slots(&self) -> ([f32; STRIATAL_PORES], [f32; OPP_CUE_DIM], bool) {
+        let active = self.wm_occ.iter().any(|&v| v > 0.05);
+        let mut cue_opp = [0.0_f32; OPP_CUE_DIM];
+        let mut opp_sq = 0.0_f32;
+        for p in 0..STRIATAL_PORES {
+            let v = self.wm_cue_cent[p];
+            let on_v = v.max(0.0);
+            let off_v = (-v).max(0.0);
+            cue_opp[p] = on_v;
+            cue_opp[STRIATAL_PORES + p] = off_v;
+            opp_sq += on_v * on_v + off_v * off_v;
+        }
+        if opp_sq > 1.0e-6 {
+            let inv = 1.0 / opp_sq.sqrt();
+            for v in &mut cue_opp {
+                *v = sanitize(*v * inv);
+            }
+        }
+        (self.wm_occ_cent, cue_opp, active)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn replay_episodic_buffer(
+        &mut self,
+        s_ext_latch: f32,
+        s_sub: f32,
+        reward: f32,
+        phi1: &[f32; STAGE1_CAP],
+        phi2: &[f32; PLACE_CAP],
+        is_kin: &[bool; STRIATAL_PORES],
+        z_kin: &[f32; STRIATAL_PORES],
+    ) {
+        let np1 = (self.n_places1 as usize).min(STAGE1_CAP);
+        let np2 = (self.n_places2 as usize).clamp(STAGE1_CAP, PLACE_CAP);
+        if np1 == 0 {
+            return;
+        }
+        let elen = (self.epi_len as usize).min(EPISODIC_CAP);
+        let head = (self.epi_head as usize) % EPISODIC_CAP;
+        let mut did_b = false;
+        if s_ext_latch >= 0.5 && self.wm_prev_subgoal < 0.5 {
+            let mut bk_br = 0usize;
+            for k in 1..np1 {
+                if phi1[k] > phi1[bk_br] {
+                    bk_br = k;
+                }
+            }
+            if self.cos_shared_place(bk_br, is_kin, z_kin) >= 0.80 {
+                for p in 0..STRIATAL_PORES {
+                    if is_kin[p] {
+                        self.place_proto[bk_br][p] =
+                            sanitize(0.72 * self.place_proto[bk_br][p] + 0.28 * z_kin[p]);
+                        self.place_mask[bk_br] |= 1u64 << p;
+                    }
+                }
+            }
+            for (k, &pk) in phi1.iter().enumerate().take(np1) {
+                if pk > 0.15 {
+                    self.r_bridge[k] = sanitize_clamp(0.85 * self.r_bridge[k] + 0.35 * pk, 0.0, 1.0);
+                    did_b = true;
+                }
+            }
+        }
+        if !self.wm_bout_replayed && reward.abs() > 0.15 {
+            self.wm_bout_replayed = true;
+            let rtarg = if reward > 0.0 { 1.0_f32 } else { -1.0_f32 };
+            if reward > 0.15 && s_sub >= 0.5 && np2 > STAGE1_CAP {
+                let mut bk_r = STAGE1_CAP;
+                for k in (STAGE1_CAP + 1)..np2 {
+                    if phi2[k] > phi2[bk_r] {
+                        bk_r = k;
+                    }
+                }
+                if phi2[bk_r] > 0.25 && self.cos_shared_place(bk_r, is_kin, z_kin) >= 0.80 {
+                    for p in 0..STRIATAL_PORES {
+                        if is_kin[p] {
+                            self.place_proto[bk_r][p] =
+                                sanitize(0.72 * self.place_proto[bk_r][p] + 0.28 * z_kin[p]);
+                            self.place_mask[bk_r] |= 1u64 << p;
+                        }
+                    }
+                }
+            }
+            for back in 1..=2usize {
+                if elen >= back {
+                    let idx_e = (head + EPISODIC_CAP - back) % EPISODIC_CAP;
+                    let ste = self.epi_ring[idx_e];
+                    if ste.valid != 0 {
+                        for k in STAGE1_CAP..np2 {
+                            let pk = ste.phi[k];
+                            if pk > 0.15 {
+                                self.r_place_uncond[k] = sanitize_clamp(
+                                    0.84 * self.r_place_uncond[k] + 0.32 * pk * rtarg,
+                                    -1.0,
+                                    1.0,
+                                );
+                                let c_off = k * OPP_CUE_DIM;
+                                let mut prc = 0.34 * self.r_place_uncond[k];
+                                for i in 0..OPP_CUE_DIM {
+                                    prc += self.w_place_opp[c_off + i] * ste.cue_opp[i];
+                                }
+                                let ec = sanitize_clamp(rtarg - prc, -2.2, 2.2);
+                                for i in 0..OPP_CUE_DIM {
+                                    let cv = ste.cue_opp[i];
+                                    if cv > 1.0e-4 {
+                                        self.w_place_opp[c_off + i] = sanitize_clamp(
+                                            self.w_place_opp[c_off + i] + 0.75 * pk * ec * cv,
+                                            -2.2,
+                                            2.2,
+                                        );
+                                    }
+                                }
+                                self.place_term_visits[k] =
+                                    sanitize(self.place_term_visits[k] + 0.5 * pk);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if did_b || (self.tick & 15) == 0 {
+            let mut vc = [0.0_f32; STAGE1_CAP];
+            vc[..np1].copy_from_slice(&self.r_bridge[..np1]);
+            for _ in 0..12 {
+                let mut vn = self.r_bridge;
+                for k in 0..np1 {
+                    if self.r_bridge[k] >= 0.80 {
+                        continue;
+                    }
+                    let mut bq = self.r_bridge[k];
+                    for c in 0..COMPASS_DIRS {
+                        let t_off = (k * COMPASS_DIRS + c) * STAGE1_CAP;
+                        let mut ts = 0.0_f32;
+                        let mut ev_num = 0.0_f32;
+                        for kn in 0..np1 {
+                            let tv = self.trans1[t_off + kn];
+                            ts += tv;
+                            ev_num += tv * vc[kn];
+                        }
+                        if ts > 0.15 {
+                            let ev = ev_num / ts;
+                            let cand = 0.88 * ev - 0.55 * self.stall_kc1[k * COMPASS_DIRS + c];
+                            if cand > bq {
+                                bq = cand;
+                            }
+                        }
+                    }
+                    vn[k] = sanitize_clamp(bq, -1.5, 1.5);
+                }
+                vc[..np1].copy_from_slice(&vn[..np1]);
+            }
+            for k in 0..np1 {
+                self.v_place1[k] = sanitize(vc[k]);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn system2_synergy_search(
+        &mut self,
+        act_s: usize,
+        is_plastic: bool,
+        s_sub: f32,
+        reward: f32,
+        step_stalled: bool,
+        n_kin_now: usize,
+        is_kin: &[bool; STRIATAL_PORES],
+        z_kin: &[f32; STRIATAL_PORES],
+        hsp_arr: &[f32; STRIATAL_PORES],
+        phi1: &[f32; STAGE1_CAP],
+        phi2: &[f32; PLACE_CAP],
+        cue_opp: &[f32; OPP_CUE_DIM],
+    ) -> Option<(Vec<f32>, u8)> {
+        if is_plastic && self.kin_cal_ticks < 96 {
+            let mut sys2_pre = vec![0.0_f32; act_s];
+            for v in &mut sys2_pre {
+                *v = sanitize_clamp(0.75 * self.gaussian(), -1.5, 1.5);
+            }
+            return Some((sys2_pre, 255));
+        }
+        let np1 = (self.n_places1 as usize).min(STAGE1_CAP);
+        let np2 = (self.n_places2 as usize).clamp(STAGE1_CAP, PLACE_CAP);
+        if np1 == 0 && self.kin_cal_ticks < 96 {
+            return None;
+        }
+        let mut mv1 = 0.0_f32;
+        for &v in &self.v_place1[..np1] {
+            if v > mv1 {
+                mv1 = v;
+            }
+        }
+        let mut cplace = [0.0_f32; PLACE_CAP];
+        let mut mposc = 0.0_f32;
+        let mut mabsc = 0.0_f32;
+        for k in STAGE1_CAP..np2 {
+            let c_off = k * OPP_CUE_DIM;
+            let mut cp = 0.34 * self.r_place_uncond[k];
+            for i in 0..OPP_CUE_DIM {
+                cp += self.w_place_opp[c_off + i] * cue_opp[i];
+            }
+            let cp = sanitize(cp);
+            cplace[k] = cp;
+            if cp > mposc {
+                mposc = cp;
+            }
+            if cp.abs() > mabsc {
+                mabsc = cp.abs();
+            }
+        }
+        if !is_plastic && mv1 <= 0.05 && mabsc <= 0.05 {
+            return None;
+        }
+
+        let na = self.n_act;
+        let mut dz_hat = [[0.0_f32; STRIATAL_PORES]; COMPASS_DIRS];
+        let mut dz_norm = [1.0e-6_f32; COMPASS_DIRS];
+        if self.kin_cal_ticks >= 96 && n_kin_now >= 4 {
+            let mut am = vec![0.0_f32; act_s];
+            for c in 0..COMPASS_DIRS {
+                let ang = (c as f32) * core::f32::consts::FRAC_PI_4;
+                let (ca, sa) = (ang.cos(), ang.sin());
+                for m in 0..act_s {
+                    am[m] = (4.2 * (ca * self.syn_s1[m] + sa * self.syn_s2[m])).tanh();
+                }
+                let mut nsq = 0.0_f32;
+                for p in 0..STRIATAL_PORES {
+                    if is_kin[p] {
+                        let k_off = p * na;
+                        let mut dp = 0.0_f32;
+                        for m in 0..act_s {
+                            dp += self.kin_j1[k_off + m] * am[m];
+                        }
+                        let dp = sanitize(dp / hsp_arr[p].max(0.08));
+                        dz_hat[c][p] = dp;
+                        nsq += dp * dp;
+                    }
+                }
+                dz_norm[c] = nsq.max(1.0e-8).sqrt();
+            }
+        }
+        let proto_homing_local = |st: &Self, c: usize, k_t: usize| -> f32 {
+            let pm = st.place_mask[k_t];
+            if pm == 0 {
+                return 0.0;
+            }
+            let pp = &st.place_proto[k_t];
+            let mut dot = 0.0_f32;
+            let mut dsq = 0.0_f32;
+            for p in 0..STRIATAL_PORES {
+                if is_kin[p] && ((pm >> p) & 1) != 0 {
+                    let df = pp[p] - z_kin[p];
+                    dot += df * dz_hat[c][p];
+                    dsq += df * df;
+                }
+            }
+            if dsq < 1.0e-4 {
+                0.0
+            } else {
+                sanitize_clamp(dot / (dsq.sqrt() * dz_norm[c]), -1.5, 1.5)
+            }
+        };
+
+        let mut olat = vec![0.0_f32; act_s];
+        if s_sub < 0.5 {
+            let mut d1 = 0.0_f32;
+            let mut d2 = 0.0_f32;
+            for m in 0..act_s {
+                let rl = 0.42 + 0.55 * self.w_latch_act[m];
+                olat[m] = rl;
+                d1 += rl * self.syn_s1[m];
+                d2 += rl * self.syn_s2[m];
+            }
+            for m in 0..act_s {
+                olat[m] = sanitize_clamp(
+                    olat[m] - d1 * self.syn_s1[m] - d2 * self.syn_s2[m],
+                    -0.75,
+                    0.75,
+                );
+            }
+        }
+        if step_stalled || (!self.prev_subgoal_state && s_sub >= 0.5) {
+            self.explore_hold = 0;
+        }
+
+        if s_sub < 0.5 {
+            let k_win1 = if np1 > 0 {
+                let mut bw = 0usize;
+                for k in 1..np1 {
+                    if phi1[k] > phi1[bw] {
+                        bw = k;
+                    }
+                }
+                bw as u8
+            } else {
+                255
+            };
+            if k_win1 == self.s1_last_win {
+                self.s1_dwell = self.s1_dwell.saturating_add(1).min(50);
+            } else {
+                self.s1_last_win = k_win1;
+                self.s1_dwell = 1;
+            }
+            let mut k_br_best = 0usize;
+            for k in 1..np1 {
+                if self.r_bridge[k] > self.r_bridge[k_br_best] {
+                    k_br_best = k;
+                }
+            }
+            let max_rb1 = if np1 > 0 { self.r_bridge[k_br_best] } else { 0.0 };
+            let mut cur_v1_now = 0.0_f32;
+            for k in 0..np1 {
+                cur_v1_now += phi1[k] * self.v_place1[k];
+            }
+            let stuck_s1 = self.s1_dwell >= 5
+                && (np1 == 0 || self.r_bridge[(k_win1 as usize).min(STAGE1_CAP - 1)] < 0.35);
+            let chosen_dir_now = if is_plastic && (cur_v1_now < 0.28 || stuck_s1) {
+                if self.explore_hold > 0 {
+                    self.explore_hold -= 1;
+                    self.explore_dir & 7
+                } else {
+                    self.s1_sweep_idx = (self.s1_sweep_idx.wrapping_add(3)) & 7;
+                    let mut best_d = self.s1_sweep_idx;
+                    let mut best_u = -1.0e9_f32;
+                    for c in 0..COMPASS_DIRS {
+                        let mut vis = 0.0_f32;
+                        let mut stl = 0.0_f32;
+                        let mut ev1 = 0.0_f32;
+                        for k in 0..np1 {
+                            let pk = phi1[k];
+                            if pk > 0.0 {
+                                vis += pk * self.n_kc1[k * COMPASS_DIRS + c];
+                                stl += pk * self.stall_kc1[k * COMPASS_DIRS + c];
+                                if pk > 0.02 {
+                                    let t_off = (k * COMPASS_DIRS + c) * STAGE1_CAP;
+                                    let mut ts = 0.0_f32;
+                                    let mut num = 0.0_f32;
+                                    for kn in 0..np1 {
+                                        let tv = self.trans1[t_off + kn];
+                                        ts += tv;
+                                        num += tv * self.v_place1[kn];
+                                    }
+                                    if ts > 0.15 {
+                                        ev1 += pk * (num / ts);
+                                    }
+                                }
+                            }
+                        }
+                        let sw_b = if (c as u8) == self.s1_sweep_idx {
+                            0.05
+                        } else {
+                            0.0
+                        };
+                        let u = 0.85 * ev1 + 1.0 / (1.0 + vis).sqrt() - 0.85 * stl + sw_b;
+                        if u > best_u {
+                            best_u = u;
+                            best_d = c as u8;
+                        }
+                    }
+                    self.explore_dir = best_d;
+                    self.explore_hold = 4;
+                    best_d
+                }
+            } else {
+                let ns1 = if is_plastic {
+                    1.0 - (cur_v1_now / 0.55).clamp(0.0, 0.92)
+                } else {
+                    0.0
+                };
+                let mut tot_n1 = [0.0_f32; STAGE1_CAP];
+                let mut vp1 = [0.0_f32; STAGE1_CAP];
+                for k in 0..np1 {
+                    let mut s_n = 0.0_f32;
+                    for c in 0..COMPASS_DIRS {
+                        s_n += self.n_kc1[k * COMPASS_DIRS + c];
+                    }
+                    tot_n1[k] = s_n;
+                    vp1[k] = self.r_bridge[k].max(self.v_place1[k])
+                        + ns1 * 0.30 / (1.0 + 1.2 * s_n).sqrt();
+                }
+                for _ in 0..12 {
+                    let mut vn = vp1;
+                    for k in 0..np1 {
+                        if self.r_bridge[k] >= 0.75 {
+                            continue;
+                        }
+                        let mut bq = self.r_bridge[k].max(if is_plastic {
+                            0.0
+                        } else {
+                            self.v_place1[k]
+                        });
+                        for c in 0..COMPASS_DIRS {
+                            let t_off = (k * COMPASS_DIRS + c) * STAGE1_CAP;
+                            let mut ts = 0.0_f32;
+                            let mut num = 0.0_f32;
+                            for kn in 0..np1 {
+                                let tv = self.trans1[t_off + kn];
+                                ts += tv;
+                                num += tv * vp1[kn];
+                            }
+                            if ts > 0.15 {
+                                let cand =
+                                    0.88 * (num / ts) - 0.55 * self.stall_kc1[k * COMPASS_DIRS + c];
+                                if cand > bq {
+                                    bq = cand;
+                                }
+                            }
+                        }
+                        let nov_f = ns1 * 0.25 / (1.0 + 1.5 * tot_n1[k]).sqrt();
+                        vn[k] = bq.max(nov_f);
+                    }
+                    vp1[..np1].copy_from_slice(&vn[..np1]);
+                }
+                let in_br_basin = np1 > 0
+                    && max_rb1 >= 0.35
+                    && phi1[k_br_best] >= 0.25
+                    && self.cos_shared_place(k_br_best, is_kin, z_kin) >= 0.82;
+                let mut best_c = 0u8;
+                let mut best_q = -1.0e9_f32;
+                for c in 0..COMPASS_DIRS {
+                    let mut sc_c = 0.0_f32;
+                    let mut stl_cur = 0.0_f32;
+                    for k in 0..np1 {
+                        let pk = phi1[k];
+                        stl_cur += pk * self.stall_kc1[k * COMPASS_DIRS + c];
+                        if pk > 0.02 {
+                            let t_off = (k * COMPASS_DIRS + c) * STAGE1_CAP;
+                            let mut ts = 0.0_f32;
+                            let mut num = 0.0_f32;
+                            for kn in 0..np1 {
+                                let tv = self.trans1[t_off + kn];
+                                ts += tv;
+                                num += tv * vp1[kn];
+                            }
+                            let ucb = ns1 * 0.25 / (1.0 + self.n_kc1[k * COMPASS_DIRS + c]).sqrt();
+                            let ev = if ts > 0.15 {
+                                num / ts
+                            } else {
+                                ns1 * 0.35 - (1.0 - ns1) * 0.25
+                            };
+                            sc_c +=
+                                pk * (0.88 * ev + ucb - 0.75 * self.stall_kc1[k * COMPASS_DIRS + c]);
+                        }
+                    }
+                    if in_br_basin {
+                        sc_c +=
+                            0.65 * (1.0 - stl_cur).max(0.0) * proto_homing_local(self, c, k_br_best);
+                    }
+                    if self.prev_dir < 8 {
+                        if step_stalled && (c as u8) == self.prev_dir {
+                            sc_c -= 0.85;
+                        } else if !stuck_s1 {
+                            let da = ((c as f32) - f32::from(self.prev_dir))
+                                * core::f32::consts::FRAC_PI_4;
+                            sc_c += 0.02 * da.cos();
+                        } else if (c as u8) == self.prev_dir {
+                            sc_c -= 0.35;
+                        }
+                    }
+                    if sc_c > best_q {
+                        best_q = sc_c;
+                        best_c = c as u8;
+                    }
+                }
+                best_c
+            };
+            let ang = f32::from(chosen_dir_now) * core::f32::consts::FRAC_PI_4;
+            let (ca, sa) = (ang.cos(), ang.sin());
+            let mut sys2_pre = vec![0.0_f32; act_s];
+            for m in 0..act_s {
+                sys2_pre[m] =
+                    sanitize(4.2 * (ca * self.syn_s1[m] + sa * self.syn_s2[m]) + olat[m]);
+            }
+            Some((sys2_pre, chosen_dir_now))
+        } else {
+            let mut k_goal2: Option<usize> = None;
+            let mut ccur = 0.0_f32;
+            let mut pure_s2_mass = 0.0_f32;
+            for k in STAGE1_CAP..np2 {
+                pure_s2_mass += phi2[k];
+                ccur += phi2[k] * cplace[k];
+                if k_goal2.is_none_or(|kg| cplace[k] > cplace[kg]) {
+                    k_goal2 = Some(k);
+                }
+            }
+            let cos_goal2 = k_goal2.map_or(-2.0, |kg| self.cos_shared_place(kg, is_kin, z_kin));
+            let at_pos_goal = mposc >= 0.36
+                && pure_s2_mass >= 0.75
+                && ccur >= 0.80 * mposc
+                && (reward > 0.05 || (self.wm_occ_age <= 22 && cos_goal2 >= 0.945));
+            if at_pos_goal {
+                return Some((vec![0.0_f32; act_s], 255));
+            }
+            let is_active_k2 = |k: usize| -> bool { k < np1 || (k >= STAGE1_CAP && k < np2) };
+            let mut v_exp = [0.0_f32; PLACE_CAP];
+            for k in 0..np2 {
+                if is_active_k2(k) {
+                    v_exp[k] = if k < STAGE1_CAP { -0.75 } else { cplace[k] };
+                }
+            }
+            for _ in 0..12 {
+                let mut vne = v_exp;
+                for k in 0..np2 {
+                    if !is_active_k2(k) || (k >= STAGE1_CAP && cplace[k] >= 0.36) {
+                        continue;
+                    }
+                    let bq = if k < STAGE1_CAP {
+                        -0.75
+                    } else if cplace[k] >= 0.34 {
+                        cplace[k]
+                    } else {
+                        cplace[k].min(0.0)
+                    };
+                    let mut has_e = false;
+                    let mut best_e = -2.0_f32;
+                    for c in 0..COMPASS_DIRS {
+                        let t_off = (k * COMPASS_DIRS + c) * PLACE_CAP;
+                        let mut ts = 0.0_f32;
+                        let mut num = 0.0_f32;
+                        for kn in 0..np2 {
+                            if is_active_k2(kn) {
+                                let tv = self.trans2[t_off + kn];
+                                ts += tv;
+                                num += tv * v_exp[kn];
+                            }
+                        }
+                        if ts > 0.15 {
+                            has_e = true;
+                            let ev = (num / ts) - 0.55 * self.stall_kc2[k * COMPASS_DIRS + c];
+                            if ev > best_e {
+                                best_e = ev;
+                            }
+                        }
+                    }
+                    vne[k] = if has_e {
+                        if cplace[k] >= -0.15 {
+                            bq.max(0.88 * best_e)
+                        } else {
+                            cplace[k].min(0.88 * best_e)
+                        }
+                    } else {
+                        bq
+                    };
+                }
+                v_exp = vne;
+            }
+            let mut cur_v2_raw = 0.0_f32;
+            for k in 0..np2 {
+                if is_active_k2(k) {
+                    cur_v2_raw += phi2[k] * v_exp[k];
+                }
+            }
+            let cur_v2_exp = cur_v2_raw.max(0.0);
+            let chosen_dir_now =
+                if is_plastic && cur_v2_exp < 0.20 && self.explore_hold > 0 && ccur > -0.20 {
+                    self.explore_hold -= 1;
+                    self.explore_dir & 7
+                } else {
+                    let ns2 = if is_plastic {
+                        1.0 - (cur_v2_exp / 0.40).clamp(0.0, 0.95)
+                    } else {
+                        0.0
+                    };
+                    let mut tot_v2 = [0.0_f32; PLACE_CAP];
+                    let mut vp2 = [0.0_f32; PLACE_CAP];
+                    for k in 0..np2 {
+                        if !is_active_k2(k) {
+                            continue;
+                        }
+                        if k < STAGE1_CAP {
+                            vp2[k] = -0.75;
+                        } else {
+                            let mut sv = 0.0_f32;
+                            for c in 0..COMPASS_DIRS {
+                                sv += self.n_kc2[k * COMPASS_DIRS + c];
+                            }
+                            tot_v2[k] = sv;
+                            let nov_k =
+                                1.0 / (1.0 + 2.0 * self.place_term_visits[k] + 1.2 * sv).sqrt();
+                            vp2[k] = cplace[k] + ns2 * 0.65 * nov_k;
+                        }
+                    }
+                    for _ in 0..12 {
+                        let mut vn2 = vp2;
+                        for k in 0..np2 {
+                            if !is_active_k2(k) || (k >= STAGE1_CAP && cplace[k] >= 0.36) {
+                                continue;
+                            }
+                            let imm_k = if k < STAGE1_CAP {
+                                -0.75
+                            } else {
+                                cplace[k]
+                                    + ns2 * 0.55
+                                        / (1.0
+                                            + 2.0 * self.place_term_visits[k]
+                                            + 1.5 * tot_v2[k])
+                                            .sqrt()
+                            };
+                            let mut best_c = imm_k;
+                            for c in 0..COMPASS_DIRS {
+                                let t_off = (k * COMPASS_DIRS + c) * PLACE_CAP;
+                                let mut ts = 0.0_f32;
+                                let mut num = 0.0_f32;
+                                for kn in 0..np2 {
+                                    if is_active_k2(kn) {
+                                        let tv = self.trans2[t_off + kn];
+                                        ts += tv;
+                                        num += tv * vp2[kn];
+                                    }
+                                }
+                                let st2 = self.stall_kc2[k * COMPASS_DIRS + c];
+                                if ts > 0.15 {
+                                    let cand = 0.88 * (num / ts) - 0.55 * st2;
+                                    if cand > best_c {
+                                        best_c = cand;
+                                    }
+                                } else if ns2 > 0.25 && k >= STAGE1_CAP && st2 < 0.25 {
+                                    best_c = best_c.max(0.42 * ns2);
+                                }
+                            }
+                            vn2[k] = if cplace[k] >= -0.25 {
+                                best_c
+                            } else {
+                                cplace[k].min(best_c)
+                            };
+                        }
+                        vp2 = vn2;
+                    }
+                    if is_plastic && cur_v2_exp < 0.20 {
+                        self.s2_sweep_idx = (self.s2_sweep_idx.wrapping_add(3)) & 7;
+                    }
+                    let in_goal2_basin =
+                        k_goal2.is_some_and(|kg| mposc >= 0.34 && phi2[kg] >= 0.25 && cos_goal2 >= 0.82);
+                    let mut best_d = 0u8;
+                    let mut best_q2 = -1.0e9_f32;
+                    for c in 0..COMPASS_DIRS {
+                        let mut sc_c = 0.0_f32;
+                        let mut stl_cur2 = 0.0_f32;
+                        for k in 0..np2 {
+                            if !is_active_k2(k) {
+                                continue;
+                            }
+                            let pk = phi2[k];
+                            stl_cur2 += pk * self.stall_kc2[k * COMPASS_DIRS + c];
+                            if pk > 0.02 {
+                                let t_off = (k * COMPASS_DIRS + c) * PLACE_CAP;
+                                let mut ts = 0.0_f32;
+                                let mut num = 0.0_f32;
+                                for kn in 0..np2 {
+                                    if is_active_k2(kn) {
+                                        let tv = self.trans2[t_off + kn];
+                                        ts += tv;
+                                        num += tv * vp2[kn];
+                                    }
+                                }
+                                let ucb =
+                                    ns2 * 0.35 / (1.0 + self.n_kc2[k * COMPASS_DIRS + c]).sqrt();
+                                let ev = if ts > 0.15 {
+                                    num / ts
+                                } else if k < STAGE1_CAP {
+                                    let t1_off = (k * COMPASS_DIRS + c) * STAGE1_CAP;
+                                    let mut ts1 = 0.0_f32;
+                                    for kn1 in 0..np1 {
+                                        ts1 += self.trans1[t1_off + kn1];
+                                    }
+                                    let st1 = self.stall_kc1[k * COMPASS_DIRS + c];
+                                    if ts1 > 0.15 && st1 < 0.35 {
+                                        -0.75
+                                    } else if st1 >= 0.20 {
+                                        0.65 * ns2
+                                    } else {
+                                        0.30 * ns2 - 0.25 * (1.0 - ns2)
+                                    }
+                                } else {
+                                    0.50 * ns2 - 0.30 * (1.0 - ns2)
+                                };
+                                sc_c += pk
+                                    * (0.88 * ev + ucb - 0.65 * self.stall_kc2[k * COMPASS_DIRS + c]);
+                            }
+                        }
+                        if let Some(kg) = k_goal2
+                            && in_goal2_basin
+                        {
+                            sc_c +=
+                                0.65 * (1.0 - stl_cur2).max(0.0) * proto_homing_local(self, c, kg);
+                        }
+                        if is_plastic && cur_v2_exp < 0.20 && (c as u8) == self.s2_sweep_idx {
+                            sc_c += 0.05;
+                        }
+                        if self.prev_dir < 8 {
+                            if step_stalled && (c as u8) == self.prev_dir {
+                                sc_c -= 0.85;
+                            } else {
+                                let da = ((c as f32) - f32::from(self.prev_dir))
+                                    * core::f32::consts::FRAC_PI_4;
+                                sc_c += 0.03 * da.cos();
+                            }
+                        }
+                        if sc_c > best_q2 {
+                            best_q2 = sc_c;
+                            best_d = c as u8;
+                        }
+                    }
+                    if is_plastic && cur_v2_exp < 0.20 {
+                        self.explore_dir = best_d;
+                        self.explore_hold = 3;
+                    }
+                    best_d
+                };
+            let ang = f32::from(chosen_dir_now) * core::f32::consts::FRAC_PI_4;
+            let (ca, sa) = (ang.cos(), ang.sin());
+            let mut sys2_pre = vec![0.0_f32; act_s];
+            for m in 0..act_s {
+                sys2_pre[m] = sanitize(4.2 * (ca * self.syn_s1[m] + sa * self.syn_s2[m]));
+            }
+            Some((sys2_pre, chosen_dir_now))
         }
     }
 
@@ -1372,6 +2437,91 @@ impl StriatalOfc {
         }
         for &rb in &self.r_bar_ctx {
             hasher.write_f32(rb);
+        }
+        hasher.write_u8(self.quarantine_len);
+        let q_len = (self.quarantine_len as usize).min(QUARANTINE_CAP);
+        for &qch in &self.quarantine_ch[..q_len] {
+            hasher.write_u32(u32::from(qch));
+        }
+        for &bt in &self.wm_bank_tag {
+            hasher.write_u8(bt);
+        }
+        hasher.write_bool(self.wm_ever_latched);
+        hasher.write_bool(self.wm_ever_probed);
+        hasher.write_u8(self.wm_active_rule);
+        for &rc in &self.rel_c {
+            hasher.write_f32(rc);
+        }
+        for r in 0..WM_RULE_SLOTS {
+            hasher.write_u8(self.tonic_rule_valid[r]);
+            for &rch in &self.tonic_rule_ch[r] {
+                hasher.write_u32(rch);
+            }
+            for &rk in &self.tonic_rule_key[r] {
+                hasher.write_f32(rk);
+            }
+            for &wr in &self.w_pfc_rule[r] {
+                hasher.write_f32(wr);
+            }
+            hasher.write_f32(self.pfc_r_ema[r]);
+        }
+        hasher.write_u32(u32::from(self.kin_cal_ticks));
+        for p in 0..STRIATAL_PORES {
+            hasher.write_f32(self.kin_min[p]);
+            hasher.write_f32(self.kin_max[p]);
+            hasher.write_f32(self.kin_r2[p]);
+            hasher.write_f32(self.kin_r2_peak[p]);
+            hasher.write_f32(self.kin_resp[p]);
+        }
+        for &kj in &self.kin_j1 {
+            hasher.write_f32(kj);
+        }
+        for &gk in &self.g_kin {
+            hasher.write_f32(gk);
+        }
+        for &s1 in &self.syn_s1 {
+            hasher.write_f32(s1);
+        }
+        for &s2 in &self.syn_s2 {
+            hasher.write_f32(s2);
+        }
+        for &wl in &self.w_latch_act {
+            hasher.write_f32(wl);
+        }
+        hasher.write_u8(self.n_places1);
+        hasher.write_u8(self.n_places2);
+        for k in 0..PLACE_CAP {
+            hasher.write_u64(self.place_mask[k]);
+            for &pp in &self.place_proto[k] {
+                hasher.write_f32(pp);
+            }
+            hasher.write_f32(self.r_place_uncond[k]);
+            hasher.write_f32(self.place_term_visits[k]);
+        }
+        for &t1 in &self.trans1 {
+            hasher.write_f32(t1);
+        }
+        for &t2 in &self.trans2 {
+            hasher.write_f32(t2);
+        }
+        for &n1 in &self.n_kc1 {
+            hasher.write_f32(n1);
+        }
+        for &n2 in &self.n_kc2 {
+            hasher.write_f32(n2);
+        }
+        for &st1 in &self.stall_kc1 {
+            hasher.write_f32(st1);
+        }
+        for &st2 in &self.stall_kc2 {
+            hasher.write_f32(st2);
+        }
+        for k in 0..STAGE1_CAP {
+            hasher.write_f32(self.r_bridge[k]);
+            hasher.write_f32(self.v_place1[k]);
+        }
+        for &wo in &self.w_place_opp {
+            hasher.write_f32(wo);
         }
     }
 }
@@ -2927,6 +4077,7 @@ impl TubeGraph {
             }
         }
         let mut is_world_ret_cal = [false; PRED_BUCKETS];
+        let mut som_loco_auth = vec![0.0_f32; ad];
         for p in 0..pore_cap {
             let sp = &membrane.sensor_pores[p];
             if !sp.alive || !self.is_retinal_field_pore(p, sp, &membrane.scout_stats) {
@@ -2957,7 +4108,11 @@ impl TubeGraph {
                 spatial_prox_sum += (x_now - self.pore_mean_v[p]).max(0.0);
                 spatial_prox_cnt += 1;
                 for (m, la) in loco_auth.iter_mut().enumerate() {
-                    *la += self.pore_action_w[m][p].abs();
+                    let wa = self.pore_action_w[m][p].abs();
+                    *la += wa;
+                    if wa >= 0.018 {
+                        som_loco_auth[m] += wa;
+                    }
                 }
             }
         }
@@ -2975,6 +4130,12 @@ impl TubeGraph {
         for &la in &loco_auth {
             if la > max_loco_auth {
                 max_loco_auth = la;
+            }
+        }
+        let mut max_som_loco_auth = 0.08_f32;
+        for &sla in &som_loco_auth {
+            if sla > max_som_loco_auth {
+                max_som_loco_auth = sla;
             }
         }
         let mut max_2_6 = vec![0.0_f32; ad];
@@ -3374,7 +4535,7 @@ impl TubeGraph {
         let lag2_ent = ring.at_lag(2).filter(|e| e.committed);
         for (m, &is_loco_c) in is_world_loco_cal.iter().enumerate() {
             if is_loco_c
-                || loco_auth[m] >= 0.06 * max_loco_auth
+                || som_loco_auth[m] >= 0.22 * max_som_loco_auth
                 || Some(m) == mg_opt
                 || (self.vocal_artic_w[m] >= 0.008
                     && coch_inst[m] > som_inst[m]
@@ -3489,6 +4650,7 @@ impl TubeGraph {
             let mut seen_coch_n = 0usize;
             let mut coch_strong_cnt = 0usize;
             let mut coch_weak_cnt = 0usize;
+            let mut coch_mod_cnt = 0usize;
             let mut cnt_c = 0usize;
 
             let mut top4_lso_pos = [0.0_f32; 4];
@@ -3543,6 +4705,19 @@ impl TubeGraph {
                     } else {
                         0.0
                     };
+                    if u_sus3 > 0.016 {
+                        let mut min_u12 = u0;
+                        let max_sub = (stim_lag + 12).min(13);
+                        for sub_lag in (stim_lag + 1)..=max_sub {
+                            let ul = self.deconv_pore_exc(p, &sp.history, h, sub_lag).max(0.0);
+                            if ul < min_u12 {
+                                min_u12 = ul;
+                            }
+                        }
+                        if u0 - min_u12 >= 0.016 {
+                            coch_mod_cnt += 1;
+                        }
+                    }
                     if u_sus3 > 0.038 {
                         coch_strong_cnt += 1;
                     }
@@ -3641,7 +4816,7 @@ impl TubeGraph {
                         top4_clean_neg,
                     )
                 };
-            let harm_opt = if cnt_c >= 2 {
+            let harm_opt = if cnt_c >= 2 && (!self.has_tonotopic_bank() || coch_mod_cnt >= 2) {
                 let lvl = 0.5 * (top4_cal[0] + top4_cal[1]);
                 let ok = (coch_strong_cnt >= 2
                     && lvl > 0.040
@@ -3663,8 +4838,10 @@ impl TubeGraph {
         };
 
         let span_c = (self.peer_coch_age as usize).saturating_add(1);
+        let max_span_c = if self.has_tonotopic_bank() { 24 } else { 15 };
         let (peer_lvl_cal_opt, dom_sign_cal) =
-            if quiet_self_cal_7 && self.peer_coch_fast > 0.016 && (3..=15).contains(&span_c) {
+            if quiet_self_cal_7 && self.peer_coch_fast > 0.016 && (3..=max_span_c).contains(&span_c)
+            {
                 peer_call_at_lag(0)
             } else {
                 (None, 0.0)
@@ -6481,7 +7658,8 @@ impl TubeGraph {
         } else {
             0.0
         };
-        if mode == ControlMode::Natural && (ret_jump_mean > 0.085 || acute_distress > 0.48) {
+        let ret_jump_lim = if emb_eco { 0.28 } else { 0.085 };
+        if mode == ControlMode::Natural && (ret_jump_mean > ret_jump_lim || acute_distress > 0.48) {
             self.peer_vocal_hold = 0.0;
             self.social_loom_ema = 0.0;
             self.peer_coch_age = 255;
@@ -6502,6 +7680,7 @@ impl TubeGraph {
         let mut seen_coch_ro_n = 0usize;
         let mut coch_strong_cnt = 0usize;
         let mut coch_weak_cnt = 0usize;
+        let mut coch_mod_cnt = 0usize;
         let mut sym_coch_cnt = 0usize;
         let mut top_echo_0 = 0.0_f32;
         let mut top_echo_1 = 0.0_f32;
@@ -6542,6 +7721,18 @@ impl TubeGraph {
                     } else {
                         0.0
                     };
+                    if u_sus3 > 0.016 {
+                        let mut min_u12 = u0;
+                        for sub_lag in 1..=12 {
+                            let ul = self.deconv_pore_exc(p, &sp.history, h, sub_lag).max(0.0);
+                            if ul < min_u12 {
+                                min_u12 = ul;
+                            }
+                        }
+                        if u0 - min_u12 >= 0.016 {
+                            coch_mod_cnt += 1;
+                        }
+                    }
                     if u_sus3 > 0.038 {
                         coch_strong_cnt += 1;
                     }
@@ -6659,23 +7850,24 @@ impl TubeGraph {
                 )
             };
         let mut coch_lvl_now = 0.0_f32;
-        let peer_harmonic_now = if quiet_self_7 && sym_coch_cnt >= 2 {
-            coch_lvl_now = sanitize_clamp(0.5 * (top4_coch[0] + top4_coch[1]), 0.0, 2.0);
-            (coch_strong_cnt >= 2
-                && coch_lvl_now > 0.040
-                && lso_coh_cnt >= 3
-                && top4_lso_dom[2] > 0.018)
-                || (coch_strong_cnt >= 1
-                    && top4_coch[0] > 0.058
-                    && lso_coh_cnt >= 4
-                    && top4_lso_dom[3] > 0.020)
-                || (coch_weak_cnt >= 2
-                    && coch_lvl_now > 0.018
-                    && lso_clean_cnt >= 5
-                    && top4_lso_clean[3] > 0.022)
-        } else {
-            false
-        };
+        let peer_harmonic_now =
+            if quiet_self_7 && sym_coch_cnt >= 2 && (!emb_eco || coch_mod_cnt >= 2) {
+                coch_lvl_now = sanitize_clamp(0.5 * (top4_coch[0] + top4_coch[1]), 0.0, 2.0);
+                (coch_strong_cnt >= 2
+                    && coch_lvl_now > 0.040
+                    && lso_coh_cnt >= 3
+                    && top4_lso_dom[2] > 0.018)
+                    || (coch_strong_cnt >= 1
+                        && top4_coch[0] > 0.058
+                        && lso_coh_cnt >= 4
+                        && top4_lso_dom[3] > 0.020)
+                    || (coch_weak_cnt >= 2
+                        && coch_lvl_now > 0.018
+                        && lso_clean_cnt >= 5
+                        && top4_lso_clean[3] > 0.022)
+            } else {
+                false
+            };
         let peer_echo_now = echo_pore_cnt >= 1 && quiet_echo_self && top_echo_0 > 0.018;
 
         if mode == ControlMode::Natural {
@@ -6684,7 +7876,8 @@ impl TubeGraph {
             if peer_harmonic_now || peer_echo_now {
                 self.peer_vocal_hold = 1.0;
             } else {
-                self.peer_vocal_hold = sanitize(0.970 * self.peer_vocal_hold);
+                let hold_dec = if emb_eco { 0.982 } else { 0.970 };
+                self.peer_vocal_hold = sanitize(hold_dec * self.peer_vocal_hold);
             }
         }
         let active_peer_hold = if mode == ControlMode::Natural && self.peer_vocal_hold > 0.22 {
@@ -6926,7 +8119,11 @@ impl TubeGraph {
 
             if peer_harmonic_now {
                 let dt_c = self.peer_coch_age;
-                let drifted_c = dt_c > 16;
+                let drifted_c = if emb_eco {
+                    dt_c > 24 || (dt_c > 15 && self.peer_disp_coch.abs() > 2.4)
+                } else {
+                    dt_c > 16
+                };
                 if drifted_c || self.peer_coch_slow <= 0.014 {
                     self.peer_coch_fast = coch_lvl_now;
                     self.peer_coch_slow = coch_lvl_now;
@@ -6985,6 +8182,7 @@ impl TubeGraph {
         }
 
         let min_sample_age = self.peer_coch_age.min(self.peer_echo_age);
+        let max_loom_age = if emb_eco { 24 } else { 15 };
         if loom_den > 0.024 {
             let inst_loom = smooth_saturate(2.8 * loom_num / (loom_den + 0.05));
             if mode == ControlMode::Natural {
@@ -6992,8 +8190,8 @@ impl TubeGraph {
                     sanitize_clamp(0.28 * self.social_loom_ema + 0.72 * inst_loom, -1.0, 1.0);
             }
         } else if mode == ControlMode::Natural && !cpa_flipped {
-            let decay = if min_sample_age <= 15 && active_peer_hold > 0.25 {
-                0.945
+            let decay = if min_sample_age <= max_loom_age && active_peer_hold > 0.25 {
+                if emb_eco { 0.960 } else { 0.945 }
             } else {
                 0.62
             };
@@ -7043,7 +8241,11 @@ impl TubeGraph {
             if elder_forager && ep_t < 0.28 && op_t < 0.28 {
                 0.0
             } else if ol_pk >= 0.28 && ol_pk > os_pk {
-                ((body.atp - 76.0) / 16.0).clamp(0.0, 1.0)
+                if ring.at_lag(1).is_some_and(|e| e.tick >= 16_000) {
+                    ((body.atp - 76.0) / 16.0).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                }
             } else {
                 1.0
             }
@@ -7071,12 +8273,18 @@ impl TubeGraph {
         }
         let homeo_vec_norm = homeo_sq.sqrt();
         let vis_target_suppress = (1.0 - 1.35 * homeo_vec_norm).clamp(0.38, 1.0);
-        let vis_occ_gate = if vis_prox_now < 0.180 {
-            (1.0 - 2.6 * (vis_prox_now - 0.05).max(0.0)).clamp(0.26, 1.0)
+        let vis_occ_lim = if emb_eco { 0.195 } else { 0.180 };
+        let vis_occ_gate = if vis_prox_now < vis_occ_lim {
+            let floor_g = if emb_eco { 0.34 } else { 0.26 };
+            (1.0 - 2.6 * (vis_prox_now - 0.05).max(0.0)).clamp(floor_g, 1.0)
         } else {
-            (0.26 * (1.0 - (vis_prox_now - 0.180) / 0.030)).clamp(0.0, 0.26)
+            (0.26 * (1.0 - (vis_prox_now - vis_occ_lim) / 0.030)).clamp(0.0, 0.26)
         };
-        let social_drive_mag = 0.64 * vis_occ_gate;
+        let social_drive_mag = if emb_eco {
+            0.70 * vis_occ_gate
+        } else {
+            0.64 * vis_occ_gate
+        };
         for m in 0..num_actuators {
             if m < ad {
                 let social_va = if active_peer_hold > 0.25
@@ -7375,8 +8583,12 @@ impl TubeGraph {
                 && !is_loco_m
                 && !is_glottal_act
                 && !is_echo_emitter
-                && ((self.vocal_artic_w[m] >= 0.005 && abs_cochlea_reaff[m] > som_dom)
+                && ((self.vocal_artic_w[m] >= 0.005
+                    && self.somatic_limb_w[m] < 0.035
+                    && abs_cochlea_reaff[m] > som_dom)
                     || (coch_artic_cnt[m] >= 2
+                        && somatic_prop_reaff[m] < 0.022
+                        && self.somatic_limb_w[m] < 0.022
                         && abs_cochlea_reaff[m] >= 0.011
                         && abs_cochlea_reaff[m] > 1.2 * som_dom));
             let is_somatic_limb = m < ad
@@ -7707,8 +8919,9 @@ impl TubeGraph {
                     && acute_distress < 0.35
                 {
                     let brake_safe = (1.0 - 2.0 * slow_inhib_brake[m]).clamp(0.0, 1.0);
-                    if vis_prox_now < 0.180 && body.atp > 2.0 {
-                        smoothed[m] + 0.62 * brake_safe * v_align[m]
+                    if vis_prox_now < vis_occ_lim && body.atp > 2.0 {
+                        let g_occ = if emb_eco { 0.68 } else { 0.62 };
+                        smoothed[m] + g_occ * brake_safe * v_align[m]
                     } else {
                         smoothed[m]
                     }
@@ -7880,6 +9093,8 @@ impl TubeGraph {
 
         let mut live_pore_ch = [u32::MAX; STRIATAL_PORES];
         let mut raw_x_arr = [0.0_f32; STRIATAL_PORES];
+        let mut min_h_arr = [0.0_f32; STRIATAL_PORES];
+        let mut max_h_arr = [0.0_f32; STRIATAL_PORES];
         let mut is_white_arr = [false; STRIATAL_PORES];
         let mut is_dead_flat_arr = [false; STRIATAL_PORES];
         let mut quad_cand = [false; STRIATAL_PORES];
@@ -7979,15 +9194,31 @@ impl TubeGraph {
                 && membrane.scout_stats[ch_u].var_ema > 1.0e-3
                 && membrane.scout_stats[ch_u].diff_sq_ema
                     > 1.45 * membrane.scout_stats[ch_u].var_ema;
-            let mut min_h_s = f32::MAX;
-            let mut max_h_s = f32::MIN;
-            for &hv in &membrane.sensor_pores[p].history {
-                min_h_s = min_h_s.min(hv);
-                max_h_s = max_h_s.max(hv);
-            }
+            let (min_h_s, max_h_s) = if membrane.sensor_pores[p].age_ticks == 0 {
+                (raw_x, raw_x)
+            } else {
+                let hist_len = (membrane.sensor_pores[p].age_ticks as usize).clamp(1, 16);
+                let mut mn = f32::MAX;
+                let mut mx = f32::MIN;
+                for &hv in &membrane.sensor_pores[p].history[..hist_len] {
+                    mn = mn.min(hv);
+                    mx = mx.max(hv);
+                }
+                (mn, mx)
+            };
+            min_h_arr[p] = min_h_s;
+            max_h_arr[p] = max_h_s;
             let max_abs_h = min_h_s.abs().max(max_h_s.abs());
+            let is_sp_imp = ch_u < n_scout && membrane.scout_stats[ch_u].is_sparse_impulse();
+            let has_phasic_var =
+                (self.striatal.wm_ever_latched || self.striatal.wm_bank_tag[p] != 0)
+                    && !is_sp_imp
+                    && ch_u < n_scout
+                    && membrane.scout_stats[ch_u].var_ema >= 5.0e-4;
             let is_dead_flat = (!has_any_env || is_plastic)
                 && membrane.sensor_pores[p].age_ticks >= 16
+                && self.striatal.wm_bank_tag[p] == 0
+                && !has_phasic_var
                 && (max_h_s - min_h_s) < 1.0e-5
                 && (max_abs_h < 1.0e-5 || max_h_s < -0.05);
             is_white_arr[p] = is_white;
@@ -8035,6 +9266,7 @@ impl TubeGraph {
         }
 
         let mut n_prony_env = 0usize;
+        let mut n_pos_pedestal = 0usize;
         let mut basal_coherent = [false; STRIATAL_PORES];
         for p in 0..STRIATAL_PORES {
             if live_pore_ch[p] == u32::MAX {
@@ -8076,6 +9308,13 @@ impl TubeGraph {
             } else {
                 0
             };
+            let is_sparse = ch_u < n_scout && membrane.scout_stats[ch_u].is_sparse_impulse();
+            let is_smooth_sp =
+                ch_u < n_scout && membrane.scout_stats[ch_u].is_smooth_spatial_field();
+            let is_spatial_pos = is_smooth_sp
+                || (self.striatal.kin_r2_peak[p] >= 0.20
+                    && min_h_arr[p] >= 0.035
+                    && (self.striatal.kin_max[p] - self.striatal.kin_min[p]) >= 0.10);
             if is_plastic {
                 let age = self.striatal.pore_age[p];
                 let beta_m = if age < 48 { 0.06 } else { 0.015 };
@@ -8102,53 +9341,87 @@ impl TubeGraph {
                 }
                 self.striatal.pore_age[p] = age.saturating_add(1);
 
-                let anchored_spine = cons_role != 0;
-                if anchored_spine {
-                    if membrane.sensor_pores[p].trophic_ema < 0.12 {
-                        membrane.sensor_pores[p].trophic_ema = 0.12;
-                    }
-                    if membrane.sensor_pores[p].conductance < 0.18 {
-                        membrane.sensor_pores[p].conductance = 0.18;
-                    }
-                }
-
-                let is_newtonian_field = carrier_bank
-                    && ch_u < n_scout
-                    && membrane.scout_stats[ch_u].is_smooth_spatial_field();
+                let is_newtonian_field = carrier_bank && is_smooth_sp;
                 let is_brownian_ou = carrier_bank
                     && age >= 48
                     && vel_c < 0.08
                     && self.striatal.pore_var_raw[p] > 2.0e-3;
+                let is_non_carr_ou = !carrier_bank
+                    && !is_sparse
+                    && !is_spatial_pos
+                    && age >= 32
+                    && vel_c < -0.12
+                    && self.striatal.pore_var_raw[p] > 0.045;
+                let is_verified_self_copy = !is_spatial_pos
+                    && age >= prune_warmup
+                    && self.striatal.pore_var_raw[p] > 8.0e-4
+                    && self.striatal.pore_var_exaff[p] < 0.25 * self.striatal.pore_var_raw[p];
                 if !apical_carrier[p]
-                    && !anchored_spine
+                    && cons_role == 0
                     && !is_newtonian_field
                     && !self.is_tonotopic_receptor(p)
-                    && (is_brownian_ou
-                        || (age >= prune_warmup
-                            && self.striatal.pore_var_raw[p] > 8.0e-4
-                            && self.striatal.pore_var_exaff[p]
-                                < 0.25 * self.striatal.pore_var_raw[p]))
+                    && (is_non_carr_ou || is_verified_self_copy)
                 {
+                    self.striatal.wm_bank_tag[p] = 0;
+                    self.striatal.wm_step_streak[p] = 0;
                     membrane.sensor_pores[p].trophic_ema = 0.0;
                     membrane.sensor_pores[p].conductance = 0.01;
+                    self.striatal.quarantine_channel(ch);
+                } else {
+                    let has_rule_reg = self.striatal.tonic_rule_valid.iter().any(|&v| v != 0);
+                    let kin_anchor = !carrier_bank
+                        && self.striatal.wm_ever_latched
+                        && !has_rule_reg
+                        && self.striatal.kin_r2_peak[p] >= 0.20;
+                    if cons_role != 0 {
+                        if membrane.sensor_pores[p].trophic_ema < 0.12 {
+                            membrane.sensor_pores[p].trophic_ema = 0.12;
+                        }
+                        if membrane.sensor_pores[p].conductance < 0.18 {
+                            membrane.sensor_pores[p].conductance = 0.18;
+                        }
+                    } else if self.striatal.wm_bank_tag[p] != 0 || kin_anchor {
+                        if membrane.sensor_pores[p].trophic_ema < 0.10 {
+                            membrane.sensor_pores[p].trophic_ema = 0.10;
+                        }
+                        if membrane.sensor_pores[p].conductance < 0.18 {
+                            membrane.sensor_pores[p].conductance = 0.18;
+                        }
+                    } else if !apical_carrier[p]
+                        && !is_newtonian_field
+                        && !self.is_tonotopic_receptor(p)
+                        && is_brownian_ou
+                    {
+                        membrane.sensor_pores[p].trophic_ema = 0.0;
+                        membrane.sensor_pores[p].conductance = 0.01;
+                    }
                 }
             }
             let age_now = self.striatal.pore_age[p];
-            let is_self_copy_like = age_now >= 36
+            let is_self_copy_like = (carrier_bank || !is_spatial_pos)
+                && age_now >= 36
                 && self.striatal.pore_var_raw[p] > 8.0e-4
                 && self.striatal.pore_var_exaff[p] < 0.25 * self.striatal.pore_var_raw[p];
-            let is_ou_like = carrier_bank
-                && (cons_role & 2) == 0
-                && age_now >= 36
-                && vel_c < 0.08
-                && self.striatal.pore_var_raw[p] > 2.0e-3;
+            let is_ou_like = if carrier_bank {
+                (cons_role & 2) == 0
+                    && age_now >= 36
+                    && vel_c < 0.08
+                    && self.striatal.pore_var_raw[p] > 2.0e-3
+            } else {
+                !is_sparse
+                    && !is_spatial_pos
+                    && age_now >= 32
+                    && vel_c < -0.12
+                    && self.striatal.pore_var_raw[p] > 0.045
+            };
             feat_active[p] = if carrier_bank && (cons_role & 2) != 0 {
                 !apical_carrier[p]
             } else {
                 !is_white_arr[p]
                     && !is_dead_flat_arr[p]
                     && !apical_carrier[p]
-                    && (!carrier_bank || (!is_self_copy_like && !is_ou_like))
+                    && !is_self_copy_like
+                    && !is_ou_like
             };
             basal_coherent[p] = if carrier_bank {
                 !apical_carrier[p]
@@ -8167,8 +9440,10 @@ impl TubeGraph {
                 0.0
             };
             pore_sig[p] = sanitize_clamp(raw_x - neg_floor - reaff, -1.0, 1.0);
-            let is_sparse = ch_u < n_scout && membrane.scout_stats[ch_u].is_sparse_impulse();
             if !is_sparse {
+                if feat_active[p] && min_h_arr[p] >= 0.035 {
+                    n_pos_pedestal += 1;
+                }
                 if !is_white_arr[p] {
                     max_smooth_raw = max_smooth_raw.max(raw_x.abs());
                 }
@@ -8184,11 +9459,16 @@ impl TubeGraph {
             }
         }
 
-        let active_continuous_field = if is_plastic {
-            self.striatal.tick < 48 || (c1_wave_pores >= 2 && max_smooth_raw > 1.0e-4)
-        } else {
-            c1_wave_pores >= 1
-        };
+        let active_continuous_field = self.striatal.wm_ever_latched
+            || (!carrier_bank
+                && !self.has_tonotopic_bank()
+                && n_pos_pedestal >= 4
+                && max_smooth_raw > 0.15)
+            || if is_plastic {
+                self.striatal.tick < 48 || (c1_wave_pores >= 2 && max_smooth_raw > 1.0e-4)
+            } else {
+                c1_wave_pores >= 1
+            };
         if !active_continuous_field {
             if is_plastic {
                 self.striatal.has_prev = false;
@@ -8198,7 +9478,7 @@ impl TubeGraph {
         }
 
         let mut ro_paged_slab: Option<DecodedColumnSlab> = None;
-        if !is_plastic && has_any_env {
+        if !is_plastic && has_any_env && !self.striatal.wm_ever_latched {
             let num_c_ro = (self.striatal.num_ctx as usize).min(OFC_CONTEXTS);
             let mut n_ro_prony = 0usize;
             for p in 0..STRIATAL_PORES {
@@ -8471,7 +9751,7 @@ impl TubeGraph {
         let mut switched_context = false;
         let mut act_mismatch_inst = false;
         let mut splits = 0u64;
-        if is_plastic && self.striatal.has_prev {
+        if is_plastic && self.striatal.has_prev && !self.striatal.wm_ever_latched {
             let act_c = self.striatal.active_ctx as usize;
             let num_c = self.striatal.num_ctx as usize;
             self.striatal.ctx_ticks[act_c] = self.striatal.ctx_ticks[act_c].saturating_add(1);
@@ -9174,9 +10454,1427 @@ impl TubeGraph {
                 out_f
             };
 
+        let mut wm_use_probe_out = false;
+        let mut wm_probe_mean_pre = vec![0.0_f32; na];
+        let mut wm_probe_pert = vec![0.0_f32; na];
+        let mut wm_use_sys2_out = false;
+        let mut wm_sys2_pre = vec![0.0_f32; na];
+        let mut wm_chosen_dir: u8 = 255;
+        let mut wm_suppress_habit = false;
+
+        if !carrier_bank && !self.has_tonotopic_bank() {
+            let mut n_true_bipolar = 0usize;
+            let mut n_pedestal_pores = 0usize;
+            let mut n_silent_floor_pores = 0usize;
+            for p in 0..pore_cap {
+                if !feat_active[p] || membrane.sensor_pores[p].age_ticks < 16 {
+                    continue;
+                }
+                let ch_u = live_pore_ch[p] as usize;
+                if ch_u < n_scout && membrane.scout_stats[ch_u].is_sparse_impulse() {
+                    continue;
+                }
+                if min_h_arr[p] < -0.06 && self.striatal.pore_mean[p] < 0.08 {
+                    n_true_bipolar += 1;
+                } else if min_h_arr[p] >= 0.045 {
+                    n_pedestal_pores += 1;
+                } else if (-0.004..0.028).contains(&min_h_arr[p]) {
+                    n_silent_floor_pores += 1;
+                }
+            }
+            let wm_env_enabled = self.striatal.wm_ever_latched
+                || (is_plastic
+                    && n_true_bipolar <= 3
+                    && n_pedestal_pores >= 6
+                    && n_silent_floor_pores >= 2);
+            if wm_env_enabled {
+                wm_suppress_habit = true;
+                let mut prev_x_wm = [0.0_f32; STRIATAL_PORES];
+                let mut prev2_x_wm = [0.0_f32; STRIATAL_PORES];
+                for p in 0..STRIATAL_PORES {
+                    if p < pore_cap && membrane.sensor_pores[p].alive {
+                        let sp = &membrane.sensor_pores[p];
+                        let h = sp.hist_head as usize;
+                        prev_x_wm[p] = if sp.age_ticks >= 2 {
+                            sp.history[(h + 14) & 15]
+                        } else {
+                            raw_x_arr[p]
+                        };
+                        prev2_x_wm[p] = if sp.age_ticks >= 3 {
+                            sp.history[(h + 13) & 15]
+                        } else {
+                            prev_x_wm[p]
+                        };
+                    } else {
+                        prev_x_wm[p] = raw_x_arr[p];
+                        prev2_x_wm[p] = raw_x_arr[p];
+                    }
+                }
+
+                let mut onset_m = [false; STRIATAL_PORES];
+                let mut rise_hold_m = [false; STRIATAL_PORES];
+                let mut onset_cnt = 0usize;
+                for p in 0..pore_cap {
+                    if !feat_active[p]
+                        || membrane.sensor_pores[p].age_ticks < 16
+                        || (self.striatal.wm_bank_tag[p] & 2) != 0
+                    {
+                        continue;
+                    }
+                    if self.striatal.wm_burst_age == 0
+                        && self.striatal.wm_occ_age >= 2
+                        && !self.striatal.wm_saw_probe
+                        && (-0.004..0.035).contains(&min_h_arr[p])
+                        && prev2_x_wm[p] < 0.015
+                        && prev_x_wm[p] < 0.015
+                        && raw_x_arr[p] >= 0.22
+                        && (raw_x_arr[p] - prev_x_wm[p]) >= 0.20
+                    {
+                        onset_m[p] = true;
+                        onset_cnt += 1;
+                    }
+                    if min_h_arr[p] >= -0.004
+                        && raw_x_arr[p] >= 0.25
+                        && ((self.striatal.wm_step_streak[p] <= 3
+                            && raw_x_arr[p] > prev_x_wm[p] + 0.015)
+                            || (self.striatal.wm_step_streak[p] > 3
+                                && raw_x_arr[p] >= prev_x_wm[p] - 0.008))
+                    {
+                        rise_hold_m[p] = true;
+                    }
+                }
+                for p in 0..STRIATAL_PORES {
+                    if self.striatal.wm_step_streak[p] == 0 {
+                        if (1..=5).contains(&onset_cnt) && onset_m[p] {
+                            self.striatal.wm_step_streak[p] = 1;
+                        }
+                    } else if rise_hold_m[p] {
+                        self.striatal.wm_step_streak[p] =
+                            self.striatal.wm_step_streak[p].saturating_add(1);
+                        if is_plastic && self.striatal.wm_step_streak[p] >= 5 {
+                            self.striatal.wm_bank_tag[p] = 4;
+                        }
+                    } else {
+                        self.striatal.wm_step_streak[p] = 0;
+                    }
+                }
+
+                let mut s_ext_latch = 0.0_f32;
+                let mut has_tagged_latch = false;
+                for p in 0..pore_cap {
+                    if feat_active[p] {
+                        if (self.striatal.wm_bank_tag[p] & 4) != 0 {
+                            has_tagged_latch = true;
+                        }
+                        if ((self.striatal.wm_bank_tag[p] & 4) != 0
+                            || self.striatal.wm_step_streak[p] >= 3)
+                            && raw_x_arr[p] >= 0.24
+                            && raw_x_arr[p] >= prev_x_wm[p] - 0.02
+                        {
+                            s_ext_latch = 1.0;
+                        }
+                    }
+                }
+                if is_plastic && self.striatal.wm_prev_subgoal < 0.5 && s_ext_latch >= 0.5 {
+                    for m in 0..act_s {
+                        self.striatal.w_latch_act[m] = sanitize_clamp(
+                            0.88 * self.striatal.w_latch_act[m]
+                                + 0.12 * self.striatal.prev_act[m].abs(),
+                            0.0,
+                            0.50,
+                        );
+                    }
+                }
+
+                let rule_allowed = self.striatal.wm_ever_probed;
+                if is_plastic {
+                    for r in 0..WM_RULE_SLOTS {
+                        if self.striatal.tonic_rule_valid[r] != 0 {
+                            if !rule_allowed {
+                                self.striatal.tonic_rule_valid[r] = 0;
+                                self.striatal.tonic_rule_ch[r] = [u32::MAX; STRIATAL_PORES];
+                                self.striatal.tonic_rule_key[r] = [0.0; STRIATAL_PORES];
+                            } else {
+                                for p in 0..pore_cap {
+                                    let ch_p = live_pore_ch[p];
+                                    if ch_p != u32::MAX && self.striatal.kin_r2_peak[p] >= 0.12 {
+                                        for i in 0..STRIATAL_PORES {
+                                            if self.striatal.tonic_rule_ch[r][i] == ch_p {
+                                                self.striatal.tonic_rule_ch[r][i] = u32::MAX;
+                                                self.striatal.tonic_rule_key[r][i] = 0.0;
+                                            }
+                                        }
+                                    }
+                                }
+                                let rem_valid = self.striatal.tonic_rule_ch[r]
+                                    .iter()
+                                    .filter(|&&c| c != u32::MAX)
+                                    .count();
+                                if rem_valid < 4 {
+                                    self.striatal.tonic_rule_valid[r] = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let mut is_phasic = [false; STRIATAL_PORES];
+                let mut is_tonic_rule = [false; STRIATAL_PORES];
+                let mut rule_cnt = 0usize;
+                let mut rule_low = 0usize;
+                let mut rule_high = 0usize;
+                let mut rule_min_v = 2.0_f32;
+                let mut rule_max_v = -2.0_f32;
+                let mut rule_sum_v = 0.0_f32;
+                for p in 0..pore_cap {
+                    let is_step_p = (self.striatal.wm_bank_tag[p] & 4) != 0
+                        || self.striatal.wm_step_streak[p] >= 1;
+                    if !feat_active[p]
+                        || is_step_p
+                        || membrane.sensor_pores[p].age_ticks < 16
+                    {
+                        continue;
+                    }
+                    let ch_p = live_pore_ch[p];
+                    let is_reg_rule = rule_allowed
+                        && ch_p != u32::MAX
+                        && (0..WM_RULE_SLOTS).any(|r| {
+                            self.striatal.tonic_rule_valid[r] != 0
+                                && self.striatal.tonic_rule_ch[r].contains(&ch_p)
+                        });
+                    let h_sp = max_h_arr[p] - min_h_arr[p];
+                    let phasic = !is_reg_rule
+                        && ((self.striatal.wm_bank_tag[p] & 3) != 0
+                            || ((-0.004..0.028).contains(&min_h_arr[p])
+                                && h_sp >= 0.025
+                                && raw_x_arr[p] <= 0.88));
+                    let non_kin_disc = rule_allowed
+                        && self.striatal.pore_age[p] >= 32
+                        && self.striatal.kin_r2_peak[p] < 0.10
+                        && self.striatal.kin_r2[p] < 0.04
+                        && (self.striatal.kin_max[p] - self.striatal.kin_min[p]) <= 0.085;
+                    if phasic {
+                        is_phasic[p] = true;
+                    } else if is_reg_rule
+                        || (non_kin_disc
+                            && min_h_arr[p] >= 0.045
+                            && max_h_arr[p] <= 0.80
+                            && (0.030..=0.068).contains(&h_sp)
+                            && (raw_x_arr[p] <= 0.13 || raw_x_arr[p] >= 0.69))
+                    {
+                        is_tonic_rule[p] = true;
+                        let rv = raw_x_arr[p];
+                        rule_cnt += 1;
+                        rule_sum_v += rv;
+                        if rv < rule_min_v {
+                            rule_min_v = rv;
+                        }
+                        if rv > rule_max_v {
+                            rule_max_v = rv;
+                        }
+                        if rv <= 0.25 {
+                            rule_low += 1;
+                        } else if rv >= 0.55 {
+                            rule_high += 1;
+                        }
+                    }
+                }
+
+                let has_antag_rule = rule_allowed
+                    && rule_cnt >= 4
+                    && rule_low >= 1
+                    && rule_high >= 1
+                    && (rule_max_v - rule_min_v) >= 0.40;
+                let mut active_rule_slot =
+                    (self.striatal.wm_active_rule as usize).min(WM_RULE_SLOTS - 1);
+                if has_antag_rule {
+                    let rmean = rule_sum_v / (rule_cnt as f32);
+                    let mut rvec = [0.0_f32; STRIATAL_PORES];
+                    let mut rsq = 0.0_f32;
+                    for p in 0..STRIATAL_PORES {
+                        if is_tonic_rule[p] {
+                            let v = raw_x_arr[p] - rmean;
+                            rvec[p] = v;
+                            rsq += v * v;
+                        }
+                    }
+                    if rsq > 1.0e-5 {
+                        let inv_r = 1.0 / rsq.sqrt();
+                        for v in &mut rvec {
+                            *v = sanitize(*v * inv_r);
+                        }
+                        let mut best_slot: Option<(usize, f32)> = None;
+                        for r in 0..WM_RULE_SLOTS {
+                            if self.striatal.tonic_rule_valid[r] == 0 {
+                                continue;
+                            }
+                            let mut dot = 0.0_f32;
+                            let mut ksq = 0.0_f32;
+                            let mut vsq = 0.0_f32;
+                            let mut ov = 0usize;
+                            for p in 0..STRIATAL_PORES {
+                                if is_tonic_rule[p]
+                                    && let Some(idx) = self.striatal.tonic_rule_ch[r]
+                                        .iter()
+                                        .position(|&c| c == live_pore_ch[p])
+                                {
+                                    let kv = self.striatal.tonic_rule_key[r][idx];
+                                    if kv.abs() > 1.0e-5 {
+                                        dot += rvec[p] * kv;
+                                        ksq += kv * kv;
+                                        vsq += rvec[p] * rvec[p];
+                                        ov += 1;
+                                    }
+                                }
+                            }
+                            if ov >= 2 && ksq > 1.0e-5 && vsq > 1.0e-5 {
+                                let cos = dot / (ksq * vsq).sqrt();
+                                if best_slot.is_none_or(|(_, bc)| cos > bc) {
+                                    best_slot = Some((r, cos));
+                                }
+                            }
+                        }
+                        if let Some((br, bcos)) = best_slot
+                            && bcos >= 0.35
+                        {
+                            active_rule_slot = br;
+                            if is_plastic {
+                                self.striatal.wm_active_rule = br as u8;
+                                for p in 0..STRIATAL_PORES {
+                                    if is_tonic_rule[p] {
+                                        let ch = live_pore_ch[p];
+                                        if let Some(idx) = self.striatal.tonic_rule_ch[br]
+                                            .iter()
+                                            .position(|&c| c == ch)
+                                        {
+                                            self.striatal.tonic_rule_key[br][idx] = sanitize(
+                                                0.85 * self.striatal.tonic_rule_key[br][idx]
+                                                    + 0.15 * rvec[p],
+                                            );
+                                        } else if let Some(ei) = self.striatal.tonic_rule_ch[br]
+                                            .iter()
+                                            .position(|&c| c == u32::MAX)
+                                        {
+                                            self.striatal.tonic_rule_ch[br][ei] = ch;
+                                            self.striatal.tonic_rule_key[br][ei] = rvec[p];
+                                        }
+                                    }
+                                }
+                            }
+                        } else if is_plastic {
+                            let first_reg = self.striatal.tonic_rule_valid[0] == 0
+                                && self.striatal.tonic_rule_valid[1] == 0;
+                            let tr = if self.striatal.tonic_rule_valid[0] == 0 {
+                                0
+                            } else if self.striatal.tonic_rule_valid[1] == 0 {
+                                1
+                            } else {
+                                1 - active_rule_slot
+                            };
+                            self.striatal.tonic_rule_valid[tr] = 1;
+                            self.striatal.tonic_rule_ch[tr] = [u32::MAX; STRIATAL_PORES];
+                            self.striatal.tonic_rule_key[tr] = [0.0; STRIATAL_PORES];
+                            let mut wi = 0usize;
+                            for p in 0..STRIATAL_PORES {
+                                if is_tonic_rule[p] && wi < STRIATAL_PORES {
+                                    self.striatal.tonic_rule_ch[tr][wi] = live_pore_ch[p];
+                                    self.striatal.tonic_rule_key[tr][wi] = rvec[p];
+                                    wi += 1;
+                                }
+                            }
+                            if !first_reg {
+                                self.striatal.w_pfc_rule[tr].fill(0.0);
+                                self.striatal.pfc_r_ema[tr] = 0.0;
+                            }
+                            active_rule_slot = tr;
+                            self.striatal.wm_active_rule = tr as u8;
+                        }
+                    }
+                }
+
+                if is_plastic {
+                    let mut prm_cnt = 0usize;
+                    for &v in &self.striatal.prev_rel_match1 {
+                        if v.abs() > 1.0e-5 {
+                            prm_cnt += 1;
+                        }
+                    }
+                    if prm_cnt >= 4 {
+                        let br = self.striatal.pfc_r_ema[active_rule_slot];
+                        self.striatal.pfc_r_ema[active_rule_slot] =
+                            sanitize_clamp(0.92 * br + 0.08 * reward, -0.5, 0.5);
+                        if reward.abs() > 1.0e-4 {
+                            let radv = sanitize_clamp(reward - br, -0.8, 0.8);
+                            let irm = 1.0 / (prm_cnt as f32);
+                            for m in 0..act_s {
+                                let pm = self.striatal.prev_probe_pert1[m];
+                                let r_off = m * STRIATAL_PORES;
+                                let mut sw = 0.0_f32;
+                                for q in 0..STRIATAL_PORES {
+                                    let rq = self.striatal.prev_rel_match1[q];
+                                    if rq.abs() > 1.0e-5 {
+                                        let upd = sanitize_clamp(
+                                            0.9995 * self.striatal.w_pfc_rule[active_rule_slot]
+                                                [r_off + q]
+                                                + 0.68 * radv * pm * rq,
+                                            -2.5,
+                                            2.5,
+                                        );
+                                        self.striatal.w_pfc_rule[active_rule_slot][r_off + q] = upd;
+                                        sw += upd;
+                                    }
+                                }
+                                let mw = sw * irm;
+                                let mut rsq = 0.0_f32;
+                                for q in 0..STRIATAL_PORES {
+                                    if self.striatal.prev_rel_match1[q].abs() > 1.0e-5 {
+                                        self.striatal.w_pfc_rule[active_rule_slot][r_off + q] =
+                                            sanitize_clamp(
+                                                self.striatal.w_pfc_rule[active_rule_slot]
+                                                    [r_off + q]
+                                                    - mw,
+                                                -2.5,
+                                                2.5,
+                                            );
+                                    }
+                                    let wv =
+                                        self.striatal.w_pfc_rule[active_rule_slot][r_off + q];
+                                    rsq += wv * wv;
+                                }
+                                if rsq > 2.4 * 2.4 {
+                                    let sc = 2.4 / rsq.sqrt();
+                                    for q in 0..STRIATAL_PORES {
+                                        let idx = r_off + q;
+                                        self.striatal.w_pfc_rule[active_rule_slot][idx] = sanitize(
+                                            self.striatal.w_pfc_rule[active_rule_slot][idx] * sc,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let mut max_ph = 0.0_f32;
+                for p in 0..STRIATAL_PORES {
+                    if is_phasic[p] && raw_x_arr[p] > max_ph {
+                        max_ph = raw_x_arr[p];
+                    }
+                }
+                let cthr = (0.12 * max_ph).max(0.008);
+                let mut live_rel = [false; STRIATAL_PORES];
+                let mut live_cnt = 0usize;
+                let mut rising_cnt = 0usize;
+                let mut supp_ov = 0usize;
+                for p in 0..STRIATAL_PORES {
+                    if is_phasic[p] && raw_x_arr[p] >= cthr {
+                        live_rel[p] = true;
+                        live_cnt += 1;
+                        if raw_x_arr[p] > prev_x_wm[p] + 0.010
+                            || (prev_x_wm[p] < 0.008 && raw_x_arr[p] >= 0.016)
+                        {
+                            rising_cnt += 1;
+                        }
+                        if self.striatal.wm_occ[p] > 0.05 {
+                            supp_ov += 1;
+                        }
+                    }
+                }
+                let had_wm = self.striatal.wm_occ.iter().any(|&v| v > 0.05);
+                let ov_s = if live_cnt > 0 {
+                    (supp_ov as f32) / (live_cnt as f32)
+                } else {
+                    0.0
+                };
+                let mut rising_still = 0usize;
+                if self.striatal.wm_burst_age > 0 {
+                    for p in 0..STRIATAL_PORES {
+                        if self.striatal.wm_burst_rising[p] != 0 && raw_x_arr[p] >= 0.018 {
+                            rising_still += 1;
+                        }
+                    }
+                }
+
+                let mut bout_reset = false;
+                let mut is_role_probe = false;
+                let mut entering_probe = false;
+                let prev_silent_gap = self.striatal.wm_silent_gap;
+                if max_ph < 0.018 {
+                    self.striatal.wm_silent_gap =
+                        self.striatal.wm_silent_gap.saturating_add(1).min(1_000);
+                } else {
+                    self.striatal.wm_silent_gap = 0;
+                }
+
+                let probe_guard = self.striatal.wm_ever_probed
+                    || has_antag_rule
+                    || self.striatal.tonic_rule_valid[0] != 0
+                    || (!self.striatal.wm_subgoal_latched && self.striatal.n_places1 < 3);
+                let probe_tail = probe_guard
+                    && self.striatal.wm_saw_probe
+                    && had_wm
+                    && ov_s < 0.15
+                    && max_ph >= 0.008;
+                let probe_cand = probe_guard
+                    && had_wm
+                    && ov_s < 0.15
+                    && (probe_tail
+                        || (max_ph >= 0.018
+                            && live_cnt >= 4
+                            && (4..=13).contains(&prev_silent_gap)));
+                if probe_cand {
+                    is_role_probe = true;
+                    entering_probe = !self.striatal.wm_saw_probe;
+                    self.striatal.wm_saw_probe = true;
+                    self.striatal.wm_occ_age = self.striatal.wm_occ_age.saturating_add(1);
+                    if is_plastic && max_ph >= 0.12 && live_cnt >= 6 {
+                        self.striatal.wm_ever_probed = true;
+                    }
+                    if is_plastic && max_ph >= 0.032 {
+                        for p in 0..STRIATAL_PORES {
+                            if live_rel[p] && self.striatal.wm_bank_tag[p] == 0 {
+                                self.striatal.wm_bank_tag[p] = 2;
+                            }
+                        }
+                    }
+                } else {
+                    let phase_resync = had_wm
+                        && !self.striatal.wm_saw_probe
+                        && ov_s < 0.15
+                        && prev_silent_gap <= 3
+                        && self.striatal.wm_occ_age <= 4;
+                    if self.striatal.wm_burst_age == 0
+                        && max_ph >= 0.018
+                        && live_cnt >= 3
+                        && rising_cnt >= 2
+                        && (!had_wm
+                            || self.striatal.wm_saw_probe
+                            || prev_silent_gap >= 16
+                            || self.striatal.wm_occ_age >= 18
+                            || phase_resync)
+                    {
+                        bout_reset = true;
+                        self.striatal.wm_occ = [0.0; STRIATAL_PORES];
+                        self.striatal.wm_occ_cent = [0.0; STRIATAL_PORES];
+                        self.striatal.wm_cue_cent = [0.0; STRIATAL_PORES];
+                        self.striatal.wm_burst_peak = [0.0; STRIATAL_PORES];
+                        self.striatal.wm_burst_rising = [0; STRIATAL_PORES];
+                        self.striatal.wm_burst_age = 0;
+                        self.striatal.wm_occ_age = 0;
+                        self.striatal.wm_saw_probe = false;
+                        self.striatal.wm_bout_replayed = false;
+                        self.striatal.wm_subgoal_latched = false;
+                        self.striatal.prev_rel_match1 = [0.0; STRIATAL_PORES];
+                        self.striatal.prev_probe_pert1.fill(0.0);
+                        self.striatal.prev_dir = 255;
+                        self.striatal.explore_hold = 0;
+                    }
+                    if bout_reset
+                        || (self.striatal.wm_burst_age > 0
+                            && rising_still >= 2
+                            && self.striatal.wm_burst_age < 10)
+                    {
+                        self.striatal.wm_burst_age = self.striatal.wm_burst_age.saturating_add(1);
+                        for p in 0..STRIATAL_PORES {
+                            if live_rel[p] && (self.striatal.wm_bank_tag[p] & 4) == 0 {
+                                if raw_x_arr[p] > prev_x_wm[p] + 0.010
+                                    || (prev_x_wm[p] < 0.008 && raw_x_arr[p] >= 0.016)
+                                {
+                                    self.striatal.wm_burst_rising[p] = 1;
+                                }
+                                if self.striatal.wm_burst_rising[p] != 0
+                                    && raw_x_arr[p] > self.striatal.wm_burst_peak[p]
+                                {
+                                    self.striatal.wm_burst_peak[p] = raw_x_arr[p];
+                                    if is_plastic && self.striatal.wm_bank_tag[p] == 0 {
+                                        self.striatal.wm_bank_tag[p] = 1;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        if self.striatal.wm_burst_age > 0 {
+                            let mut pkm = 0.0_f32;
+                            for &pk in &self.striatal.wm_burst_peak {
+                                if pk > pkm {
+                                    pkm = pk;
+                                }
+                            }
+                            let pthr = (0.12 * pkm).max(0.008);
+                            let mut occ_r = [0.0_f32; STRIATAL_PORES];
+                            let mut osq = 0.0_f32;
+                            let mut pk_sum = 0.0_f32;
+                            let mut pk_cnt = 0usize;
+                            for p in 0..STRIATAL_PORES {
+                                let pk = self.striatal.wm_burst_peak[p];
+                                if pk >= pthr {
+                                    occ_r[p] = pk;
+                                    osq += pk * pk;
+                                    pk_sum += pk;
+                                    pk_cnt += 1;
+                                }
+                            }
+                            self.striatal.wm_occ = [0.0; STRIATAL_PORES];
+                            self.striatal.wm_occ_cent = [0.0; STRIATAL_PORES];
+                            self.striatal.wm_cue_cent = [0.0; STRIATAL_PORES];
+                            if osq > 1.0e-5 && pk_cnt >= 2 {
+                                let invo = 1.0 / osq.sqrt();
+                                let pmean = pk_sum / (pk_cnt as f32);
+                                let mut oc = [0.0_f32; STRIATAL_PORES];
+                                let mut csq = 0.0_f32;
+                                for p in 0..STRIATAL_PORES {
+                                    self.striatal.wm_occ[p] = sanitize(occ_r[p] * invo);
+                                    if occ_r[p] > 0.0 {
+                                        let v = occ_r[p] - pmean;
+                                        oc[p] = v;
+                                        csq += v * v;
+                                    }
+                                }
+                                if csq > 1.0e-6 {
+                                    let ic = 1.0 / csq.sqrt();
+                                    for p in 0..STRIATAL_PORES {
+                                        self.striatal.wm_occ_cent[p] = sanitize(oc[p] * ic);
+                                    }
+                                }
+                                let mut bc_cnt = 0usize;
+                                let mut bc_sum = 0.0_f32;
+                                for p in 0..STRIATAL_PORES {
+                                    if feat_active[p] && (self.striatal.wm_bank_tag[p] & 3) == 1 {
+                                        bc_cnt += 1;
+                                        bc_sum += self.striatal.wm_burst_peak[p];
+                                    }
+                                }
+                                if bc_cnt >= 6 {
+                                    let bm = bc_sum / (bc_cnt as f32);
+                                    let mut bsq = 0.0_f32;
+                                    for p in 0..STRIATAL_PORES {
+                                        if feat_active[p]
+                                            && (self.striatal.wm_bank_tag[p] & 3) == 1
+                                        {
+                                            let dv = self.striatal.wm_burst_peak[p] - bm;
+                                            bsq += dv * dv;
+                                        }
+                                    }
+                                    if bsq > 1.0e-6 {
+                                        let ib = 1.0 / bsq.sqrt();
+                                        for p in 0..STRIATAL_PORES {
+                                            if feat_active[p]
+                                                && (self.striatal.wm_bank_tag[p] & 3) == 1
+                                            {
+                                                self.striatal.wm_cue_cent[p] = sanitize(
+                                                    (self.striatal.wm_burst_peak[p] - bm) * ib,
+                                                );
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    self.striatal.wm_cue_cent = self.striatal.wm_occ;
+                                }
+                                if is_plastic {
+                                    self.striatal.wm_ever_latched = true;
+                                }
+                            }
+                            self.striatal.wm_burst_age = 0;
+                            self.striatal.wm_occ_age = 1;
+                            self.striatal.s1_dwell = 0;
+                            self.striatal.s1_last_win = 255;
+                        } else if had_wm {
+                            self.striatal.wm_occ_age = self.striatal.wm_occ_age.saturating_add(1);
+                        }
+                        self.striatal.prev_rel_match1 = [0.0; STRIATAL_PORES];
+                        self.striatal.prev_probe_pert1.fill(0.0);
+                    }
+                }
+
+                let (slot_occ_cent, slot_cue_opp, wm_act_now) = self.striatal.read_wm_slots();
+
+                if is_role_probe {
+                    let rel_match = if max_ph >= 0.025 && live_cnt >= 8 {
+                        let mut psum = 0.0_f32;
+                        for q in 0..STRIATAL_PORES {
+                            if live_rel[q] {
+                                psum += raw_x_arr[q];
+                            }
+                        }
+                        let pm = psum / (live_cnt as f32);
+                        let mut pc = [0.0_f32; STRIATAL_PORES];
+                        let mut pcsq = 0.0_f32;
+                        for q in 0..STRIATAL_PORES {
+                            if live_rel[q] {
+                                let v = raw_x_arr[q] - pm;
+                                pc[q] = v;
+                                pcsq += v * v;
+                            }
+                        }
+                        if pcsq > 1.0e-6 {
+                            let ipc = 1.0 / pcsq.sqrt();
+                            for v in &mut pc {
+                                *v = sanitize(*v * ipc);
+                            }
+                        }
+                        if is_plastic && max_ph >= 0.28 {
+                            for q in 0..STRIATAL_PORES {
+                                if live_rel[q] {
+                                    let q_off = q * STRIATAL_PORES;
+                                    for p in 0..STRIATAL_PORES {
+                                        let occ_p = slot_occ_cent[p];
+                                        if occ_p.abs() > 1.0e-5 {
+                                            self.striatal.rel_c[q_off + p] = sanitize_clamp(
+                                                0.996 * self.striatal.rel_c[q_off + p]
+                                                    + 0.032 * pc[q] * occ_p,
+                                                -1.0,
+                                                1.0,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let mut raw_rm = [0.0_f32; STRIATAL_PORES];
+                        let mut rmm_sum = 0.0_f32;
+                        for q in 0..STRIATAL_PORES {
+                            if live_rel[q] {
+                                let q_off = q * STRIATAL_PORES;
+                                let mut mc = 0.0_f32;
+                                for p in 0..STRIATAL_PORES {
+                                    let cv = self.striatal.rel_c[q_off + p];
+                                    if cv > mc {
+                                        mc = cv;
+                                    }
+                                }
+                                if mc > 0.005 {
+                                    let tc = 0.72 * mc;
+                                    let mut prq = 0.0_f32;
+                                    for p in 0..STRIATAL_PORES {
+                                        let cv = self.striatal.rel_c[q_off + p];
+                                        if cv > tc {
+                                            prq += cv * slot_occ_cent[p];
+                                        }
+                                    }
+                                    raw_rm[q] = pc[q] * prq;
+                                    rmm_sum += raw_rm[q];
+                                }
+                            }
+                        }
+                        let rmm = rmm_sum / (live_cnt as f32);
+                        let mut rm_out = [0.0_f32; STRIATAL_PORES];
+                        let mut rmsq = 0.0_f32;
+                        for q in 0..STRIATAL_PORES {
+                            if live_rel[q] {
+                                let v = raw_rm[q] - rmm;
+                                rm_out[q] = v;
+                                rmsq += v * v;
+                            }
+                        }
+                        if rmsq > 1.0e-8 {
+                            let irm = 1.0 / rmsq.sqrt();
+                            for v in &mut rm_out {
+                                *v = sanitize(*v * irm);
+                            }
+                        }
+                        rm_out
+                    } else {
+                        self.striatal.prev_rel_match1
+                    };
+
+                    let mut wn_sum = 0.0_f32;
+                    for m in 0..act_s {
+                        let r_off = m * STRIATAL_PORES;
+                        let mut rsq = 0.0_f32;
+                        let mut dot = 0.0_f32;
+                        for q in 0..STRIATAL_PORES {
+                            let wv = self.striatal.w_pfc_rule[active_rule_slot][r_off + q];
+                            rsq += wv * wv;
+                            dot += wv * rel_match[q];
+                        }
+                        wn_sum += rsq.sqrt();
+                        wm_probe_mean_pre[m] = sanitize(2.2 * dot);
+                    }
+                    let mwn = wn_sum / (act_s.max(1) as f32);
+                    if is_plastic {
+                        if entering_probe {
+                            let pstd =
+                                (0.60 * (1.0 - (mwn / 0.85).clamp(0.0, 0.90))).max(0.06);
+                            for m in 0..act_s {
+                                self.striatal.wm_bout_pert[m] =
+                                    sanitize_clamp(pstd * self.striatal.gaussian(), -1.2, 1.2);
+                            }
+                        }
+                        wm_probe_pert[..act_s]
+                            .copy_from_slice(&self.striatal.wm_bout_pert[..act_s]);
+                        self.striatal.prev_rel_match1 = rel_match;
+                        wm_use_probe_out = true;
+                    } else if mwn > 0.04 {
+                        wm_use_probe_out = true;
+                    }
+                } else {
+                    let mut kin_cand = [false; STRIATAL_PORES];
+                    let mut kj_sum = 0.0_f32;
+                    let mut kcnt = 0usize;
+                    for p in 0..STRIATAL_PORES {
+                        let kc = feat_active[p]
+                            && !is_phasic[p]
+                            && (self.striatal.wm_bank_tag[p] & 7) == 0
+                            && !(has_antag_rule && is_tonic_rule[p]);
+                        kin_cand[p] = kc;
+                        if kc {
+                            kcnt += 1;
+                            if self.striatal.prev_kin_valid {
+                                let d = raw_x_arr[p] - self.striatal.prev_raw_kin[p];
+                                kj_sum += d * d;
+                            }
+                            if is_plastic {
+                                let rx = raw_x_arr[p];
+                                if self.striatal.kin_min[p] == 0.0
+                                    && self.striatal.kin_max[p] == 0.0
+                                {
+                                    self.striatal.kin_min[p] = rx - 0.02;
+                                    self.striatal.kin_max[p] = rx + 0.02;
+                                } else {
+                                    if rx < self.striatal.kin_min[p] {
+                                        self.striatal.kin_min[p] = rx;
+                                    } else {
+                                        self.striatal.kin_min[p] = sanitize(
+                                            self.striatal.kin_min[p]
+                                                + 0.0002 * (rx - self.striatal.kin_min[p]),
+                                        );
+                                    }
+                                    if rx > self.striatal.kin_max[p] {
+                                        self.striatal.kin_max[p] = rx;
+                                    } else {
+                                        self.striatal.kin_max[p] = sanitize(
+                                            self.striatal.kin_max[p]
+                                                + 0.0002 * (rx - self.striatal.kin_max[p]),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let teleport = kcnt >= 4 && (kj_sum / (kcnt as f32)) > 0.025;
+                    let free_kin = self.striatal.prev_kin_valid
+                        && !bout_reset
+                        && !teleport
+                        && self.striatal.wm_burst_age == 0
+                        && tissue_stress < 0.01;
+                    let mut da_prev = vec![0.0_f32; act_s];
+                    let mut da_sq = 0.0_f32;
+                    for m in 0..act_s {
+                        let d = self.striatal.prev_act[m];
+                        da_prev[m] = d;
+                        da_sq += d * d;
+                    }
+
+                    let mut prev_kin_move_sq = 0.0_f32;
+                    let mut prev_kin_cnt = 0usize;
+                    if self.striatal.prev_kin_valid && !teleport {
+                        for p in 0..STRIATAL_PORES {
+                            if kin_cand[p]
+                                && self.striatal.kin_r2_peak[p] >= 0.14
+                                && (self.striatal.kin_max[p] - self.striatal.kin_min[p]) >= 0.10
+                            {
+                                let dx0 = raw_x_arr[p] - self.striatal.prev_raw_kin[p];
+                                prev_kin_move_sq += dx0 * dx0;
+                                prev_kin_cnt += 1;
+                            }
+                        }
+                    }
+                    let verified_body_motion = prev_kin_cnt >= 4 && prev_kin_move_sq > 3.5e-3;
+                    let body_moved_free = if prev_kin_cnt >= 4 {
+                        verified_body_motion
+                    } else {
+                        da_sq > 0.20
+                    };
+
+                    if is_plastic && free_kin && da_sq > 0.02 {
+                        let is_cal_phase = self.striatal.kin_cal_ticks < 96
+                            && self.striatal.wm_occ_age >= 2
+                            && !has_antag_rule;
+                        if is_cal_phase || body_moved_free {
+                            let dec_kj = if is_cal_phase { 0.96_f32 } else { 0.88_f32 };
+                            let eta_kj = (if is_cal_phase { 0.18_f32 } else { 0.30_f32 })
+                                / (da_sq + 0.10);
+                            for p in 0..STRIATAL_PORES {
+                                if !kin_cand[p] {
+                                    continue;
+                                }
+                                let dxp = raw_x_arr[p] - self.striatal.prev_raw_kin[p];
+                                if (is_cal_phase && da_sq > 0.25) || verified_body_motion {
+                                    let moved_p = if dxp.abs() > 1.5e-3 { 1.0 } else { 0.0 };
+                                    self.striatal.kin_resp[p] = sanitize(
+                                        0.94 * self.striatal.kin_resp[p] + 0.06 * moved_p,
+                                    );
+                                }
+                                let k_off = p * na;
+                                let mut pdx = 0.0_f32;
+                                for m in 0..act_s {
+                                    pdx += self.striatal.kin_j1[k_off + m] * da_prev[m];
+                                }
+                                let edx = sanitize_clamp(dxp - pdx, -1.0, 1.0);
+                                let dxsq = dxp * dxp;
+                                if dxsq > 1.0e-5 {
+                                    let r2i = sanitize_clamp(
+                                        (dxsq - edx * edx) / (dxsq + 3.0e-4),
+                                        -1.0,
+                                        1.0,
+                                    );
+                                    self.striatal.kin_r2[p] = sanitize_clamp(
+                                        0.93 * self.striatal.kin_r2[p] + 0.07 * r2i,
+                                        -1.0,
+                                        1.0,
+                                    );
+                                    if self.striatal.pore_age[p] >= 20
+                                        && self.striatal.kin_r2[p] > self.striatal.kin_r2_peak[p]
+                                    {
+                                        self.striatal.kin_r2_peak[p] = self.striatal.kin_r2[p];
+                                    }
+                                } else if da_sq > 0.18 && body_moved_free {
+                                    self.striatal.kin_r2[p] = sanitize_clamp(
+                                        0.95 * self.striatal.kin_r2[p] - 0.02,
+                                        -1.0,
+                                        1.0,
+                                    );
+                                }
+                                for m in 0..act_s {
+                                    self.striatal.kin_j1[k_off + m] = sanitize_clamp(
+                                        dec_kj * self.striatal.kin_j1[k_off + m]
+                                            + eta_kj * edx * da_prev[m],
+                                        -2.0,
+                                        2.0,
+                                    );
+                                }
+                            }
+                        }
+
+                        if is_cal_phase {
+                            self.striatal.kin_cal_ticks =
+                                self.striatal.kin_cal_ticks.saturating_add(1);
+                            let glr = 0.08_f32;
+                            for m1 in 0..act_s {
+                                let g_row = m1 * na;
+                                for m2 in m1..act_s {
+                                    let mut out_g = 0.0_f32;
+                                    for p in 0..STRIATAL_PORES {
+                                        if kin_cand[p]
+                                            && (self.striatal.kin_cal_ticks < 24
+                                                || self.striatal.kin_r2[p] >= 0.12)
+                                        {
+                                            out_g += self.striatal.kin_j1[p * na + m1]
+                                                * self.striatal.kin_j1[p * na + m2];
+                                        }
+                                    }
+                                    let upd = sanitize(
+                                        (1.0 - glr) * self.striatal.g_kin[g_row + m2] + glr * out_g,
+                                    );
+                                    self.striatal.g_kin[g_row + m2] = upd;
+                                    self.striatal.g_kin[m2 * na + m1] = upd;
+                                }
+                            }
+                            let s1_uninit = self.striatal.syn_s1[..act_s]
+                                .iter()
+                                .all(|&x| x.abs() <= 1.0e-6);
+                            let mut v1 = vec![0.0_f32; act_s];
+                            let mut v1_sq = 0.0_f32;
+                            for m in 0..act_s {
+                                let s = if !s1_uninit {
+                                    self.striatal.syn_s1[m]
+                                } else {
+                                    self.striatal.w_birth[m * STRIATAL_CUES]
+                                };
+                                v1[m] = s;
+                                v1_sq += s * s;
+                            }
+                            if v1_sq > 1.0e-8 {
+                                let inv1 = 1.0 / v1_sq.sqrt();
+                                for x in &mut v1 {
+                                    *x *= inv1;
+                                }
+                                for _ in 0..4 {
+                                    let mut nxt = vec![0.0_f32; act_s];
+                                    let mut nsq = 0.0_f32;
+                                    for m1 in 0..act_s {
+                                        let mut acc = 0.0_f32;
+                                        for m2 in 0..act_s {
+                                            acc += self.striatal.g_kin[m1 * na + m2] * v1[m2];
+                                        }
+                                        nxt[m1] = acc;
+                                        nsq += acc * acc;
+                                    }
+                                    if nsq > 1.0e-12 {
+                                        let inv_n = 1.0 / nsq.sqrt();
+                                        for m in 0..act_s {
+                                            v1[m] = nxt[m] * inv_n;
+                                        }
+                                    }
+                                }
+                                let mut dot_old1 = 0.0_f32;
+                                for m in 0..act_s {
+                                    dot_old1 += v1[m] * self.striatal.syn_s1[m];
+                                }
+                                if dot_old1 < 0.0 {
+                                    for x in &mut v1 {
+                                        *x = -*x;
+                                    }
+                                }
+                                let s2_uninit = self.striatal.syn_s2[..act_s]
+                                    .iter()
+                                    .all(|&x| x.abs() <= 1.0e-6);
+                                let mut v2 = vec![0.0_f32; act_s];
+                                let mut d12 = 0.0_f32;
+                                for m in 0..act_s {
+                                    let s = if !s2_uninit {
+                                        self.striatal.syn_s2[m]
+                                    } else {
+                                        self.striatal.w_birth[(m * STRIATAL_CUES + 1)
+                                            .min(self.striatal.w_birth.len() - 1)]
+                                    };
+                                    v2[m] = s;
+                                    d12 += s * v1[m];
+                                }
+                                let mut v2_sq = 0.0_f32;
+                                for m in 0..act_s {
+                                    v2[m] -= d12 * v1[m];
+                                    v2_sq += v2[m] * v2[m];
+                                }
+                                if v2_sq > 1.0e-8 {
+                                    let inv2 = 1.0 / v2_sq.sqrt();
+                                    for x in &mut v2 {
+                                        *x *= inv2;
+                                    }
+                                    for _ in 0..4 {
+                                        let mut nxt = vec![0.0_f32; act_s];
+                                        let mut pr = 0.0_f32;
+                                        for m1 in 0..act_s {
+                                            let mut acc = 0.0_f32;
+                                            for m2 in 0..act_s {
+                                                acc += self.striatal.g_kin[m1 * na + m2] * v2[m2];
+                                            }
+                                            nxt[m1] = acc;
+                                            pr += acc * v1[m1];
+                                        }
+                                        let mut nsq2 = 0.0_f32;
+                                        for m in 0..act_s {
+                                            nxt[m] -= pr * v1[m];
+                                            nsq2 += nxt[m] * nxt[m];
+                                        }
+                                        if nsq2 > 1.0e-12 {
+                                            let inv_n2 = 1.0 / nsq2.sqrt();
+                                            for m in 0..act_s {
+                                                v2[m] = nxt[m] * inv_n2;
+                                            }
+                                        }
+                                    }
+                                    let mut dot_old2 = 0.0_f32;
+                                    for m in 0..act_s {
+                                        dot_old2 += v2[m] * self.striatal.syn_s2[m];
+                                    }
+                                    if dot_old2 < 0.0 {
+                                        for x in &mut v2 {
+                                            *x = -*x;
+                                        }
+                                    }
+                                    for m in 0..act_s {
+                                        self.striatal.syn_s1[m] = sanitize(v1[m]);
+                                        self.striatal.syn_s2[m] = sanitize(v2[m]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let mut is_kin = [false; STRIATAL_PORES];
+                    let mut z_kin = [0.0_f32; STRIATAL_PORES];
+                    let mut hsp_arr = [0.08_f32; STRIATAL_PORES];
+                    let mut uksq = 0.0_f32;
+                    let mut act_ksq = 0.0_f32;
+                    let mut pred_ksq = 0.0_f32;
+                    let mut n_kin_now = 0usize;
+                    for p in 0..STRIATAL_PORES {
+                        let ok = kin_cand[p]
+                            && (self.striatal.kin_cal_ticks < 24
+                                || (self.striatal.kin_r2_peak[p] >= 0.14
+                                    && self.striatal.kin_resp[p] >= 0.48
+                                    && (self.striatal.kin_max[p] - self.striatal.kin_min[p])
+                                        >= 0.10));
+                        is_kin[p] = ok;
+                        if ok {
+                            n_kin_now += 1;
+                            let mid = 0.5 * (self.striatal.kin_min[p] + self.striatal.kin_max[p]);
+                            let hsp = (0.5
+                                * (self.striatal.kin_max[p] - self.striatal.kin_min[p]))
+                                .max(0.08);
+                            hsp_arr[p] = hsp;
+                            let zv = sanitize_clamp((raw_x_arr[p] - mid) / hsp, -2.0, 2.0);
+                            z_kin[p] = zv;
+                            uksq += zv * zv;
+                            if self.striatal.prev_kin_valid && !teleport {
+                                let dxo = raw_x_arr[p] - self.striatal.prev_raw_kin[p];
+                                act_ksq += dxo * dxo;
+                                let k_off = p * na;
+                                let mut pdx = 0.0_f32;
+                                for m in 0..act_s {
+                                    pdx += self.striatal.kin_j1[k_off + m] * da_prev[m];
+                                }
+                                pred_ksq += pdx * pdx;
+                            }
+                        }
+                    }
+
+                    if s_ext_latch >= 0.5 {
+                        self.striatal.wm_subgoal_latched = true;
+                    }
+                    let mut s_sub = if self.striatal.wm_subgoal_latched {
+                        1.0_f32
+                    } else {
+                        0.0_f32
+                    };
+
+                    let mut phi1 = [0.0_f32; STAGE1_CAP];
+                    let mut phi2 = [0.0_f32; PLACE_CAP];
+                    let wall_clamped = (act_ksq < 1.2e-3)
+                        || (pred_ksq > 8.0e-3 && act_ksq < 0.32 * pred_ksq);
+                    if n_kin_now >= 4
+                        && uksq > 1.0e-4
+                        && self.striatal.kin_cal_ticks >= 64
+                        && !has_antag_rule
+                    {
+                        let mut np1 = (self.striatal.n_places1 as usize).min(STAGE1_CAP);
+                        if s_sub < 0.5 {
+                            let mut mc1 = -2.0_f32;
+                            let mut bk1 = 0usize;
+                            for k in 0..np1 {
+                                let d = self.striatal.cos_shared_place(k, &is_kin, &z_kin);
+                                if d > mc1 {
+                                    mc1 = d;
+                                    bk1 = k;
+                                }
+                            }
+                            if is_plastic && self.striatal.wm_burst_age == 0 {
+                                if np1 == 0 || (mc1 < 0.84 && np1 < STAGE1_CAP) {
+                                    let nk = np1;
+                                    let mut msk = 0u64;
+                                    for p in 0..STRIATAL_PORES {
+                                        if is_kin[p] {
+                                            self.striatal.place_proto[nk][p] = z_kin[p];
+                                            msk |= 1u64 << p;
+                                        } else {
+                                            self.striatal.place_proto[nk][p] = 0.0;
+                                        }
+                                    }
+                                    self.striatal.place_mask[nk] = msk;
+                                    np1 += 1;
+                                    self.striatal.n_places1 = np1 as u8;
+                                } else if mc1 >= 0.88 && np1 > 0 && self.striatal.r_bridge[bk1] < 0.25 {
+                                    for p in 0..STRIATAL_PORES {
+                                        if is_kin[p] {
+                                            if ((self.striatal.place_mask[bk1] >> p) & 1) == 0 {
+                                                self.striatal.place_proto[bk1][p] = z_kin[p];
+                                                self.striatal.place_mask[bk1] |= 1u64 << p;
+                                            } else if mc1 >= 0.92 {
+                                                self.striatal.place_proto[bk1][p] = sanitize(
+                                                    0.98 * self.striatal.place_proto[bk1][p]
+                                                        + 0.02 * z_kin[p],
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if np1 > 0 {
+                            let mut top_c = [-2.0_f32; 2];
+                            let mut top_k = [usize::MAX; 2];
+                            for k in 0..np1 {
+                                let c = self.striatal.cos_shared_place(k, &is_kin, &z_kin);
+                                if c > top_c[0] {
+                                    top_c[1] = top_c[0];
+                                    top_k[1] = top_k[0];
+                                    top_c[0] = c;
+                                    top_k[0] = k;
+                                } else if c > top_c[1] {
+                                    top_c[1] = c;
+                                    top_k[1] = k;
+                                }
+                            }
+                            if top_c[0] > -1.5 {
+                                let c0 = top_c[0];
+                                let mut sw = 0.0_f32;
+                                for s in 0..2 {
+                                    if top_k[s] != usize::MAX && top_c[s] > -1.5 {
+                                        let w = (24.0 * (top_c[s] - c0)).exp();
+                                        phi1[top_k[s]] = w;
+                                        sw += w;
+                                    }
+                                }
+                                if sw > 1.0e-6 {
+                                    let inv = 1.0 / sw;
+                                    for s in 0..2 {
+                                        let ks = top_k[s];
+                                        if ks != usize::MAX {
+                                            phi1[ks] = sanitize(phi1[ks] * inv);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if !has_tagged_latch && s_sub < 0.5 && self.striatal.wm_occ_age >= 5 {
+                            let mut max_rb = 0.0_f32;
+                            let mut cur_rb = 0.0_f32;
+                            for k in 0..np1 {
+                                if self.striatal.r_bridge[k] > max_rb {
+                                    max_rb = self.striatal.r_bridge[k];
+                                }
+                                cur_rb += phi1[k] * self.striatal.r_bridge[k];
+                            }
+                            if max_rb >= 0.65 && cur_rb >= 0.65 {
+                                self.striatal.wm_subgoal_latched = true;
+                                s_sub = 1.0;
+                            }
+                        }
+
+                        let mut np2 =
+                            (self.striatal.n_places2 as usize).clamp(STAGE1_CAP, PLACE_CAP);
+                        if s_sub >= 0.5 {
+                            let is_act2 =
+                                |k: usize, n1: usize, n2: usize| k < n1 || (k >= STAGE1_CAP && k < n2);
+                            let mut mc2 = -2.0_f32;
+                            let mut bk2 = 0usize;
+                            let mut any_k2 = false;
+                            for k in 0..np2 {
+                                if is_act2(k, np1, np2) {
+                                    any_k2 = true;
+                                    let d = self.striatal.cos_shared_place(k, &is_kin, &z_kin);
+                                    if d > mc2 {
+                                        mc2 = d;
+                                        bk2 = k;
+                                    }
+                                }
+                            }
+                            if is_plastic && self.striatal.wm_burst_age == 0 {
+                                if !any_k2 || (mc2 < 0.85 && np2 < PLACE_CAP) {
+                                    let nk = np2;
+                                    let mut msk = 0u64;
+                                    for p in 0..STRIATAL_PORES {
+                                        if is_kin[p] {
+                                            self.striatal.place_proto[nk][p] = z_kin[p];
+                                            msk |= 1u64 << p;
+                                        } else {
+                                            self.striatal.place_proto[nk][p] = 0.0;
+                                        }
+                                    }
+                                    self.striatal.place_mask[nk] = msk;
+                                    np2 += 1;
+                                    self.striatal.n_places2 = np2 as u8;
+                                    any_k2 = true;
+                                } else if mc2 >= 0.88 && any_k2 {
+                                    for p in 0..STRIATAL_PORES {
+                                        if is_kin[p] {
+                                            if ((self.striatal.place_mask[bk2] >> p) & 1) == 0 {
+                                                self.striatal.place_proto[bk2][p] = z_kin[p];
+                                                self.striatal.place_mask[bk2] |= 1u64 << p;
+                                            } else if mc2 >= 0.92 && bk2 >= STAGE1_CAP {
+                                                self.striatal.place_proto[bk2][p] = sanitize(
+                                                    0.98 * self.striatal.place_proto[bk2][p]
+                                                        + 0.02 * z_kin[p],
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if any_k2 {
+                                let mut top_c = [-2.0_f32; 2];
+                                let mut top_k = [usize::MAX; 2];
+                                for k in 0..np2 {
+                                    if is_act2(k, np1, np2) {
+                                        let c = self.striatal.cos_shared_place(k, &is_kin, &z_kin);
+                                        if c > top_c[0] {
+                                            top_c[1] = top_c[0];
+                                            top_k[1] = top_k[0];
+                                            top_c[0] = c;
+                                            top_k[0] = k;
+                                        } else if c > top_c[1] {
+                                            top_c[1] = c;
+                                            top_k[1] = k;
+                                        }
+                                    }
+                                }
+                                if top_c[0] > -1.5 {
+                                    let c0 = top_c[0];
+                                    let mut sw = 0.0_f32;
+                                    for s in 0..2 {
+                                        if top_k[s] != usize::MAX && top_c[s] > -1.5 {
+                                            let w = (24.0 * (top_c[s] - c0)).exp();
+                                            phi2[top_k[s]] = w;
+                                            sw += w;
+                                        }
+                                    }
+                                    if sw > 1.0e-6 {
+                                        let inv = 1.0 / sw;
+                                        for s in 0..2 {
+                                            let ks = top_k[s];
+                                            if ks != usize::MAX {
+                                                phi2[ks] = sanitize(phi2[ks] * inv);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if is_plastic
+                            && self.striatal.prev_kin_valid
+                            && !bout_reset
+                            && !teleport
+                            && self.striatal.wm_burst_age == 0
+                            && self.striatal.prev_dir < 8
+                        {
+                            let pdir = (self.striatal.prev_dir & 7) as usize;
+                            if !self.striatal.prev_subgoal_state && np1 > 0 {
+                                let stalled1 =
+                                    (s_ext_latch < 0.5) && (wall_clamped || tissue_stress >= 0.02);
+                                let mut kp_win = 0usize;
+                                let mut kn_win = 0usize;
+                                for k in 1..np1 {
+                                    if self.striatal.prev_phi1[k] > self.striatal.prev_phi1[kp_win]
+                                    {
+                                        kp_win = k;
+                                    }
+                                    if phi1[k] > phi1[kn_win] {
+                                        kn_win = k;
+                                    }
+                                }
+                                if self.striatal.prev_phi1[kp_win] > 0.25 {
+                                    let kc_idx = kp_win * COMPASS_DIRS + pdir;
+                                    self.striatal.n_kc1[kc_idx] =
+                                        sanitize(self.striatal.n_kc1[kc_idx] + 1.0);
+                                    self.striatal.stall_kc1[kc_idx] = sanitize(
+                                        0.88 * self.striatal.stall_kc1[kc_idx]
+                                            + 0.12 * (if stalled1 { 1.0 } else { 0.0 }),
+                                    );
+                                    if !stalled1 && kn_win != kp_win && phi1[kn_win] > 0.25 {
+                                        let t_idx = kc_idx * STAGE1_CAP + kn_win;
+                                        self.striatal.trans1[t_idx] = sanitize(
+                                            0.99 * self.striatal.trans1[t_idx] + 1.0,
+                                        );
+                                    }
+                                }
+                            } else if s_sub >= 0.5 {
+                                let stalled2 = wall_clamped;
+                                let mut kp_win: Option<usize> = None;
+                                let mut kn_win: Option<usize> = None;
+                                for k in 0..np2 {
+                                    if k < np1 || k >= STAGE1_CAP {
+                                        if kp_win.is_none_or(|b| {
+                                            self.striatal.prev_phi2[k] > self.striatal.prev_phi2[b]
+                                        }) {
+                                            kp_win = Some(k);
+                                        }
+                                        if kn_win.is_none_or(|b| phi2[k] > phi2[b]) {
+                                            kn_win = Some(k);
+                                        }
+                                    }
+                                }
+                                if let (Some(kp), Some(kn)) = (kp_win, kn_win)
+                                    && self.striatal.prev_phi2[kp] > 0.25
+                                {
+                                    let kc_idx = kp * COMPASS_DIRS + pdir;
+                                    self.striatal.n_kc2[kc_idx] =
+                                        sanitize(self.striatal.n_kc2[kc_idx] + 1.0);
+                                    self.striatal.stall_kc2[kc_idx] = sanitize(
+                                        0.88 * self.striatal.stall_kc2[kc_idx]
+                                            + 0.12 * (if stalled2 { 1.0 } else { 0.0 }),
+                                    );
+                                    if !stalled2 && kn != kp && phi2[kn] > 0.25 {
+                                        let t_idx = kc_idx * PLACE_CAP + kn;
+                                        self.striatal.trans2[t_idx] = sanitize(
+                                            0.99 * self.striatal.trans2[t_idx] + 1.0,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if self.striatal.wm_burst_age > 0 && !has_antag_rule {
+                        wm_sys2_pre.fill(0.0);
+                        wm_use_sys2_out = true;
+                        wm_chosen_dir = 255;
+                    } else if wm_act_now && self.striatal.wm_burst_age == 0 && !has_antag_rule {
+                        let mut phi_epi = [0.0_f32; PLACE_CAP];
+                        if s_sub >= 0.5 {
+                            phi_epi = phi2;
+                        } else {
+                            phi_epi[..STAGE1_CAP].copy_from_slice(&phi1);
+                        }
+                        if self.striatal.n_places1 > 0 {
+                            let head = (self.striatal.epi_head as usize) % EPISODIC_CAP;
+                            self.striatal.epi_ring[head] = EpisodicStep {
+                                valid: 1,
+                                boundary: u8::from(bout_reset || self.striatal.wm_occ_age <= 1),
+                                s_subgoal: s_sub,
+                                phi: phi_epi,
+                                cue_opp: slot_cue_opp,
+                            };
+                            self.striatal.epi_head = ((head + 1) % EPISODIC_CAP) as u8;
+                            if (self.striatal.epi_len as usize) < EPISODIC_CAP {
+                                self.striatal.epi_len += 1;
+                            }
+                            if is_plastic {
+                                self.striatal.replay_episodic_buffer(
+                                    s_ext_latch,
+                                    s_sub,
+                                    reward,
+                                    &phi1,
+                                    &phi2,
+                                    &is_kin,
+                                    &z_kin,
+                                );
+                            }
+                        }
+                        let step_stalled = self.striatal.prev_kin_valid
+                            && !bout_reset
+                            && !teleport
+                            && self.striatal.prev_dir < 8
+                            && (wall_clamped || tissue_stress >= 0.02);
+                        if let Some((sys2_vec, cdir)) = self.striatal.system2_synergy_search(
+                            act_s,
+                            is_plastic,
+                            s_sub,
+                            reward,
+                            step_stalled,
+                            n_kin_now,
+                            &is_kin,
+                            &z_kin,
+                            &hsp_arr,
+                            &phi1,
+                            &phi2,
+                            &slot_cue_opp,
+                        ) {
+                            wm_sys2_pre[..act_s].copy_from_slice(&sys2_vec);
+                            wm_use_sys2_out = true;
+                            wm_chosen_dir = cdir;
+                        }
+                    }
+
+                    self.striatal.prev_raw_kin = raw_x_arr;
+                    self.striatal.prev_phi1 = phi1;
+                    self.striatal.prev_phi2 = phi2;
+                    self.striatal.prev_kin_valid = self.striatal.wm_burst_age == 0;
+                    self.striatal.prev_subgoal_state = s_sub >= 0.5;
+                    self.striatal.prev_dir = wm_chosen_dir;
+                }
+
+                self.striatal.wm_prev_subgoal = s_ext_latch;
+            }
+        }
+
         if is_plastic && self.striatal.has_prev && !switched_context && !act_mismatch_inst {
             let eta_v = 0.05_f32;
-            let eta_w = if recalled_mature {
+            let eta_w = if wm_suppress_habit {
+                0.0_f32
+            } else if recalled_mature {
                 0.015_f32
             } else if has_cons_model {
                 0.068_f32
@@ -9467,6 +12165,53 @@ impl TubeGraph {
 
         let mut out = vec![0.0_f32; num_actuators];
         for (m, dst) in out.iter_mut().enumerate() {
+            if wm_use_probe_out && m < act_s {
+                if is_plastic {
+                    let g = self.striatal.gaussian();
+                    self.striatal.noise[m] =
+                        sanitize_clamp(rho * self.striatal.noise[m] + innov * g, -4.0, 4.0);
+                    let mean_a = wm_probe_mean_pre[m].tanh();
+                    let a_clean =
+                        sanitize_clamp((wm_probe_mean_pre[m] + wm_probe_pert[m]).tanh(), -1.0, 1.0);
+                    *dst = a_clean;
+                    self.striatal.prev_act[m] = a_clean;
+                    self.striatal.prev_probe_pert1[m] = sanitize(a_clean - mean_a);
+                } else {
+                    let a_clean = sanitize_clamp(wm_probe_mean_pre[m].tanh(), -1.0, 1.0);
+                    *dst = a_clean;
+                    self.striatal.prev_act[m] = a_clean;
+                }
+                continue;
+            }
+            if wm_use_sys2_out && m < act_s {
+                if is_plastic {
+                    let g = self.striatal.gaussian();
+                    self.striatal.noise[m] =
+                        sanitize_clamp(rho * self.striatal.noise[m] + innov * g, -4.0, 4.0);
+                    let en = if self.striatal.wm_burst_age == 0
+                        && self.striatal.kin_cal_ticks >= 96
+                        && wm_chosen_dir < 8
+                    {
+                        0.06 * self.striatal.gaussian()
+                    } else {
+                        0.0
+                    };
+                    let a_clean = sanitize_clamp((wm_sys2_pre[m] + en).tanh(), -1.0, 1.0);
+                    *dst = a_clean;
+                    self.striatal.prev_act[m] = a_clean;
+                    self.striatal.prev_probe_pert1[m] = 0.0;
+                } else {
+                    let a_clean = sanitize_clamp(wm_sys2_pre[m].tanh(), -1.0, 1.0);
+                    *dst = a_clean;
+                    self.striatal.prev_act[m] = a_clean;
+                }
+                continue;
+            }
+            if wm_suppress_habit && !is_plastic && m < act_s {
+                *dst = 0.0;
+                self.striatal.prev_act[m] = 0.0;
+                continue;
+            }
             if let Some(ph) = det_phase {
                 let m_ang = ph * (1.0 + 0.37 * ((m & 7) as f32)) + (m as f32) * 1.919_862_2;
                 let (pre_gain, d_amp) = if tissue_stress > 0.02 {
@@ -9511,8 +12256,9 @@ impl TubeGraph {
             };
             let f_m = loop_feat_for(m, &has_kin_loop, &loop_mask);
             let mut pre = mb_drive[m];
+            let habit_atten = if wm_suppress_habit { 0.05 } else { 1.0 };
             for (w_val, f_val) in w_slice.iter().zip(f_m.iter()) {
-                pre += w_val * f_val;
+                pre += habit_atten * w_val * f_val;
             }
             let scaled_pre = pre_gain_pl * pre;
             let eff_noise = plastic_noise_gain * self.striatal.noise[m];
