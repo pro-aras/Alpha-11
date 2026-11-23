@@ -8,7 +8,7 @@ use crate::rng::{ParamHasher, Rng64, sanitize, sanitize_clamp};
 pub const SCOUT_COHORT_WIDTH: usize = 32;
 /// Consecutive ticks the scout membrane dwells on one cohort: sub-tick 0 re-bases the
 /// derivative reference, sub-ticks `1..SCOUT_DWELL_TICKS` accumulate exact `dt = 1` statistics.
-pub const SCOUT_DWELL_TICKS: u8 = 8;
+pub const SCOUT_DWELL_TICKS: u8 = 9;
 /// Minimum contiguous samples before any scout statistic is trusted (moment warm-up).
 pub const SCOUT_WARM_SAMPLES: u16 = 12;
 pub const MAX_SCOUT_CHANNELS: usize = 16_384;
@@ -508,12 +508,17 @@ impl PoreMembrane {
                     continue;
                 }
 
+                let structured_nonneg_flash = c < capped_amb
+                    && self.scout_stats[c].is_structured()
+                    && self.scout_stats[c].kurtosis() > 4.5
+                    && sp.history.iter().all(|&hv| hv >= -1.0e-4);
+                let is_quiet_hold = is_sparse_imp || structured_nonneg_flash;
                 let trophic_in = if is_sparse_imp && raw_x.abs() >= 0.015 {
                     2.25 * q_pass + 0.55 * raw_x.abs()
                 } else {
                     1.55 * q_pass
                 };
-                let tr_decay = if is_sparse_imp && raw_x.abs() < 0.015 {
+                let tr_decay = if is_quiet_hold && raw_x.abs() < 0.015 {
                     0.996
                 } else {
                     0.95
@@ -529,7 +534,7 @@ impl PoreMembrane {
                     sp.conductance =
                         sanitize_clamp(0.94 * sp.conductance + 0.06 * target_g, 0.0, 1.8);
                 } else {
-                    let g_decay = if is_sparse_imp { 0.993 } else { 0.92 };
+                    let g_decay = if is_quiet_hold { 0.993 } else { 0.92 };
                     sp.conductance = sanitize(sp.conductance * g_decay);
                 }
 

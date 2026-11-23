@@ -12,6 +12,10 @@ use crate::OrganismConfig;
 use crate::body::{BodyCore, EXPLORE_CHANNELS};
 use crate::cells::{Cell, CellArena};
 use crate::crc32c::{crc32c, crc32c_update};
+use crate::operators::{
+    OpStep, OperatorBank, OperatorSlot, OP_MAX_ARCHIVE, OP_MAX_KEY_FEATS, OP_MAX_SLOTS,
+    OP_MAX_STEPS,
+};
 use crate::pores::{
     ChannelScoutStat, MAX_SCOUT_CHANNELS, MotorPore, PoreMembrane, SCOUT_DWELL_TICKS, SensorPore,
 };
@@ -26,9 +30,10 @@ use crate::tubes::{
 };
 
 pub const FILE_MAGIC: u64 = 0x4131_3143_484B_5031;
-pub const FORMAT_VERSION: u32 = 8;
+pub const FORMAT_VERSION: u32 = 9;
 pub const MIN_COMPAT_FORMAT_VERSION: u32 = 3;
 pub const SLAB_COUNT: u32 = 6;
+pub const SLAB_COUNT_V9: u32 = 7;
 /// Upper bound on decoded per-actuator width (fail-closed against corrupt lengths).
 pub const MAX_ACTUATOR_DIM: usize = 4_096;
 /// Upper bound on paged cortical columns per organism checkpoint.
@@ -115,6 +120,226 @@ pub const TAG_TUBE: u32 = 0x5455_4245;
 pub const TAG_PORE: u32 = 0x504F_5245;
 pub const TAG_RING: u32 = 0x5249_4E47;
 pub const TAG_SCOT: u32 = 0x5343_4F54;
+pub const TAG_OPER: u32 = 0x5245_504F;
+
+fn encode_operator_slot(slot: &OperatorSlot, w: &mut ByteWriter) -> Result<(), PersistError> {
+    if slot.key.len() > OP_MAX_KEY_FEATS || slot.steps.len() > OP_MAX_STEPS {
+        return Err(PersistError::InvalidTopology);
+    }
+    w.write_u8(slot.status);
+    w.write_u32(slot.key.len() as u32);
+    for &(ch, weight) in &slot.key {
+        w.write_u32(ch);
+        w.write_f32(weight)?;
+    }
+    w.write_u32(slot.steps.len() as u32);
+    for st in &slot.steps {
+        w.write_u16(st.act);
+        w.write_u8(st.dir as u8);
+    }
+    w.write_u16(slot.exec_trials);
+    w.write_u16(slot.null_trials);
+    w.write_f32(slot.exec_rew_sum)?;
+    w.write_f32(slot.null_rew_sum)?;
+    w.write_f32(slot.confirmed_rew)?;
+    w.write_u16(slot.probe_step_cursor);
+    w.write_bool(slot.archive_eligible);
+    w.write_u8(slot.occluded_strikes);
+    Ok(())
+}
+
+fn decode_operator_slot(r: &mut ByteReader<'_>) -> Result<OperatorSlot, PersistError> {
+    let status = r.read_u8()?;
+    if status > 2 {
+        return Err(PersistError::InvalidTopology);
+    }
+    let key_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if key_len > OP_MAX_KEY_FEATS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut key = Vec::with_capacity(key_len);
+    for _ in 0..key_len {
+        let ch = r.read_u32()?;
+        let weight = r.read_f32()?;
+        key.push((ch, weight));
+    }
+    let steps_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if steps_len > OP_MAX_STEPS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut steps = Vec::with_capacity(steps_len);
+    for _ in 0..steps_len {
+        let act = r.read_u16()?;
+        let dir = r.read_u8()? as i8;
+        if dir != -1 && dir != 1 {
+            return Err(PersistError::InvalidTopology);
+        }
+        steps.push(OpStep { act, dir });
+    }
+    let exec_trials = r.read_u16()?;
+    let null_trials = r.read_u16()?;
+    let exec_rew_sum = r.read_f32()?;
+    let null_rew_sum = r.read_f32()?;
+    let confirmed_rew = r.read_f32()?;
+    let probe_step_cursor = r.read_u16()?;
+    let archive_eligible = r.read_bool()?;
+    let occluded_strikes = r.read_u8()?;
+    Ok(OperatorSlot {
+        status,
+        key,
+        steps,
+        exec_trials,
+        null_trials,
+        exec_rew_sum,
+        null_rew_sum,
+        confirmed_rew,
+        probe_step_cursor,
+        archive_eligible,
+        occluded_strikes,
+    })
+}
+
+fn encode_operator_bank(bank: &OperatorBank, w: &mut ByteWriter) -> Result<(), PersistError> {
+    if bank.slots.len() > OP_MAX_SLOTS
+        || bank.archive.len() > OP_MAX_ARCHIVE
+        || bank.cue_accum.len() > OP_MAX_KEY_FEATS
+        || bank.burst_chs.len() > OP_MAX_KEY_FEATS
+    {
+        return Err(PersistError::InvalidTopology);
+    }
+    w.write_u32(bank.slots.len() as u32);
+    for s in &bank.slots {
+        encode_operator_slot(s, w)?;
+    }
+    w.write_u32(bank.archive.len() as u32);
+    for a in &bank.archive {
+        encode_operator_slot(a, w)?;
+    }
+    w.write_bool(bank.op_domain_unlocked);
+    w.write_u16(bank.passive_early_hits);
+    w.write_bool(bank.in_burst);
+    w.write_u16(bank.b_tick);
+    w.write_bool(bank.halted);
+    w.write_bool(bank.bout_had_stress);
+    w.write_f32(bank.peak_cue_norm)?;
+    w.write_u32(bank.cue_accum.len() as u32);
+    for &(ch, v) in &bank.cue_accum {
+        w.write_u32(ch);
+        w.write_f32(v)?;
+    }
+    w.write_u32(bank.burst_chs.len() as u32);
+    for &ch in &bank.burst_chs {
+        w.write_u32(ch);
+    }
+    w.write_u8(bank.active_slot.unwrap_or(u8::MAX));
+    w.write_u8(bank.step_pc);
+    w.write_u8(bank.active_mode);
+    w.write_u16(bank.pending_probe_act);
+    w.write_u8(bank.pending_probe_dir as u8);
+    w.write_bool(bank.pending_probe_valid);
+    w.write_f32(bank.bout_rew)?;
+    w.write_u16(bank.post_burst_ticks);
+    w.write_bool(bank.settle_hold);
+    w.write_bool(bank.last_emitted_by_op);
+    w.write_bool(bank.prev2_emitted_by_op);
+    Ok(())
+}
+
+fn decode_operator_bank(bytes: &[u8]) -> Result<OperatorBank, PersistError> {
+    let mut r = ByteReader::new(bytes);
+    let slot_count = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if slot_count == 0 && r.remaining() == 0 {
+        return Ok(OperatorBank::default());
+    }
+    if slot_count > OP_MAX_SLOTS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut slots = Vec::with_capacity(slot_count);
+    for _ in 0..slot_count {
+        slots.push(decode_operator_slot(&mut r)?);
+    }
+    let arch_count = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if arch_count > OP_MAX_ARCHIVE {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut archive = Vec::with_capacity(arch_count);
+    for _ in 0..arch_count {
+        archive.push(decode_operator_slot(&mut r)?);
+    }
+    let op_domain_unlocked = r.read_bool()?;
+    let passive_early_hits = r.read_u16()?;
+    let in_burst = r.read_bool()?;
+    let b_tick = r.read_u16()?;
+    let halted = r.read_bool()?;
+    let bout_had_stress = r.read_bool()?;
+    let peak_cue_norm = r.read_f32()?;
+    let acc_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if acc_len > OP_MAX_KEY_FEATS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut cue_accum = Vec::with_capacity(acc_len);
+    for _ in 0..acc_len {
+        let ch = r.read_u32()?;
+        let val = r.read_f32()?;
+        cue_accum.push((ch, val));
+    }
+    let bch_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if bch_len > OP_MAX_KEY_FEATS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut burst_chs = Vec::with_capacity(bch_len);
+    for _ in 0..bch_len {
+        burst_chs.push(r.read_u32()?);
+    }
+    let raw_active = r.read_u8()?;
+    let active_slot = if raw_active == u8::MAX {
+        None
+    } else if (raw_active as usize) < slots.len() {
+        Some(raw_active)
+    } else {
+        return Err(PersistError::InvalidTopology);
+    };
+    let step_pc = r.read_u8()?;
+    let active_mode = r.read_u8()?;
+    let pending_probe_act = r.read_u16()?;
+    let pending_probe_dir = r.read_u8()? as i8;
+    if pending_probe_dir != -1 && pending_probe_dir != 1 {
+        return Err(PersistError::InvalidTopology);
+    }
+    let pending_probe_valid = r.read_bool()?;
+    let bout_rew = r.read_f32()?;
+    let post_burst_ticks = r.read_u16()?;
+    let settle_hold = r.read_bool()?;
+    let last_emitted_by_op = r.read_bool()?;
+    let prev2_emitted_by_op = r.read_bool()?;
+    if r.remaining() != 0 {
+        return Err(PersistError::InvalidTopology);
+    }
+    Ok(OperatorBank {
+        slots,
+        archive,
+        op_domain_unlocked,
+        passive_early_hits,
+        in_burst,
+        b_tick,
+        halted,
+        bout_had_stress,
+        peak_cue_norm,
+        cue_accum,
+        burst_chs,
+        active_slot,
+        step_pc,
+        active_mode,
+        pending_probe_act,
+        pending_probe_dir,
+        pending_probe_valid,
+        bout_rew,
+        post_burst_ticks,
+        settle_hold,
+        last_emitted_by_op,
+        prev2_emitted_by_op,
+    })
+}
 
 const HEADER_OVERHEAD_MARGIN: usize = 256 * 1024;
 
@@ -1434,12 +1659,16 @@ fn encode_organism_with_mode(
             + scot_w.buf.len()
             + 72,
     );
+    let mut oper_w = ByteWriter::with_capacity(256);
+    encode_operator_bank(&org.operators, &mut oper_w)?;
+
     append_slab(&mut slabs_buf, TAG_BODY, &body_w.buf)?;
     append_slab(&mut slabs_buf, TAG_CELL, &cell_w.buf)?;
     append_slab(&mut slabs_buf, TAG_TUBE, &tube_payload)?;
     append_slab(&mut slabs_buf, TAG_PORE, &pore_w.buf)?;
     append_slab(&mut slabs_buf, TAG_RING, &ring_w.buf)?;
     append_slab(&mut slabs_buf, TAG_SCOT, &scot_w.buf)?;
+    append_slab(&mut slabs_buf, TAG_OPER, &oper_w.buf)?;
 
     let max_allowed = org
         .config
@@ -1452,7 +1681,7 @@ fn encode_organism_with_mode(
     let mut full = Vec::with_capacity(24 + slabs_buf.len() + 4);
     full.extend_from_slice(&FILE_MAGIC.to_le_bytes());
     full.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-    full.extend_from_slice(&SLAB_COUNT.to_le_bytes());
+    full.extend_from_slice(&SLAB_COUNT_V9.to_le_bytes());
     full.extend_from_slice(&(slabs_buf.len() as u64).to_le_bytes());
     full.extend_from_slice(&slabs_buf);
     let file_crc = crc32c(&full);
@@ -1505,7 +1734,8 @@ fn shadow_decode_organism_with_pages(
     if bytes.len() > expected_total {
         return Err(PersistError::InvalidTopology);
     }
-    if slab_count != SLAB_COUNT {
+    let expected_slabs = if version >= 9 { SLAB_COUNT_V9 } else { SLAB_COUNT };
+    if slab_count != expected_slabs {
         return Err(PersistError::InvalidTopology);
     }
 
@@ -1520,8 +1750,12 @@ fn shadow_decode_organism_with_pages(
         return Err(PersistError::ChecksumMismatch);
     }
 
-    let expected_tags = [TAG_BODY, TAG_CELL, TAG_TUBE, TAG_PORE, TAG_RING, TAG_SCOT];
-    let mut payloads: [&[u8]; 6] = [&[]; 6];
+    let expected_tags: &[u32] = if version >= 9 {
+        &[TAG_BODY, TAG_CELL, TAG_TUBE, TAG_PORE, TAG_RING, TAG_SCOT, TAG_OPER]
+    } else {
+        &[TAG_BODY, TAG_CELL, TAG_TUBE, TAG_PORE, TAG_RING, TAG_SCOT]
+    };
+    let mut payloads: [&[u8]; 7] = [&[]; 7];
     let mut pos = 24usize;
     let payload_end = expected_total - 4;
 
@@ -3636,6 +3870,12 @@ fn shadow_decode_organism_with_pages(
         motor_env_var,
     };
 
+    let operators = if version >= 9 {
+        decode_operator_bank(payloads[6])?
+    } else {
+        OperatorBank::default()
+    };
+
     let decoded = Alpha11Organism {
         seed,
         config,
@@ -3650,6 +3890,7 @@ fn shadow_decode_organism_with_pages(
         membrane,
         ring,
         committed_motor_pulses,
+        operators,
         subthreshold_rehearsals,
         mitosis_births,
         contradiction_splits,

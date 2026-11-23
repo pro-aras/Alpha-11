@@ -33,7 +33,7 @@ const STRIATAL_BIRTH_SALT: u64 = 0x5781_A7A1_0FC0_5EED;
 
 /// Binary magic header on every paged cortical column `.slab` file (`A11CSLAB` LE).
 pub const COL_SLAB_MAGIC: u64 = 0x4131_3143_534C_4142;
-pub const CORTICAL_SLAB_VERSION: u32 = 8;
+pub const CORTICAL_SLAB_VERSION: u32 = 9;
 
 pub const QUARANTINE_CAP: usize = 96;
 pub const WM_RULE_SLOTS: usize = 2;
@@ -175,7 +175,7 @@ pub fn decode_column_slab(bytes: &[u8]) -> Result<DecodedColumnSlab, PersistErro
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
     ]);
     let ver = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-    if magic != COL_SLAB_MAGIC || (ver != 7 && ver != CORTICAL_SLAB_VERSION) {
+    if magic != COL_SLAB_MAGIC || !(7..=CORTICAL_SLAB_VERSION).contains(&ver) {
         return Err(PersistError::BadMagicOrVersion);
     }
     let col_id = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
@@ -1132,6 +1132,22 @@ impl StriatalOfc {
         if q_len < QUARANTINE_CAP {
             self.quarantine_ch[q_len] = ch16;
             self.quarantine_len = (q_len + 1) as u8;
+        }
+    }
+
+    pub fn sync_emitted_action(&mut self, act: &[f32]) {
+        let na = self.n_act.min(act.len()).min(self.prev_act.len());
+        for m in 0..na {
+            let a = sanitize_clamp(act[m], -1.0, 1.0);
+            self.prev_act[m] = a;
+            if m < self.da_ring.len() {
+                let am = if m < self.act_mean.len() {
+                    self.act_mean[m]
+                } else {
+                    0.0
+                };
+                self.da_ring[m] = sanitize(a - am);
+            }
         }
     }
 
@@ -9267,6 +9283,9 @@ impl TubeGraph {
 
         let mut n_prony_env = 0usize;
         let mut n_pos_pedestal = 0usize;
+        let mut n_zero_floor_burst = 0usize;
+        let mut is_self_copy_arr = [false; STRIATAL_PORES];
+        let mut is_ou_arr = [false; STRIATAL_PORES];
         let mut basal_coherent = [false; STRIATAL_PORES];
         for p in 0..STRIATAL_PORES {
             if live_pore_ch[p] == u32::MAX {
@@ -9346,13 +9365,14 @@ impl TubeGraph {
                     && age >= 48
                     && vel_c < 0.08
                     && self.striatal.pore_var_raw[p] > 2.0e-3;
-                let is_non_carr_ou = !carrier_bank
+                let is_non_carr_ou = self.striatal.wm_ever_latched
+                    && !carrier_bank
                     && !is_sparse
                     && !is_spatial_pos
                     && age >= 32
                     && vel_c < -0.12
                     && self.striatal.pore_var_raw[p] > 0.045;
-                let is_verified_self_copy = !is_spatial_pos
+                let is_verified_self_copy = (!self.striatal.wm_ever_latched || !is_spatial_pos)
                     && age >= prune_warmup
                     && self.striatal.pore_var_raw[p] > 8.0e-4
                     && self.striatal.pore_var_exaff[p] < 0.25 * self.striatal.pore_var_raw[p];
@@ -9366,7 +9386,9 @@ impl TubeGraph {
                     self.striatal.wm_step_streak[p] = 0;
                     membrane.sensor_pores[p].trophic_ema = 0.0;
                     membrane.sensor_pores[p].conductance = 0.01;
-                    self.striatal.quarantine_channel(ch);
+                    if self.striatal.wm_ever_latched {
+                        self.striatal.quarantine_channel(ch);
+                    }
                 } else {
                     let has_rule_reg = self.striatal.tonic_rule_valid.iter().any(|&v| v != 0);
                     let kin_anchor = !carrier_bank
@@ -9414,14 +9436,16 @@ impl TubeGraph {
                     && vel_c < -0.12
                     && self.striatal.pore_var_raw[p] > 0.045
             };
+            is_self_copy_arr[p] = is_self_copy_like;
+            is_ou_arr[p] = is_ou_like;
+            let mask_reaff_ou = carrier_bank || self.striatal.wm_ever_latched;
             feat_active[p] = if carrier_bank && (cons_role & 2) != 0 {
                 !apical_carrier[p]
             } else {
                 !is_white_arr[p]
                     && !is_dead_flat_arr[p]
                     && !apical_carrier[p]
-                    && !is_self_copy_like
-                    && !is_ou_like
+                    && (!mask_reaff_ou || (!is_self_copy_like && !is_ou_like))
             };
             basal_coherent[p] = if carrier_bank {
                 !apical_carrier[p]
@@ -9441,8 +9465,17 @@ impl TubeGraph {
             };
             pore_sig[p] = sanitize_clamp(raw_x - neg_floor - reaff, -1.0, 1.0);
             if !is_sparse {
-                if feat_active[p] && min_h_arr[p] >= 0.035 {
+                let clean_cand = !is_white_arr[p]
+                    && !is_dead_flat_arr[p]
+                    && !apical_carrier[p]
+                    && !is_self_copy_like
+                    && !is_ou_like;
+                if clean_cand && min_h_arr[p] >= 0.045 && max_h_arr[p] >= 0.22 {
                     n_pos_pedestal += 1;
+                }
+                if clean_cand && (-1.0e-3..=1.0e-3).contains(&min_h_arr[p]) && max_h_arr[p] >= 0.10
+                {
+                    n_zero_floor_burst += 1;
                 }
                 if !is_white_arr[p] {
                     max_smooth_raw = max_smooth_raw.max(raw_x.abs());
@@ -9462,7 +9495,8 @@ impl TubeGraph {
         let active_continuous_field = self.striatal.wm_ever_latched
             || (!carrier_bank
                 && !self.has_tonotopic_bank()
-                && n_pos_pedestal >= 4
+                && n_pos_pedestal >= 6
+                && n_zero_floor_burst >= 2
                 && max_smooth_raw > 0.15)
             || if is_plastic {
                 self.striatal.tick < 48 || (c1_wave_pores >= 2 && max_smooth_raw > 1.0e-4)
@@ -10467,7 +10501,11 @@ impl TubeGraph {
             let mut n_pedestal_pores = 0usize;
             let mut n_silent_floor_pores = 0usize;
             for p in 0..pore_cap {
-                if !feat_active[p] || membrane.sensor_pores[p].age_ticks < 16 {
+                if !feat_active[p]
+                    || is_self_copy_arr[p]
+                    || is_ou_arr[p]
+                    || membrane.sensor_pores[p].age_ticks < 16
+                {
                     continue;
                 }
                 let ch_u = live_pore_ch[p] as usize;
@@ -10476,9 +10514,11 @@ impl TubeGraph {
                 }
                 if min_h_arr[p] < -0.06 && self.striatal.pore_mean[p] < 0.08 {
                     n_true_bipolar += 1;
-                } else if min_h_arr[p] >= 0.045 {
+                } else if min_h_arr[p] >= 0.045 && max_h_arr[p] >= 0.22 {
                     n_pedestal_pores += 1;
-                } else if (-0.004..0.028).contains(&min_h_arr[p]) {
+                } else if (-1.0e-3..=1.0e-3).contains(&min_h_arr[p])
+                    && (max_h_arr[p] >= 0.10 || (self.striatal.wm_bank_tag[p] & 3) != 0)
+                {
                     n_silent_floor_pores += 1;
                 }
             }
@@ -10488,7 +10528,12 @@ impl TubeGraph {
                     && n_pedestal_pores >= 6
                     && n_silent_floor_pores >= 2);
             if wm_env_enabled {
-                wm_suppress_habit = true;
+                wm_suppress_habit = self.striatal.wm_ever_latched;
+                for p in 0..STRIATAL_PORES {
+                    if is_self_copy_arr[p] || is_ou_arr[p] {
+                        feat_active[p] = false;
+                    }
+                }
                 let mut prev_x_wm = [0.0_f32; STRIATAL_PORES];
                 let mut prev2_x_wm = [0.0_f32; STRIATAL_PORES];
                 for p in 0..STRIATAL_PORES {
@@ -10645,7 +10690,7 @@ impl TubeGraph {
                     let h_sp = max_h_arr[p] - min_h_arr[p];
                     let phasic = !is_reg_rule
                         && ((self.striatal.wm_bank_tag[p] & 3) != 0
-                            || ((-0.004..0.028).contains(&min_h_arr[p])
+                            || ((-1.0e-3..=1.0e-3).contains(&min_h_arr[p])
                                 && h_sp >= 0.025
                                 && raw_x_arr[p] <= 0.88));
                     let non_kin_disc = rule_allowed
@@ -11070,8 +11115,9 @@ impl TubeGraph {
                                 } else {
                                     self.striatal.wm_cue_cent = self.striatal.wm_occ;
                                 }
-                                if is_plastic {
+                                if is_plastic && pkm >= 0.25 {
                                     self.striatal.wm_ever_latched = true;
+                                    wm_suppress_habit = true;
                                 }
                             }
                             self.striatal.wm_burst_age = 0;

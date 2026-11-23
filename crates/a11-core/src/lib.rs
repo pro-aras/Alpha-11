@@ -4,6 +4,7 @@ pub mod body;
 pub mod causal_core;
 pub mod cells;
 pub mod crc32c;
+pub mod operators;
 pub mod persistence;
 pub mod pores;
 pub mod rng;
@@ -17,6 +18,7 @@ use a11_medium::{
 
 use crate::body::BodyCore;
 use crate::cells::CellArena;
+use crate::operators::OperatorBank;
 use crate::persistence::{
     encode_organism, load_transactional_files, save_transactional_files, shadow_decode_organism,
 };
@@ -64,6 +66,7 @@ pub struct Alpha11Organism {
     pub(crate) membrane: PoreMembrane,
     pub(crate) ring: EfferenceRing,
     pub(crate) committed_motor_pulses: u64,
+    pub(crate) operators: OperatorBank,
     pub(crate) subthreshold_rehearsals: u64,
     pub(crate) mitosis_births: u64,
     pub(crate) contradiction_splits: u64,
@@ -101,6 +104,7 @@ impl Alpha11Organism {
             membrane,
             ring: EfferenceRing::default(),
             committed_motor_pulses: 0,
+            operators: OperatorBank::default(),
             subthreshold_rehearsals: 0,
             mitosis_births: 0,
             contradiction_splits: 0,
@@ -127,6 +131,7 @@ impl Alpha11Organism {
             + self.tubes.logical_bytes()
             + self.membrane.logical_bytes()
             + self.ring.logical_bytes()
+            + self.operators.logical_bytes()
             + 96
     }
 
@@ -366,7 +371,7 @@ impl OrganismEngine for Alpha11Organism {
             self.mode,
         );
 
-        let (striatal_pulse, ofc_splits) = match self.tubes.step_striatal_ofc(
+        let (mut striatal_pulse, ofc_splits) = match self.tubes.step_striatal_ofc(
             view.ambient_in,
             view.metabolic_influx,
             view.tissue_stress,
@@ -382,6 +387,26 @@ impl OrganismEngine for Alpha11Organism {
             }
         };
         self.contradiction_splits = self.contradiction_splits.saturating_add(ofc_splits);
+
+        let q_len_vm =
+            (self.tubes.striatal.quarantine_len as usize).min(crate::tubes::QUARANTINE_CAP);
+        if let Some(op_out) = self.operators.step_operator_vm(
+            view.ambient_in,
+            view.metabolic_influx,
+            view.tissue_stress,
+            view.num_actuators,
+            &mut self.membrane,
+            &self.tubes.striatal.quarantine_ch[..q_len_vm],
+            &self.tubes.striatal.pore_ch,
+            &self.tubes.striatal.pore_age,
+            &self.tubes.striatal.pore_var_raw,
+            &self.tubes.striatal.pore_var_exaff,
+            self.mode,
+            self.seed,
+        ) {
+            self.tubes.striatal.sync_emitted_action(&op_out);
+            striatal_pulse = Some(op_out);
+        }
 
         if self.mode == ControlMode::Natural {
             let (splits, shortcuts, pruned_tubes) =
@@ -651,6 +676,7 @@ impl OrganismEngine for Alpha11Organism {
         self.cells.zero_learned_conductances();
         self.tubes.zero_learned_conductances();
         self.membrane.zero_learned_conductances();
+        self.operators.zero_learned();
     }
 
     fn learned_parameter_hash(&self) -> u64 {
@@ -659,6 +685,7 @@ impl OrganismEngine for Alpha11Organism {
         self.cells.hash_learned(&mut hasher);
         self.tubes.hash_learned(&mut hasher);
         self.membrane.hash_learned(&mut hasher);
+        self.operators.hash_learned(&mut hasher);
         hasher.finish()
     }
 
@@ -954,7 +981,7 @@ mod tests {
             pos = pos + 8 + s_len + 4;
             slab_count_checked += 1;
         }
-        assert_eq!(slab_count_checked, 6);
+        assert_eq!(slab_count_checked, 7);
 
         let mut victim_trunc = Alpha11Organism::new(12, cfg);
         assert_eq!(
@@ -1356,6 +1383,40 @@ mod tests {
         full
     }
 
+    fn downgrade_v9_checkpoint_to_v8(v9: &[u8]) -> Vec<u8> {
+        use crate::persistence::TAG_OPER;
+        let rd = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        let payload_end = v9.len() - 4;
+        let mut slabs: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut pos = 24usize;
+        while pos < payload_end {
+            let tag = rd(v9, pos);
+            let len = rd(v9, pos + 4) as usize;
+            if tag != TAG_OPER {
+                slabs.push((tag, v9[pos + 8..pos + 8 + len].to_vec()));
+            }
+            pos += 8 + len + 4;
+        }
+        assert_eq!(slabs.len(), 6);
+        let mut slabs_buf = Vec::new();
+        for (tag, p) in &slabs {
+            let start = slabs_buf.len();
+            slabs_buf.extend_from_slice(&tag.to_le_bytes());
+            slabs_buf.extend_from_slice(&(p.len() as u32).to_le_bytes());
+            slabs_buf.extend_from_slice(p);
+            let scrc = crc32c(&slabs_buf[start..]);
+            slabs_buf.extend_from_slice(&scrc.to_le_bytes());
+        }
+        let mut full = v9[..8].to_vec();
+        full.extend_from_slice(&8u32.to_le_bytes());
+        full.extend_from_slice(&6u32.to_le_bytes());
+        full.extend_from_slice(&(slabs_buf.len() as u64).to_le_bytes());
+        full.extend_from_slice(&slabs_buf);
+        let fcrc = crc32c(&full);
+        full.extend_from_slice(&fcrc.to_le_bytes());
+        full
+    }
+
     #[test]
     fn v3_checkpoint_upgrades_to_v4_and_keeps_stepping() {
         let cfg = OrganismConfig::default();
@@ -1381,8 +1442,11 @@ mod tests {
         for t in 0..150u64 {
             let _ = drive(&mut org, t, &mut ambient);
         }
-        let v8 = org.encode_checkpoint().expect("encode v8");
+        let v9 = org.encode_checkpoint().expect("encode v9");
+        assert_eq!(u32::from_le_bytes([v9[8], v9[9], v9[10], v9[11]]), 9);
+        let v8 = downgrade_v9_checkpoint_to_v8(&v9);
         assert_eq!(u32::from_le_bytes([v8[8], v8[9], v8[10], v8[11]]), 8);
+        assert!(v8.len() < v9.len());
         let v7 = downgrade_v8_checkpoint_to_v7(&v8);
         assert_eq!(u32::from_le_bytes([v7[8], v7[9], v7[10], v7[11]]), 7);
         assert!(v7.len() < v8.len());
@@ -1398,6 +1462,10 @@ mod tests {
         let v3 = downgrade_v4_checkpoint_to_v3(&v4);
         assert_eq!(u32::from_le_bytes([v3[8], v3[9], v3[10], v3[11]]), 3);
         assert!(v3.len() < v4.len());
+
+        let mut upgraded_v8 = Alpha11Organism::new(1, cfg);
+        upgraded_v8.restore_checkpoint(&v8).expect("v8 restore");
+        assert!(!upgraded_v8.is_poisoned());
 
         let mut upgraded_v7 = Alpha11Organism::new(1, cfg);
         upgraded_v7.restore_checkpoint(&v7).expect("v7 restore");
@@ -1425,7 +1493,7 @@ mod tests {
         assert_eq!(a.tube_count, b.tube_count);
 
         let re = upgraded.encode_checkpoint().expect("re-encode");
-        assert_eq!(u32::from_le_bytes([re[8], re[9], re[10], re[11]]), 8);
+        assert_eq!(u32::from_le_bytes([re[8], re[9], re[10], re[11]]), 9);
         let mut corrupt = v3.clone();
         let mid = corrupt.len() / 2;
         corrupt[mid] ^= 0x01;
