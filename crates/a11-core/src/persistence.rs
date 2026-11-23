@@ -11,6 +11,12 @@ use crate::Alpha11Organism;
 use crate::OrganismConfig;
 use crate::body::{BodyCore, EXPLORE_CHANNELS};
 use crate::cells::{Cell, CellArena};
+use crate::compositional::{
+    AudProto, COMP_AUD_SLICES, COMP_MAX_ARCHIVE, COMP_MAX_CANDIDATES, COMP_MAX_FRAMES,
+    COMP_MAX_LEXEMES, COMP_MAX_PROBES, COMP_MAX_PROTOS, COMP_MAX_RECEPTORS,
+    COMP_MAX_SCAN_CHANNELS, ChannelTrackStat, CompositionalCortex, GrammarSnapshot, LexemeSlot,
+    MotorPrim, ProbeRecord,
+};
 use crate::crc32c::{crc32c, crc32c_update};
 use crate::operators::{
     OpStep, OperatorBank, OperatorSlot, OP_MAX_ARCHIVE, OP_MAX_KEY_FEATS, OP_MAX_SLOTS,
@@ -30,10 +36,11 @@ use crate::tubes::{
 };
 
 pub const FILE_MAGIC: u64 = 0x4131_3143_484B_5031;
-pub const FORMAT_VERSION: u32 = 9;
+pub const FORMAT_VERSION: u32 = 10;
 pub const MIN_COMPAT_FORMAT_VERSION: u32 = 3;
 pub const SLAB_COUNT: u32 = 6;
 pub const SLAB_COUNT_V9: u32 = 7;
+pub const COMP_EXT_MAGIC: u32 = 0x504D_4F43;
 /// Upper bound on decoded per-actuator width (fail-closed against corrupt lengths).
 pub const MAX_ACTUATOR_DIM: usize = 4_096;
 /// Upper bound on paged cortical columns per organism checkpoint.
@@ -245,8 +252,7 @@ fn encode_operator_bank(bank: &OperatorBank, w: &mut ByteWriter) -> Result<(), P
     Ok(())
 }
 
-fn decode_operator_bank(bytes: &[u8]) -> Result<OperatorBank, PersistError> {
-    let mut r = ByteReader::new(bytes);
+fn decode_operator_bank_reader(r: &mut ByteReader<'_>) -> Result<OperatorBank, PersistError> {
     let slot_count = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
     if slot_count == 0 && r.remaining() == 0 {
         return Ok(OperatorBank::default());
@@ -256,7 +262,7 @@ fn decode_operator_bank(bytes: &[u8]) -> Result<OperatorBank, PersistError> {
     }
     let mut slots = Vec::with_capacity(slot_count);
     for _ in 0..slot_count {
-        slots.push(decode_operator_slot(&mut r)?);
+        slots.push(decode_operator_slot(r)?);
     }
     let arch_count = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
     if arch_count > OP_MAX_ARCHIVE {
@@ -264,7 +270,7 @@ fn decode_operator_bank(bytes: &[u8]) -> Result<OperatorBank, PersistError> {
     }
     let mut archive = Vec::with_capacity(arch_count);
     for _ in 0..arch_count {
-        archive.push(decode_operator_slot(&mut r)?);
+        archive.push(decode_operator_slot(r)?);
     }
     let op_domain_unlocked = r.read_bool()?;
     let passive_early_hits = r.read_u16()?;
@@ -312,9 +318,6 @@ fn decode_operator_bank(bytes: &[u8]) -> Result<OperatorBank, PersistError> {
     let settle_hold = r.read_bool()?;
     let last_emitted_by_op = r.read_bool()?;
     let prev2_emitted_by_op = r.read_bool()?;
-    if r.remaining() != 0 {
-        return Err(PersistError::InvalidTopology);
-    }
     Ok(OperatorBank {
         slots,
         archive,
@@ -339,6 +342,810 @@ fn decode_operator_bank(bytes: &[u8]) -> Result<OperatorBank, PersistError> {
         last_emitted_by_op,
         prev2_emitted_by_op,
     })
+}
+
+fn encode_motor_prim(prim: &MotorPrim, w: &mut ByteWriter) -> Result<(), PersistError> {
+    if prim.wire_len > 2 || prim.reaff.len() > COMP_MAX_RECEPTORS {
+        return Err(PersistError::InvalidTopology);
+    }
+    w.write_u8(prim.wire_len);
+    for i in 0..2 {
+        w.write_u16(prim.wire_act[i]);
+        w.write_u8(prim.wire_dir[i] as u8);
+    }
+    w.write_u32(prim.reaff.len() as u32);
+    for &v in &prim.reaff {
+        w.write_f32(v)?;
+    }
+    Ok(())
+}
+
+fn decode_motor_prim(r: &mut ByteReader<'_>) -> Result<MotorPrim, PersistError> {
+    let wire_len = r.read_u8()?;
+    if wire_len > 2 {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut wire_act = [0u16; 2];
+    let mut wire_dir = [1i8; 2];
+    for i in 0..2 {
+        wire_act[i] = r.read_u16()?;
+        let d = r.read_u8()? as i8;
+        if d != -1 && d != 1 {
+            return Err(PersistError::InvalidTopology);
+        }
+        wire_dir[i] = d;
+    }
+    let r_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if r_len > COMP_MAX_RECEPTORS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut reaff = Vec::with_capacity(r_len);
+    for _ in 0..r_len {
+        reaff.push(r.read_f32()?);
+    }
+    Ok(MotorPrim {
+        wire_len,
+        wire_act,
+        wire_dir,
+        reaff,
+    })
+}
+
+fn encode_lexeme_slot(slot: &LexemeSlot, w: &mut ByteWriter) -> Result<(), PersistError> {
+    w.write_u8(slot.phon_pair[0]);
+    w.write_u8(slot.phon_pair[1]);
+    w.write_u8(slot.role_slot);
+    w.write_u8(slot.bound_manip);
+    w.write_u8(slot.probe_cursor);
+    w.write_u8(slot.status);
+    w.write_u8(slot.exec_trials);
+    w.write_u8(slot.null_trials);
+    w.write_f32(slot.exec_rew_sum)?;
+    w.write_f32(slot.null_rew_sum)?;
+    w.write_bool(slot.post_promo_audited);
+    Ok(())
+}
+
+fn decode_lexeme_slot(r: &mut ByteReader<'_>) -> Result<LexemeSlot, PersistError> {
+    let p0 = r.read_u8()?;
+    let p1 = r.read_u8()?;
+    let role_slot = r.read_u8()?;
+    let bound_manip = r.read_u8()?;
+    let probe_cursor = r.read_u8()?;
+    let status = r.read_u8()?;
+    if status > 2 {
+        return Err(PersistError::InvalidTopology);
+    }
+    let exec_trials = r.read_u8()?;
+    let null_trials = r.read_u8()?;
+    let exec_rew_sum = r.read_f32()?;
+    let null_rew_sum = r.read_f32()?;
+    let post_promo_audited = r.read_bool()?;
+    Ok(LexemeSlot {
+        phon_pair: [p0, p1],
+        role_slot,
+        bound_manip,
+        probe_cursor,
+        status,
+        exec_trials,
+        null_trials,
+        exec_rew_sum,
+        null_rew_sum,
+        post_promo_audited,
+    })
+}
+
+fn write_sparse_pairs(
+    items: &[(u16, f32)],
+    max_len: usize,
+    w: &mut ByteWriter,
+) -> Result<(), PersistError> {
+    if items.len() > max_len {
+        return Err(PersistError::InvalidTopology);
+    }
+    w.write_u32(items.len() as u32);
+    for &(ch, v) in items {
+        w.write_u16(ch);
+        w.write_f32(v)?;
+    }
+    Ok(())
+}
+
+fn read_sparse_pairs(
+    r: &mut ByteReader<'_>,
+    max_len: usize,
+) -> Result<Vec<(u16, f32)>, PersistError> {
+    let n = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if n > max_len {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push((r.read_u16()?, r.read_f32()?));
+    }
+    Ok(out)
+}
+
+fn encode_compositional_cortex(
+    c: &CompositionalCortex,
+    w: &mut ByteWriter,
+) -> Result<(), PersistError> {
+    if c.receptors.len() > COMP_MAX_RECEPTORS
+        || c.is_scene_rec.len() != c.receptors.len()
+        || c.is_fast_rec.len() != c.receptors.len()
+        || c.is_aud_rec.len() != c.receptors.len()
+        || c.fast_centroid.len() > COMP_MAX_RECEPTORS
+        || c.fast_templates.len() > COMP_MAX_LEXEMES
+        || c.sym_prims.len() > COMP_MAX_LEXEMES
+        || c.manip_prims.len() > COMP_MAX_LEXEMES
+        || c.aud_proto_s0.len() > COMP_MAX_PROTOS
+        || c.aud_proto_s1.len() > COMP_MAX_PROTOS
+        || c.lexemes.len() > COMP_MAX_LEXEMES
+        || c.grammar_archive.len() > COMP_MAX_ARCHIVE
+        || c.track_stats.len() > COMP_MAX_SCAN_CHANNELS
+        || c.cand_chs.len() > COMP_MAX_CANDIDATES
+        || c.burst_active_chs.len() > COMP_MAX_CANDIDATES
+        || c.verified_self_copy_chs.len() > COMP_MAX_SCAN_CHANNELS
+        || c.obs_max_abs.len() > COMP_MAX_SCAN_CHANNELS
+        || c.passive_early_vec.len() > COMP_MAX_CANDIDATES
+        || c.passive_late_vec.len() > COMP_MAX_CANDIDATES
+        || c.probes.len() > COMP_MAX_PROBES
+        || c.cur_probe_base.len() > COMP_MAX_CANDIDATES
+        || c.scene_accum.len() > COMP_MAX_RECEPTORS
+        || c.prev_rec_vals.len() > COMP_MAX_RECEPTORS
+        || c.fast_buf.len() > COMP_MAX_FRAMES
+        || c.aud_buf.len() > COMP_MAX_FRAMES
+    {
+        return Err(PersistError::InvalidTopology);
+    }
+
+    w.write_bool(c.comp_domain_unlocked);
+    w.write_u8(c.stage);
+    w.write_u32(c.receptors.len() as u32);
+    for &r in &c.receptors {
+        w.write_u16(r);
+    }
+    for &v in &c.is_scene_rec {
+        w.write_u8(v);
+    }
+    for &v in &c.is_fast_rec {
+        w.write_u8(v);
+    }
+    for &v in &c.is_aud_rec {
+        w.write_u8(v);
+    }
+    w.write_u32(c.fast_centroid.len() as u32);
+    for &v in &c.fast_centroid {
+        w.write_f32(v)?;
+    }
+    w.write_u32(c.fast_templates.len() as u32);
+    for tmpl in &c.fast_templates {
+        if tmpl.len() > COMP_MAX_RECEPTORS {
+            return Err(PersistError::InvalidTopology);
+        }
+        w.write_u32(tmpl.len() as u32);
+        for &v in tmpl {
+            w.write_f32(v)?;
+        }
+    }
+    w.write_u8(c.learned_utt_len);
+    w.write_u8(c.learned_gap_start);
+    w.write_u8(c.learned_gap_end);
+    w.write_u32(c.sym_prims.len() as u32);
+    for sp in &c.sym_prims {
+        encode_motor_prim(sp, w)?;
+    }
+    w.write_u32(c.manip_prims.len() as u32);
+    for mp in &c.manip_prims {
+        encode_motor_prim(mp, w)?;
+    }
+    for protos in [&c.aud_proto_s0, &c.aud_proto_s1] {
+        w.write_u32(protos.len() as u32);
+        for ap in protos {
+            if ap.vec.len() > COMP_AUD_SLICES * COMP_MAX_RECEPTORS {
+                return Err(PersistError::InvalidTopology);
+            }
+            w.write_u8(ap.phon_pair[0]);
+            w.write_u8(ap.phon_pair[1]);
+            w.write_u16(ap.count);
+            w.write_u32(ap.vec.len() as u32);
+            for &v in &ap.vec {
+                w.write_f32(v)?;
+            }
+        }
+    }
+    w.write_u32(c.lexemes.len() as u32);
+    for l in &c.lexemes {
+        encode_lexeme_slot(l, w)?;
+    }
+    w.write_u32(c.grammar_archive.len() as u32);
+    for gs in &c.grammar_archive {
+        if gs.lexemes.len() > COMP_MAX_LEXEMES {
+            return Err(PersistError::InvalidTopology);
+        }
+        w.write_bool(gs.eligible);
+        w.write_u32(gs.lexemes.len() as u32);
+        for l in &gs.lexemes {
+            encode_lexeme_slot(l, w)?;
+        }
+    }
+    w.write_bool(c.yoked_contaminated);
+    w.write_f32(c.comp_agency_ema)?;
+    w.write_u32(c.verified_self_copy_chs.len() as u32);
+    for &ch in &c.verified_self_copy_chs {
+        w.write_u16(ch);
+    }
+
+    w.write_u8(c.multi_seg_hits);
+    w.write_u16(c.roll_cursor);
+    w.write_u32(c.track_stats.len() as u32);
+    for ts in &c.track_stats {
+        w.write_u16(ts.samples);
+        w.write_f32(ts.min_val)?;
+        w.write_f32(ts.max_val)?;
+        w.write_bool(ts.disqualified);
+    }
+    w.write_u32(c.cand_chs.len() as u32);
+    for &ch in &c.cand_chs {
+        w.write_u16(ch);
+    }
+    w.write_u32(c.burst_active_chs.len() as u32);
+    for &ch in &c.burst_active_chs {
+        w.write_u16(ch);
+    }
+    write_sparse_pairs(&c.passive_early_vec, COMP_MAX_CANDIDATES, w)?;
+    write_sparse_pairs(&c.passive_late_vec, COMP_MAX_CANDIDATES, w)?;
+    w.write_bool(c.in_passive_burst);
+    w.write_u16(c.passive_burst_ticks);
+    w.write_bool(c.passive_burst_had_influx);
+    w.write_u8(c.burst_quiet_streak);
+    w.write_f32(c.prev_cand_max)?;
+
+    w.write_u16(c.obs_bouts_done);
+    w.write_bool(c.in_obs_bout);
+    w.write_u16(c.obs_idle_ticks);
+    w.write_u8(c.obs_quiet_streak);
+    w.write_u32(c.obs_max_abs.len() as u32);
+    for &v in &c.obs_max_abs {
+        w.write_f32(v)?;
+    }
+
+    w.write_u32(c.probes.len() as u32);
+    for pr in &c.probes {
+        w.write_u16(pr.act);
+        w.write_u8(pr.dir as u8);
+        write_sparse_pairs(&pr.pass1, COMP_MAX_CANDIDATES, w)?;
+        write_sparse_pairs(&pr.pass2, COMP_MAX_CANDIDATES, w)?;
+        write_sparse_pairs(&pr.t2_pass1, COMP_MAX_CANDIDATES, w)?;
+        write_sparse_pairs(&pr.t2_pass2, COMP_MAX_CANDIDATES, w)?;
+        w.write_bool(pr.pass1_done);
+        w.write_bool(pr.pass2_done);
+        w.write_u8(pr.retry_count);
+    }
+    w.write_u16(c.probe_idx);
+    w.write_u8(c.probe_phase);
+    w.write_bool(c.babble_prompt_active);
+    w.write_u8(c.babble_quiet_streak);
+    w.write_u16(c.babble_prompt_dur);
+    w.write_u16(c.last_babble_prompt_dur);
+    w.write_u16(c.ticks_since_prompt);
+    w.write_u16(c.quiet_motor_streak);
+    w.write_u16(c.babble_total_ticks);
+    w.write_u8(c.post_probe_cool);
+    w.write_u16(c.cur_probe_act);
+    w.write_u8(c.cur_probe_dir as u8);
+    write_sparse_pairs(&c.cur_probe_resp, COMP_MAX_CANDIDATES, w)?;
+    write_sparse_pairs(&c.cur_probe_base, COMP_MAX_CANDIDATES, w)?;
+
+    w.write_bool(c.seg_ready);
+    w.write_bool(c.scene_armed);
+    w.write_bool(c.fast_armed);
+    w.write_bool(c.aud_armed);
+    w.write_u8(c.self_vocal_cool);
+    w.write_u8(c.in_prompt_kind);
+    w.write_u16(c.p_tick);
+    w.write_bool(c.saw_fast);
+    w.write_bool(c.saw_aud);
+    w.write_bool(c.pending_bimodal_aud);
+    w.write_u8(c.pending_bimodal_w[0][0]);
+    w.write_u8(c.pending_bimodal_w[0][1]);
+    w.write_u8(c.pending_bimodal_w[1][0]);
+    w.write_u8(c.pending_bimodal_w[1][1]);
+    w.write_f32(c.peak_aud_norm)?;
+    w.write_f32(c.prev_scene_norm)?;
+    w.write_f32(c.prev_fast_norm)?;
+    w.write_f32(c.prev_aud_norm)?;
+    w.write_u32(c.scene_accum.len() as u32);
+    for &v in &c.scene_accum {
+        w.write_f32(v)?;
+    }
+    for bufs in [&c.fast_buf, &c.aud_buf] {
+        w.write_u32(bufs.len() as u32);
+        for fr in bufs {
+            if fr.len() > COMP_MAX_RECEPTORS {
+                return Err(PersistError::InvalidTopology);
+            }
+            w.write_u32(fr.len() as u32);
+            for &v in fr {
+                w.write_f32(v)?;
+            }
+        }
+    }
+    w.write_u32(c.prev_rec_vals.len() as u32);
+    for &v in &c.prev_rec_vals {
+        w.write_f32(v)?;
+    }
+    w.write_u8(c.last_emitted_kind);
+    w.write_u8(c.last_emitted_idx);
+
+    w.write_u8(c.in_response_kind);
+    w.write_u16(c.resp_tick);
+    w.write_u8(c.active_w[0][0]);
+    w.write_u8(c.active_w[0][1]);
+    w.write_u8(c.active_w[1][0]);
+    w.write_u8(c.active_w[1][1]);
+    w.write_u8(c.active_m[0]);
+    w.write_u8(c.active_m[1]);
+    w.write_bool(c.active_high_cert);
+    w.write_u8(c.eval_mode);
+    w.write_bool(c.eval_halted);
+    w.write_bool(c.eval_had_stress);
+    w.write_bool(c.step0_passed);
+    w.write_bool(c.step0_failed);
+    w.write_bool(c.step1_failed);
+    w.write_bool(c.probing_role0);
+    w.write_bool(c.probing_role1);
+    w.write_f32(c.bout_rew)?;
+    w.write_bool(c.bout_stress_seen);
+    w.write_u8(c.consecutive_stressed_bouts);
+    w.write_u8(c.consecutive_syntax_mismatch);
+    w.write_u16(c.stage3_bouts);
+    Ok(())
+}
+
+fn decode_compositional_cortex(r: &mut ByteReader<'_>) -> Result<CompositionalCortex, PersistError> {
+    let comp_domain_unlocked = r.read_bool()?;
+    let stage = r.read_u8()?;
+    if stage > 4 {
+        return Err(PersistError::InvalidTopology);
+    }
+    let r_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if r_len > COMP_MAX_RECEPTORS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut receptors = Vec::with_capacity(r_len);
+    for _ in 0..r_len {
+        receptors.push(r.read_u16()?);
+    }
+    let mut is_scene_rec = Vec::with_capacity(r_len);
+    for _ in 0..r_len {
+        is_scene_rec.push(r.read_u8()?);
+    }
+    let mut is_fast_rec = Vec::with_capacity(r_len);
+    for _ in 0..r_len {
+        is_fast_rec.push(r.read_u8()?);
+    }
+    let mut is_aud_rec = Vec::with_capacity(r_len);
+    for _ in 0..r_len {
+        is_aud_rec.push(r.read_u8()?);
+    }
+    let fc_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if fc_len > COMP_MAX_RECEPTORS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut fast_centroid = Vec::with_capacity(fc_len);
+    for _ in 0..fc_len {
+        fast_centroid.push(r.read_f32()?);
+    }
+    let ft_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if ft_len > COMP_MAX_LEXEMES {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut fast_templates = Vec::with_capacity(ft_len);
+    for _ in 0..ft_len {
+        let fl = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+        if fl > COMP_MAX_RECEPTORS {
+            return Err(PersistError::InvalidTopology);
+        }
+        let mut row = Vec::with_capacity(fl);
+        for _ in 0..fl {
+            row.push(r.read_f32()?);
+        }
+        fast_templates.push(row);
+    }
+    let learned_utt_len = r.read_u8()?;
+    let learned_gap_start = r.read_u8()?;
+    let learned_gap_end = r.read_u8()?;
+
+    let sp_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if sp_len > COMP_MAX_LEXEMES {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut sym_prims = Vec::with_capacity(sp_len);
+    for _ in 0..sp_len {
+        sym_prims.push(decode_motor_prim(r)?);
+    }
+    let mp_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if mp_len > COMP_MAX_LEXEMES {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut manip_prims = Vec::with_capacity(mp_len);
+    for _ in 0..mp_len {
+        manip_prims.push(decode_motor_prim(r)?);
+    }
+
+    let read_protos = |rd: &mut ByteReader<'_>| -> Result<Vec<AudProto>, PersistError> {
+        let cnt = usize::try_from(rd.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+        if cnt > COMP_MAX_PROTOS {
+            return Err(PersistError::InvalidTopology);
+        }
+        let mut out = Vec::with_capacity(cnt);
+        for _ in 0..cnt {
+            let p0 = rd.read_u8()?;
+            let p1 = rd.read_u8()?;
+            let count = rd.read_u16()?;
+            let vlen = usize::try_from(rd.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+            if vlen > COMP_AUD_SLICES * COMP_MAX_RECEPTORS {
+                return Err(PersistError::InvalidTopology);
+            }
+            let mut vec = Vec::with_capacity(vlen);
+            for _ in 0..vlen {
+                vec.push(rd.read_f32()?);
+            }
+            out.push(AudProto {
+                phon_pair: [p0, p1],
+                vec,
+                count,
+            });
+        }
+        Ok(out)
+    };
+    let aud_proto_s0 = read_protos(r)?;
+    let aud_proto_s1 = read_protos(r)?;
+
+    let lex_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if lex_len > COMP_MAX_LEXEMES {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut lexemes = Vec::with_capacity(lex_len);
+    for _ in 0..lex_len {
+        lexemes.push(decode_lexeme_slot(r)?);
+    }
+
+    let arch_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if arch_len > COMP_MAX_ARCHIVE {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut grammar_archive = Vec::with_capacity(arch_len);
+    for _ in 0..arch_len {
+        let eligible = r.read_bool()?;
+        let glen = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+        if glen > COMP_MAX_LEXEMES {
+            return Err(PersistError::InvalidTopology);
+        }
+        let mut g_lex = Vec::with_capacity(glen);
+        for _ in 0..glen {
+            g_lex.push(decode_lexeme_slot(r)?);
+        }
+        grammar_archive.push(GrammarSnapshot {
+            eligible,
+            lexemes: g_lex,
+        });
+    }
+    let yoked_contaminated = r.read_bool()?;
+    let comp_agency_ema = r.read_f32()?;
+    let vsc_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if vsc_len > COMP_MAX_SCAN_CHANNELS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut verified_self_copy_chs = Vec::with_capacity(vsc_len);
+    for _ in 0..vsc_len {
+        verified_self_copy_chs.push(r.read_u16()?);
+    }
+
+    let multi_seg_hits = r.read_u8()?;
+    let roll_cursor = r.read_u16()?;
+    let ts_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if ts_len > COMP_MAX_SCAN_CHANNELS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut track_stats = Vec::with_capacity(ts_len);
+    for _ in 0..ts_len {
+        let samples = r.read_u16()?;
+        let min_val = r.read_f32()?;
+        let max_val = r.read_f32()?;
+        let disqualified = r.read_bool()?;
+        track_stats.push(ChannelTrackStat {
+            samples,
+            min_val,
+            max_val,
+            disqualified,
+        });
+    }
+    let cand_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if cand_len > COMP_MAX_CANDIDATES {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut cand_chs = Vec::with_capacity(cand_len);
+    for _ in 0..cand_len {
+        cand_chs.push(r.read_u16()?);
+    }
+    let ba_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if ba_len > COMP_MAX_CANDIDATES {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut burst_active_chs = Vec::with_capacity(ba_len);
+    for _ in 0..ba_len {
+        burst_active_chs.push(r.read_u16()?);
+    }
+    let passive_early_vec = read_sparse_pairs(r, COMP_MAX_CANDIDATES)?;
+    let passive_late_vec = read_sparse_pairs(r, COMP_MAX_CANDIDATES)?;
+    let in_passive_burst = r.read_bool()?;
+    let passive_burst_ticks = r.read_u16()?;
+    let passive_burst_had_influx = r.read_bool()?;
+    let burst_quiet_streak = r.read_u8()?;
+    let prev_cand_max = r.read_f32()?;
+
+    let obs_bouts_done = r.read_u16()?;
+    let in_obs_bout = r.read_bool()?;
+    let obs_idle_ticks = r.read_u16()?;
+    let obs_quiet_streak = r.read_u8()?;
+    let oma_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if oma_len > COMP_MAX_SCAN_CHANNELS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut obs_max_abs = Vec::with_capacity(oma_len);
+    for _ in 0..oma_len {
+        obs_max_abs.push(r.read_f32()?);
+    }
+
+    let pr_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if pr_len > COMP_MAX_PROBES {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut probes = Vec::with_capacity(pr_len);
+    for _ in 0..pr_len {
+        let act = r.read_u16()?;
+        let dir = r.read_u8()? as i8;
+        if dir != -1 && dir != 1 {
+            return Err(PersistError::InvalidTopology);
+        }
+        let pass1 = read_sparse_pairs(r, COMP_MAX_CANDIDATES)?;
+        let pass2 = read_sparse_pairs(r, COMP_MAX_CANDIDATES)?;
+        let t2_pass1 = read_sparse_pairs(r, COMP_MAX_CANDIDATES)?;
+        let t2_pass2 = read_sparse_pairs(r, COMP_MAX_CANDIDATES)?;
+        let pass1_done = r.read_bool()?;
+        let pass2_done = r.read_bool()?;
+        let retry_count = r.read_u8()?;
+        probes.push(ProbeRecord {
+            act,
+            dir,
+            pass1,
+            pass2,
+            t2_pass1,
+            t2_pass2,
+            pass1_done,
+            pass2_done,
+            retry_count,
+        });
+    }
+    let probe_idx = r.read_u16()?;
+    let probe_phase = r.read_u8()?;
+    let babble_prompt_active = r.read_bool()?;
+    let babble_quiet_streak = r.read_u8()?;
+    let babble_prompt_dur = r.read_u16()?;
+    let last_babble_prompt_dur = r.read_u16()?;
+    let ticks_since_prompt = r.read_u16()?;
+    let quiet_motor_streak = r.read_u16()?;
+    let babble_total_ticks = r.read_u16()?;
+    let post_probe_cool = r.read_u8()?;
+    let cur_probe_act = r.read_u16()?;
+    let cur_probe_dir = r.read_u8()? as i8;
+    if cur_probe_dir != -1 && cur_probe_dir != 1 {
+        return Err(PersistError::InvalidTopology);
+    }
+    let cur_probe_resp = read_sparse_pairs(r, COMP_MAX_CANDIDATES)?;
+    let cur_probe_base = read_sparse_pairs(r, COMP_MAX_CANDIDATES)?;
+
+    let seg_ready = r.read_bool()?;
+    let scene_armed = r.read_bool()?;
+    let fast_armed = r.read_bool()?;
+    let aud_armed = r.read_bool()?;
+    let self_vocal_cool = r.read_u8()?;
+    let in_prompt_kind = r.read_u8()?;
+    let p_tick = r.read_u16()?;
+    let saw_fast = r.read_bool()?;
+    let saw_aud = r.read_bool()?;
+    let pending_bimodal_aud = r.read_bool()?;
+    let pbw00 = r.read_u8()?;
+    let pbw01 = r.read_u8()?;
+    let pbw10 = r.read_u8()?;
+    let pbw11 = r.read_u8()?;
+    let peak_aud_norm = r.read_f32()?;
+    let prev_scene_norm = r.read_f32()?;
+    let prev_fast_norm = r.read_f32()?;
+    let prev_aud_norm = r.read_f32()?;
+    let sa_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if sa_len > COMP_MAX_RECEPTORS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut scene_accum = Vec::with_capacity(sa_len);
+    for _ in 0..sa_len {
+        scene_accum.push(r.read_f32()?);
+    }
+    let read_bufs = |rd: &mut ByteReader<'_>| -> Result<Vec<Vec<f32>>, PersistError> {
+        let bl = usize::try_from(rd.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+        if bl > COMP_MAX_FRAMES {
+            return Err(PersistError::InvalidTopology);
+        }
+        let mut out = Vec::with_capacity(bl);
+        for _ in 0..bl {
+            let fl = usize::try_from(rd.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+            if fl > COMP_MAX_RECEPTORS {
+                return Err(PersistError::InvalidTopology);
+            }
+            let mut fr = Vec::with_capacity(fl);
+            for _ in 0..fl {
+                fr.push(rd.read_f32()?);
+            }
+            out.push(fr);
+        }
+        Ok(out)
+    };
+    let fast_buf = read_bufs(r)?;
+    let aud_buf = read_bufs(r)?;
+    let prv_len = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if prv_len > COMP_MAX_RECEPTORS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let mut prev_rec_vals = Vec::with_capacity(prv_len);
+    for _ in 0..prv_len {
+        prev_rec_vals.push(r.read_f32()?);
+    }
+    let last_emitted_kind = r.read_u8()?;
+    let last_emitted_idx = r.read_u8()?;
+
+    let in_response_kind = r.read_u8()?;
+    let resp_tick = r.read_u16()?;
+    let aw00 = r.read_u8()?;
+    let aw01 = r.read_u8()?;
+    let aw10 = r.read_u8()?;
+    let aw11 = r.read_u8()?;
+    let am0 = r.read_u8()?;
+    let am1 = r.read_u8()?;
+    let active_high_cert = r.read_bool()?;
+    let eval_mode = r.read_u8()?;
+    let eval_halted = r.read_bool()?;
+    let eval_had_stress = r.read_bool()?;
+    let step0_passed = r.read_bool()?;
+    let step0_failed = r.read_bool()?;
+    let step1_failed = r.read_bool()?;
+    let probing_role0 = r.read_bool()?;
+    let probing_role1 = r.read_bool()?;
+    let bout_rew = r.read_f32()?;
+    let bout_stress_seen = r.read_bool()?;
+    let consecutive_stressed_bouts = r.read_u8()?;
+    let consecutive_syntax_mismatch = r.read_u8()?;
+    let stage3_bouts = r.read_u16()?;
+
+    if in_prompt_kind > 2
+        || in_response_kind > 2
+        || eval_mode > 3
+        || last_emitted_kind > 2
+        || r.remaining() != 0
+    {
+        return Err(PersistError::InvalidTopology);
+    }
+
+    Ok(CompositionalCortex {
+        comp_domain_unlocked,
+        stage,
+        receptors,
+        is_scene_rec,
+        is_fast_rec,
+        is_aud_rec,
+        fast_centroid,
+        fast_templates,
+        learned_utt_len,
+        learned_gap_start,
+        learned_gap_end,
+        sym_prims,
+        manip_prims,
+        aud_proto_s0,
+        aud_proto_s1,
+        lexemes,
+        grammar_archive,
+        yoked_contaminated,
+        comp_agency_ema,
+        verified_self_copy_chs,
+        multi_seg_hits,
+        roll_cursor,
+        track_stats,
+        cand_chs,
+        burst_active_chs,
+        passive_early_vec,
+        passive_late_vec,
+        in_passive_burst,
+        passive_burst_ticks,
+        passive_burst_had_influx,
+        burst_quiet_streak,
+        prev_cand_max,
+        obs_bouts_done,
+        in_obs_bout,
+        obs_idle_ticks,
+        obs_quiet_streak,
+        obs_max_abs,
+        probes,
+        probe_idx,
+        probe_phase,
+        babble_prompt_active,
+        babble_quiet_streak,
+        babble_prompt_dur,
+        last_babble_prompt_dur,
+        ticks_since_prompt,
+        quiet_motor_streak,
+        babble_total_ticks,
+        post_probe_cool,
+        cur_probe_act,
+        cur_probe_dir,
+        cur_probe_resp,
+        cur_probe_base,
+        seg_ready,
+        scene_armed,
+        fast_armed,
+        aud_armed,
+        self_vocal_cool,
+        in_prompt_kind,
+        p_tick,
+        saw_fast,
+        saw_aud,
+        pending_bimodal_aud,
+        pending_bimodal_w: [[pbw00, pbw01], [pbw10, pbw11]],
+        peak_aud_norm,
+        prev_scene_norm,
+        prev_fast_norm,
+        prev_aud_norm,
+        scene_accum,
+        fast_buf,
+        aud_buf,
+        prev_rec_vals,
+        last_emitted_kind,
+        last_emitted_idx,
+        in_response_kind,
+        resp_tick,
+        active_w: [[aw00, aw01], [aw10, aw11]],
+        active_m: [am0, am1],
+        active_high_cert,
+        eval_mode,
+        eval_halted,
+        eval_had_stress,
+        step0_passed,
+        step0_failed,
+        step1_failed,
+        probing_role0,
+        probing_role1,
+        bout_rew,
+        bout_stress_seen,
+        consecutive_stressed_bouts,
+        consecutive_syntax_mismatch,
+        stage3_bouts,
+    })
+}
+
+fn decode_oper_and_comp(
+    bytes: &[u8],
+) -> Result<(OperatorBank, CompositionalCortex), PersistError> {
+    let mut r = ByteReader::new(bytes);
+    let op_bank = decode_operator_bank_reader(&mut r)?;
+    if r.remaining() == 0 {
+        return Ok((op_bank, CompositionalCortex::default()));
+    }
+    let ext_magic = r.read_u32()?;
+    if ext_magic != COMP_EXT_MAGIC {
+        return Err(PersistError::BadMagicOrVersion);
+    }
+    let comp = decode_compositional_cortex(&mut r)?;
+    Ok((op_bank, comp))
 }
 
 const HEADER_OVERHEAD_MARGIN: usize = 256 * 1024;
@@ -1659,8 +2466,10 @@ fn encode_organism_with_mode(
             + scot_w.buf.len()
             + 72,
     );
-    let mut oper_w = ByteWriter::with_capacity(256);
+    let mut oper_w = ByteWriter::with_capacity(512);
     encode_operator_bank(&org.operators, &mut oper_w)?;
+    oper_w.write_u32(COMP_EXT_MAGIC);
+    encode_compositional_cortex(&org.compositional, &mut oper_w)?;
 
     append_slab(&mut slabs_buf, TAG_BODY, &body_w.buf)?;
     append_slab(&mut slabs_buf, TAG_CELL, &cell_w.buf)?;
@@ -3870,10 +4679,10 @@ fn shadow_decode_organism_with_pages(
         motor_env_var,
     };
 
-    let operators = if version >= 9 {
-        decode_operator_bank(payloads[6])?
+    let (operators, compositional) = if version >= 9 {
+        decode_oper_and_comp(payloads[6])?
     } else {
-        OperatorBank::default()
+        (OperatorBank::default(), CompositionalCortex::default())
     };
 
     let decoded = Alpha11Organism {
@@ -3891,6 +4700,7 @@ fn shadow_decode_organism_with_pages(
         ring,
         committed_motor_pulses,
         operators,
+        compositional,
         subthreshold_rehearsals,
         mitosis_births,
         contradiction_splits,
