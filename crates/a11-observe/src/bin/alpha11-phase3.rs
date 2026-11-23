@@ -5,7 +5,7 @@
 //!    self-copy), `16` permuted actuators (`8` opponent synergy groups), `4` goal cues each
 //!    requiring an exact `5`-step sequential macro `[g_0, g_1, g_2, g_3, g_4]`.
 //! 2. Stage 1 (`240` bouts) provides step milestones (`+0.40`/step, `+2.50` terminal).
-//!    Stage 2 (`48` bouts) masks ALL task channels after `b_tick < 4` and withholds all
+//!    Stage 2 (`48` bouts) masks ALL task channels after `b_tick < 6` and withholds all
 //!    intermediate reward, requiring compiled internal `TAG_OPER` multi-step subroutines.
 //! 3. `P3-G2` performs a flagless `TAG_OPER` slab lesion on the serialized checkpoint to prove
 //!    synthesized operators causally yield `> 10x` Depth-5 harvest over an identical twin
@@ -47,9 +47,9 @@ const NUM_GROUPS: usize = 8;
 const CHAIN_LEN: usize = 5;
 const STAGE1_BOUTS: usize = 240;
 const STAGE2_BOUTS: usize = 48;
-const STAGE1_BOUT_LEN: u64 = 14;
-const STAGE2_BOUT_LEN: u64 = 10;
-const CUE_FLASH_LEN: u64 = 4;
+const STAGE1_BOUT_LEN: u64 = 16;
+const STAGE2_BOUT_LEN: u64 = 12;
+const CUE_FLASH_LEN: u64 = 6;
 const ABAB_RETURN_BOUTS: usize = 28;
 
 const OPER_SLAB_TAG: u32 = u32::from_le_bytes(*b"OPER");
@@ -70,7 +70,6 @@ fn clamp_unit(v: f32) -> f32 {
 #[derive(Clone, Debug)]
 struct WirePerm16 {
     sensor_perm: [usize; P3_CHANNELS],
-    inv_sensor_perm: [usize; P3_CHANNELS],
     act_perm: [usize; P3_ACTUATORS],
 }
 
@@ -82,10 +81,6 @@ impl WirePerm16 {
             let j = (s_rng.next_u64() as usize) % (i + 1);
             sensor_perm.swap(i, j);
         }
-        let mut inv_sensor_perm = [0usize; P3_CHANNELS];
-        for (sc, &tr) in sensor_perm.iter().enumerate() {
-            inv_sensor_perm[tr] = sc;
-        }
         let mut m_rng = DeterministicRng::new(seed ^ P3_MOTOR_SALT);
         let mut act_perm: [usize; P3_ACTUATORS] = std::array::from_fn(|i| i);
         for i in (1..P3_ACTUATORS).rev() {
@@ -94,7 +89,6 @@ impl WirePerm16 {
         }
         Self {
             sensor_perm,
-            inv_sensor_perm,
             act_perm,
         }
     }
@@ -107,7 +101,7 @@ impl WirePerm16 {
             if sc < P3_CHANNELS && g.is_finite() && g > 0.0 {
                 let gf = f64::from(g);
                 tot += gf;
-                if self.inv_sensor_perm[sc] >= DISTRACTOR_START {
+                if self.sensor_perm[sc] >= DISTRACTOR_START {
                     dst += gf;
                 }
             }
@@ -142,6 +136,8 @@ struct CompositionalOperatorMedium {
     bout_len: u64,
     step_pos: usize,
     step_ema: f32,
+    step_vel: [f32; CHAIN_LEN],
+    step_lvl: [f32; CHAIN_LEN],
     vel_grp: [f32; NUM_GROUPS],
     pos_grp: [f32; NUM_GROUPS],
     failed_bout: bool,
@@ -197,6 +193,8 @@ impl CompositionalOperatorMedium {
             bout_len,
             step_pos: 0,
             step_ema: 0.0,
+            step_vel: [0.0; CHAIN_LEN],
+            step_lvl: [0.0; CHAIN_LEN],
             vel_grp: [0.0; NUM_GROUPS],
             pos_grp: [0.0; NUM_GROUPS],
             failed_bout: false,
@@ -227,30 +225,49 @@ impl CompositionalOperatorMedium {
     fn refresh_ambient(&mut self) {
         self.raw_ambient.fill(0.0);
         let g = self.current_goal();
+        let t_f = self.global_tick as f32;
+        let tau = std::f32::consts::TAU;
 
-        // Both stages flash the goal cue exclusively on b_tick < CUE_FLASH_LEN (amplitudes 0.72..0.90).
+        // Smooth raised-cosine goal cue exclusively on b_tick < CUE_FLASH_LEN (0..16, 4 ch/goal).
         // After b_tick >= CUE_FLASH_LEN, goal cues vanish completely (Stage 2 is 100% task-occluded).
         if self.b_tick < CUE_FLASH_LEN {
-            let amp = (0.90 - 0.06 * (self.b_tick as f32)).clamp(0.72, 0.90);
-            for ch in (g * 8)..((g + 1) * 8) {
+            let u = ((self.b_tick as f32) + 0.5) / (CUE_FLASH_LEN as f32);
+            let env = 0.5 * (1.0 - (tau * u).cos());
+            let amp = (0.90 * env).clamp(0.0, 0.90);
+            for ch in (g * 4)..((g + 1) * 4) {
                 self.raw_ambient[ch] = amp;
             }
         }
 
-        if !self.occluded_stage2 && !self.failed_bout && self.step_pos < CHAIN_LEN {
-            // Stage 1 Discovery only: gentler step-milestone cue (0.36) + continuous step_ema (72..80).
-            let base = 32 + self.step_pos * 8;
-            for ch in base..(base + 8) {
-                self.raw_ambient[ch] = 0.36;
+        // Smooth 2-pole C1 step milestone channels (16..36, Stage 1 only) + step_ema (36..40).
+        for s in 0..CHAIN_LEN {
+            let tgt = if !self.occluded_stage2
+                && !self.failed_bout
+                && self.b_tick >= CUE_FLASH_LEN
+                && self.step_pos == s
+            {
+                0.36
+            } else {
+                0.0
+            };
+            self.step_vel[s] = 0.45 * self.step_vel[s] + 0.55 * (tgt - self.step_lvl[s]);
+            self.step_lvl[s] = (self.step_lvl[s] + self.step_vel[s]).clamp(0.0, 0.45);
+            if !self.occluded_stage2 {
+                let base = 16 + s * 4;
+                for ch in base..(base + 4) {
+                    self.raw_ambient[ch] = self.step_lvl[s];
+                }
             }
-            for ch in 72..80 {
+        }
+        if !self.occluded_stage2 {
+            for ch in 36..40 {
                 self.raw_ambient[ch] = (0.36 * self.step_ema).clamp(0.0, 0.36);
             }
         }
 
-        // Smooth C1 proprioceptive parallax field from effector kinematics pos_grp (80..128):
+        // Smooth C1 proprioceptive parallax field from effector kinematics pos_grp (40..56, 16 ch):
         // Provides genuine non-linear physical agency reafference without leaking goal or chain.
-        for p in 0..24 {
+        for p in 0..8 {
             let ga = p % NUM_GROUPS;
             let gb = (p + 3) % NUM_GROUPS;
             let fa = 1.65 + 0.21 * ((p % 4) as f32);
@@ -258,8 +275,13 @@ impl CompositionalOperatorMedium {
             let off = 0.37 * (p as f32);
             let vp = 0.45 + 0.36 * (fa * self.pos_grp[ga] + fb * self.pos_grp[gb] + off).cos();
             let vm = 0.45 + 0.36 * (-fa * self.pos_grp[ga] + fb * self.pos_grp[gb] + off).cos();
-            self.raw_ambient[80 + 2 * p] = vp.clamp(0.0, 1.0);
-            self.raw_ambient[80 + 2 * p + 1] = vm.clamp(0.0, 1.0);
+            self.raw_ambient[40 + 2 * p] = vp.clamp(0.0, 1.0);
+            self.raw_ambient[40 + 2 * p + 1] = vm.clamp(0.0, 1.0);
+        }
+
+        // Quiet thermal background (56..128)
+        for ch in 56..DISTRACTOR_START {
+            self.raw_ambient[ch] = 0.015 * (0.019 * t_f + 0.11 * (ch as f32)).sin();
         }
 
         // High-variance Ornstein-Uhlenbeck distractors (128..160)
@@ -510,7 +532,7 @@ fn run_phase3_seed(seed: u64) -> Phase3SeedRow {
     let w1_yok_src =
         CompositionalOperatorMedium::new(seed, P3_STAGE1_SALT, STAGE1_BOUTS, false, false, perm.clone());
     let mut w1_yok = YokedMedium::new(w1_yok_src, donor_train);
-    let mut yok_org = Alpha11Organism::new(seed, OrganismConfig::default());
+    let mut yok_org = Alpha11Organism::new(seed.wrapping_add(500_000), OrganismConfig::default());
     step_medium(&mut yok_org, &mut w1_yok, t_s1);
     let mut w2_yok =
         CompositionalOperatorMedium::new(seed, P3_STAGE2_SALT, STAGE2_BOUTS, true, false, perm.clone());
