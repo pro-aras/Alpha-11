@@ -19,5 +19,6 @@
 /.vault_authorized_phase1b_v2
 /.vault_authorized_phase1b_v3
 /.vault_authorized_phase2
+/.vault_authorized_phase*
 /.licenses/
 .DS_Store
