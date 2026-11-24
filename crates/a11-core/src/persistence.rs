@@ -26,6 +26,13 @@ use crate::pores::{
     ChannelScoutStat, MAX_SCOUT_CHANNELS, MotorPore, PoreMembrane, SCOUT_DWELL_TICKS, SensorPore,
 };
 use crate::rng::{Rng64, sanitize};
+use crate::synthesis::{
+    ExecAffPiece, LifeArchiveEntry, LifeTaskSlot, RawSynTrans, SYN_CUE_WORDS, SYN_MAX_ARCHIVE,
+    SYN_MAX_ARC_TRANS, SYN_MAX_CAND96, SYN_MAX_MACROS, SYN_MAX_PAIRS, SYN_MAX_PAR_CHS,
+    SYN_MAX_RAW_TRANS, SYN_MAX_SCAN_CHANNELS, SYN_MAX_SLOTS, SYN_MAX_SOLVED_EPS, SYN_MAX_STEPS,
+    SYN_OP_SYNS, SYN_STATE_BITS, SYN_STATE_WORDS, SolvedSynEp, SynChannelStat, SynProbeRec,
+    SynthesisCortex,
+};
 pub use crate::tubes::COL_SLAB_MAGIC;
 use crate::tubes::{
     COMPASS_DIRS, EPISODIC_CAP, EfferenceEntry, EfferenceRing, EpisodicStep, MIN_ACTUATOR_DIM,
@@ -36,11 +43,12 @@ use crate::tubes::{
 };
 
 pub const FILE_MAGIC: u64 = 0x4131_3143_484B_5031;
-pub const FORMAT_VERSION: u32 = 10;
+pub const FORMAT_VERSION: u32 = 11;
 pub const MIN_COMPAT_FORMAT_VERSION: u32 = 3;
 pub const SLAB_COUNT: u32 = 6;
 pub const SLAB_COUNT_V9: u32 = 7;
 pub const COMP_EXT_MAGIC: u32 = 0x504D_4F43;
+pub const SYN5_EXT_MAGIC: u32 = 0x354E_5953;
 /// Upper bound on decoded per-actuator width (fail-closed against corrupt lengths).
 pub const MAX_ACTUATOR_DIM: usize = 4_096;
 /// Upper bound on paged cortical columns per organism checkpoint.
@@ -1032,7 +1040,6 @@ fn decode_compositional_cortex(r: &mut ByteReader<'_>) -> Result<CompositionalCo
         || in_response_kind > 2
         || eval_mode > 3
         || last_emitted_kind > 2
-        || r.remaining() != 0
     {
         return Err(PersistError::InvalidTopology);
     }
@@ -1132,20 +1139,959 @@ fn decode_compositional_cortex(r: &mut ByteReader<'_>) -> Result<CompositionalCo
     })
 }
 
-fn decode_oper_and_comp(
+fn write_state_words_arr<const K: usize>(
+    arr: &[[u64; SYN_STATE_WORDS]; K],
+    w: &mut ByteWriter,
+) {
+    for row in arr {
+        for &word in row {
+            w.write_u64(word);
+        }
+    }
+}
+
+fn read_state_words_arr<const K: usize>(
+    r: &mut ByteReader<'_>,
+) -> Result<[[u64; SYN_STATE_WORDS]; K], PersistError> {
+    let mut out = [[0u64; SYN_STATE_WORDS]; K];
+    for row in &mut out {
+        for word in row.iter_mut() {
+            *word = r.read_u64()?;
+        }
+    }
+    Ok(out)
+}
+
+fn encode_synthesis_cortex(s: &SynthesisCortex, w: &mut ByteWriter) -> Result<(), PersistError> {
+    if s.par_chs.len() > SYN_MAX_PAR_CHS
+        || s.wire_pairs.len() > SYN_MAX_PAIRS
+        || s.verified_self_copy_chs.len() > SYN_MAX_SCAN_CHANNELS
+        || s.spec_chs.len() > SYN_MAX_SCAN_CHANNELS
+        || s.cand96_chs.len() > SYN_MAX_CAND96
+        || s.work_map_idx.len() > SYN_MAX_CAND96
+        || s.op_syns.len() > SYN_OP_SYNS
+        || s.raw_trans.len() > SYN_MAX_RAW_TRANS
+        || s.direct_arc_trans.len() > SYN_OP_SYNS
+        || s.solved_eps.len() > SYN_MAX_SOLVED_EPS
+        || s.poss_sw.len() > SYN_STATE_BITS
+        || s.arc_perms.len() > SYN_OP_SYNS
+        || s.arc_is_grav.len() > SYN_OP_SYNS
+        || s.arc_grav_cols.len() > 4
+        || s.exec_chain.len() > SYN_STATE_BITS
+        || s.exec_models.len() > SYN_OP_SYNS
+        || s.exec_sb_sh1.len() > SYN_OP_SYNS
+        || s.exec_sb_exp.len() > SYN_OP_SYNS
+        || s.life_slots.len() > SYN_MAX_SLOTS
+        || s.life_archive.len() > SYN_MAX_ARCHIVE
+        || s.macros_2step.len() > SYN_MAX_MACROS
+        || s.ch_stats.len() > SYN_MAX_SCAN_CHANNELS
+        || s.probes.len() > 32
+        || s.cur_probe_base.len() > SYN_MAX_SCAN_CHANNELS
+        || s.cur_probe_pos.len() > SYN_MAX_SCAN_CHANNELS
+        || s.op_probe_before.len() > SYN_MAX_CAND96
+        || s.sb_reset_ticks.len() > 16
+        || s.sb_start_vals.len() > SYN_MAX_CAND96
+    {
+        return Err(PersistError::InvalidTopology);
+    }
+
+    w.write_u8(s.regime);
+    w.write_bool(s.calib_done);
+    w.write_u8(s.num_actuators_bound);
+    w.write_u32(s.par_chs.len() as u32);
+    for &c in &s.par_chs {
+        w.write_u16(c);
+    }
+    w.write_u32(s.wire_pairs.len() as u32);
+    for &p in &s.wire_pairs {
+        w.write_u16(p[0]);
+        w.write_u16(p[1]);
+    }
+    w.write_f32(s.syn_agency_ema)?;
+    w.write_u32(s.verified_self_copy_chs.len() as u32);
+    for &c in &s.verified_self_copy_chs {
+        w.write_u16(c);
+    }
+    w.write_bool(s.yoked_contaminated);
+
+    w.write_u32(s.spec_chs.len() as u32);
+    for &c in &s.spec_chs {
+        w.write_u16(c);
+    }
+    w.write_u32(s.cand96_chs.len() as u32);
+    for &c in &s.cand96_chs {
+        w.write_u16(c);
+    }
+    w.write_u32(s.work_map_idx.len() as u32);
+    for &v in &s.work_map_idx {
+        w.write_u8(v);
+    }
+    w.write_bool(s.is_exec_domain);
+    w.write_u32(s.op_syns.len() as u32);
+    for &v in &s.op_syns {
+        w.write_u8(v);
+    }
+    w.write_u16(s.syn_probed_mask);
+    w.write_u32(s.raw_trans.len() as u32);
+    for tr in &s.raw_trans {
+        w.write_u8(tr.op_idx);
+        w.write_bool(tr.trapped);
+        for word in &tr.cin {
+            w.write_u64(*word);
+        }
+        for word in &tr.c0 {
+            w.write_u64(*word);
+        }
+        for word in &tr.e0 {
+            w.write_u64(*word);
+        }
+        for word in &tr.c1 {
+            w.write_u64(*word);
+        }
+        for word in &tr.e1 {
+            w.write_u64(*word);
+        }
+    }
+    w.write_u32(s.direct_arc_trans.len() as u32);
+    for row in &s.direct_arc_trans {
+        if row.len() > SYN_MAX_ARC_TRANS {
+            return Err(PersistError::InvalidTopology);
+        }
+        w.write_u32(row.len() as u32);
+        for &(m0, m1) in row {
+            w.write_u64(m0);
+            w.write_u64(m1);
+        }
+    }
+    w.write_u32(s.solved_eps.len() as u32);
+    for ep in &s.solved_eps {
+        write_state_words_arr(&ep.dm_w, w);
+        write_state_words_arr(&ep.dm_e, w);
+        for &v in &ep.dm_s_core {
+            w.write_u64(v);
+        }
+        for &v in &ep.dm_s_edge {
+            w.write_u64(v);
+        }
+        for &o in &ep.ops {
+            w.write_u8(o);
+        }
+        w.write_u8(ep.op_len);
+    }
+    w.write_u32(s.poss_sw.len() as u32);
+    for &v in &s.poss_sw {
+        w.write_u64(v);
+    }
+    w.write_u32(s.arc_perms.len() as u32);
+    for p in &s.arc_perms {
+        if p.len() > SYN_STATE_BITS {
+            return Err(PersistError::InvalidTopology);
+        }
+        w.write_u32(p.len() as u32);
+        for &b in p {
+            w.write_u8(b);
+        }
+    }
+    w.write_u32(s.arc_is_grav.len() as u32);
+    for &g in &s.arc_is_grav {
+        w.write_bool(g);
+    }
+    w.write_u32(s.arc_grav_cols.len() as u32);
+    for col in &s.arc_grav_cols {
+        if col.len() > 4 {
+            return Err(PersistError::InvalidTopology);
+        }
+        w.write_u32(col.len() as u32);
+        for &row in col {
+            w.write_u8(row[0]);
+            w.write_u8(row[1]);
+            w.write_u8(row[2]);
+        }
+    }
+    w.write_u32(s.exec_chain.len() as u32);
+    for &b in &s.exec_chain {
+        w.write_u8(b);
+    }
+    w.write_u8(s.exec_p0);
+    w.write_u32(s.exec_models.len() as u32);
+    for m in &s.exec_models {
+        w.write_u8(m.a_neg as u8);
+        w.write_u8(m.b_neg as u8);
+        w.write_u8(m.c_neg as u8);
+        w.write_u8(m.a_pos as u8);
+        w.write_u8(m.b_pos as u8);
+        w.write_u8(m.c_pos as u8);
+    }
+    w.write_bool(s.exec_model_valid);
+    w.write_u16(s.seen_ep_cnt);
+    w.write_u16(s.null_trials);
+    w.write_u16(s.exec_trials);
+    w.write_f32(s.null_rew_sum)?;
+    w.write_f32(s.exec_rew_sum)?;
+    w.write_u8(s.unearned_null_hits);
+    w.write_u16(s.synth_op_rr);
+    w.write_u16(s.synth_sb_op_cursor);
+    w.write_u16(s.exec_sb_bouts);
+    w.write_u32(s.exec_sb_sh1.len() as u32);
+    for &v in &s.exec_sb_sh1 {
+        w.write_u8(v);
+    }
+    w.write_u32(s.exec_sb_exp.len() as u32);
+    for &v in &s.exec_sb_exp {
+        w.write_u8(v);
+    }
+    w.write_bool(s.exec_sb_plan_valid);
+
+    for &word in &s.obs_cue_mask {
+        w.write_u64(word);
+    }
+    w.write_u16(s.life_confirmed_ops_mask);
+    w.write_u32(s.life_slots.len() as u32);
+    for sl in &s.life_slots {
+        if sl.steps.len() > SYN_MAX_STEPS
+            || sl.prefix.len() > SYN_MAX_STEPS
+            || sl.pending_verify.len() > SYN_MAX_STEPS
+        {
+            return Err(PersistError::InvalidTopology);
+        }
+        for &word in &sl.key_mask {
+            w.write_u64(word);
+        }
+        for &word in &sl.known_mask {
+            w.write_u64(word);
+        }
+        w.write_u32(sl.steps.len() as u32);
+        for &v in &sl.steps {
+            w.write_u8(v);
+        }
+        w.write_u32(sl.prefix.len() as u32);
+        for &v in &sl.prefix {
+            w.write_u8(v);
+        }
+        w.write_u32(sl.pending_verify.len() as u32);
+        for &v in &sl.pending_verify {
+            w.write_u8(v);
+        }
+        w.write_u8(sl.status);
+        w.write_f32(sl.exec_rew)?;
+        w.write_u8(sl.m1_idx);
+        w.write_u8(sl.m2_idx);
+        w.write_u8(sl.p3_idx);
+        w.write_u16(sl.tried_mask);
+    }
+    w.write_u32(s.life_archive.len() as u32);
+    for ae in &s.life_archive {
+        if ae.steps.len() > SYN_MAX_STEPS {
+            return Err(PersistError::InvalidTopology);
+        }
+        for &word in &ae.key_mask {
+            w.write_u64(word);
+        }
+        for &word in &ae.known_mask {
+            w.write_u64(word);
+        }
+        w.write_u32(ae.steps.len() as u32);
+        for &v in &ae.steps {
+            w.write_u8(v);
+        }
+    }
+    w.write_u32(s.macros_2step.len() as u32);
+    for &m in &s.macros_2step {
+        w.write_u8(m[0]);
+        w.write_u8(m[1]);
+    }
+
+    w.write_u16(s.roll_cursor);
+    w.write_u16(s.passive_ticks);
+    w.write_u32(s.ch_stats.len() as u32);
+    for st in &s.ch_stats {
+        w.write_f32(st.t0_val)?;
+        w.write_f32(st.min_val)?;
+        w.write_f32(st.max_val)?;
+        w.write_u16(st.zero_streak);
+        w.write_u16(st.max_zero_streak);
+        w.write_bool(st.ever_neg);
+        w.write_bool(st.burst_early_high);
+        w.write_bool(st.low_mid);
+        w.write_bool(st.steady_high);
+        w.write_bool(st.cue_seen_high);
+        w.write_bool(st.cue_seen_low);
+        w.write_f32(st.probe_min)?;
+        w.write_f32(st.probe_max)?;
+        w.write_f32(st.max_step_dx)?;
+        w.write_f32(st.prev_val)?;
+        w.write_bool(st.moved_mid_bout);
+        w.write_bool(st.reset_active);
+    }
+    w.write_u32(s.probes.len() as u32);
+    for pr in &s.probes {
+        if pr.resp.len() > SYN_MAX_SCAN_CHANNELS {
+            return Err(PersistError::InvalidTopology);
+        }
+        w.write_u16(pr.act);
+        w.write_u32(pr.resp.len() as u32);
+        for &v in &pr.resp {
+            w.write_f32(v)?;
+        }
+        w.write_bool(pr.pass1_done);
+        w.write_bool(pr.pass2_done);
+    }
+    w.write_u16(s.probe_step);
+    w.write_u8(s.oos_idx);
+    w.write_f32(s.oos_cos_sum)?;
+    w.write_u32(s.cur_probe_base.len() as u32);
+    for &v in &s.cur_probe_base {
+        w.write_f32(v)?;
+    }
+    w.write_u32(s.cur_probe_pos.len() as u32);
+    for &v in &s.cur_probe_pos {
+        w.write_f32(v)?;
+    }
+    w.write_u16(s.last_probe_act);
+    w.write_u8(s.last_probe_dir as u8);
+
+    w.write_bool(s.op_probe_active);
+    w.write_u8(s.op_probe_pair);
+    w.write_u8(s.op_probe_wait);
+    w.write_u8(s.op_probe_retries);
+    w.write_u32(s.op_probe_before.len() as u32);
+    for &v in &s.op_probe_before {
+        w.write_f32(v)?;
+    }
+    w.write_u16(s.sb_period_est);
+    w.write_u16(s.sb_since_reset);
+    w.write_u32(s.sb_reset_ticks.len() as u32);
+    for &v in &s.sb_reset_ticks {
+        w.write_u16(v);
+    }
+    w.write_u16(s.sb_quiet_ticks);
+    w.write_u16(s.sb_tick);
+    w.write_u32(s.sb_start_vals.len() as u32);
+    for &v in &s.sb_start_vals {
+        w.write_f32(v)?;
+    }
+    w.write_u8(s.sb_op_wait);
+    w.write_u8(s.sb_pending_op);
+    for &word in &s.sb_pre_c {
+        w.write_u64(word);
+    }
+    for &word in &s.sb_pre_e {
+        w.write_u64(word);
+    }
+    for &word in &s.sb_in_c {
+        w.write_u64(word);
+    }
+    w.write_u16(s.sb_bout_count);
+    w.write_u8(s.sb_step_idx);
+    for &v in &s.sb_active_plan {
+        w.write_u8(v);
+    }
+
+    w.write_bool(s.in_demo);
+    w.write_u16(s.demo_tick);
+    w.write_u16(s.test_tick);
+    write_state_words_arr(&s.demo_x_cand, w);
+    write_state_words_arr(&s.demo_x_edge_cand, w);
+    for &v in &s.demo_s_core {
+        w.write_u64(v);
+    }
+    for &v in &s.demo_s_edge {
+        w.write_u64(v);
+    }
+    w.write_bool(s.is_null_hold_ep);
+    w.write_bool(s.ep_null_got_influx);
+    for &v in &s.ep_planned {
+        w.write_u8(v);
+    }
+    w.write_u8(s.ep_plan_len);
+    w.write_u8(s.ep_plan_pc);
+    w.write_bool(s.ep_halted);
+    w.write_bool(s.ep_solved_flag);
+    w.write_u8(s.ep_test_wait);
+    w.write_u8(s.ep_pending_op);
+    for &word in &s.ep_pre_c {
+        w.write_u64(word);
+    }
+    for &word in &s.ep_pre_e {
+        w.write_u64(word);
+    }
+    for &word in &s.ep_in_c {
+        w.write_u64(word);
+    }
+    w.write_f32(s.ep_ep_rew)?;
+    w.write_bool(s.ep_pending_finalize);
+
+    w.write_bool(s.life_in_cue);
+    w.write_u16(s.life_cue_tick);
+    w.write_u16(s.life_act_tick);
+    for &word in &s.life_cur_key {
+        w.write_u64(word);
+    }
+    for &word in &s.life_cur_known {
+        w.write_u64(word);
+    }
+    w.write_u16(s.life_cur_slot_idx);
+    w.write_bool(s.life_bout_halted);
+    w.write_bool(s.life_waiting_res);
+    w.write_u8(s.life_wait_syn);
+    w.write_bool(s.life_wait_from_prefix);
+    w.write_u8(s.life_wait_prefix_idx);
+    w.write_u8(s.life_wait_macro_mode);
+    w.write_f32(s.life_bout_rew)?;
+    w.write_u8(s.life_step_pos);
+    w.write_u8(s.life_prefix_idx);
+    w.write_u8(s.life_macro_step_idx);
+    for &v in &s.life_macro_plan {
+        w.write_u8(v);
+    }
+    w.write_u8(s.life_macro_plan_len);
+    w.write_bool(s.life_bout_unconf);
+    w.write_u8(s.life_bout_last_conf);
+    w.write_bool(s.life_bout_last_conf_valid);
+    w.write_bool(s.life_pending_null_check);
+    w.write_bool(s.life_is_null_bout);
+    w.write_f32(s.life_null_rew_accum)?;
+    w.write_bool(s.life_prev_had_step);
+    w.write_u8(s.calib_settle);
+    w.write_u32(s.cand96_h0.len() as u32);
+    for &v in &s.cand96_h0 {
+        w.write_u64(v);
+    }
+    w.write_u32(s.cand96_h1.len() as u32);
+    for &v in &s.cand96_h1 {
+        w.write_u64(v);
+    }
+    w.write_u32(s.cand96_twin.len() as u32);
+    for &v in &s.cand96_twin {
+        w.write_u8(v);
+    }
+    Ok(())
+}
+
+fn read_bounded_len(r: &mut ByteReader<'_>, max_len: usize) -> Result<usize, PersistError> {
+    let n = usize::try_from(r.read_u32()?).map_err(|_| PersistError::InvalidTopology)?;
+    if n > max_len {
+        return Err(PersistError::InvalidTopology);
+    }
+    Ok(n)
+}
+
+fn read_u8_vec(r: &mut ByteReader<'_>, max_len: usize) -> Result<Vec<u8>, PersistError> {
+    let n = read_bounded_len(r, max_len)?;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(r.read_u8()?);
+    }
+    Ok(out)
+}
+
+fn read_u16_vec(r: &mut ByteReader<'_>, max_len: usize) -> Result<Vec<u16>, PersistError> {
+    let n = read_bounded_len(r, max_len)?;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(r.read_u16()?);
+    }
+    Ok(out)
+}
+
+fn read_f32_vec(r: &mut ByteReader<'_>, max_len: usize) -> Result<Vec<f32>, PersistError> {
+    let n = read_bounded_len(r, max_len)?;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(r.read_f32()?);
+    }
+    Ok(out)
+}
+
+fn read_state_words(r: &mut ByteReader<'_>) -> Result<[u64; SYN_STATE_WORDS], PersistError> {
+    let mut out = [0u64; SYN_STATE_WORDS];
+    for slot in &mut out {
+        *slot = r.read_u64()?;
+    }
+    Ok(out)
+}
+
+fn read_cue_words(r: &mut ByteReader<'_>) -> Result<[u64; SYN_CUE_WORDS], PersistError> {
+    let mut out = [0u64; SYN_CUE_WORDS];
+    for slot in &mut out {
+        *slot = r.read_u64()?;
+    }
+    Ok(out)
+}
+
+fn decode_synthesis_cortex(r: &mut ByteReader<'_>) -> Result<SynthesisCortex, PersistError> {
+    let regime = r.read_u8()?;
+    if regime > 3 {
+        return Err(PersistError::InvalidTopology);
+    }
+    let calib_done = r.read_bool()?;
+    let num_actuators_bound = r.read_u8()?;
+    let par_chs = read_u16_vec(r, SYN_MAX_PAR_CHS)?;
+    let wp_len = read_bounded_len(r, SYN_MAX_PAIRS)?;
+    let mut wire_pairs = Vec::with_capacity(wp_len);
+    for _ in 0..wp_len {
+        wire_pairs.push([r.read_u16()?, r.read_u16()?]);
+    }
+    let syn_agency_ema = r.read_f32()?;
+    let verified_self_copy_chs = read_u16_vec(r, SYN_MAX_SCAN_CHANNELS)?;
+    let yoked_contaminated = r.read_bool()?;
+
+    let spec_chs = read_u16_vec(r, SYN_MAX_SCAN_CHANNELS)?;
+    let cand96_chs = read_u16_vec(r, SYN_MAX_CAND96)?;
+    let work_map_idx = read_u8_vec(r, SYN_MAX_CAND96)?;
+    let is_exec_domain = r.read_bool()?;
+    let op_syns = read_u8_vec(r, SYN_OP_SYNS)?;
+    let syn_probed_mask = r.read_u16()?;
+
+    let rt_len = read_bounded_len(r, SYN_MAX_RAW_TRANS)?;
+    let mut raw_trans = Vec::with_capacity(rt_len);
+    for _ in 0..rt_len {
+        let op_idx = r.read_u8()?;
+        let trapped = r.read_bool()?;
+        let cin = read_state_words(r)?;
+        let c0 = read_state_words(r)?;
+        let e0 = read_state_words(r)?;
+        let c1 = read_state_words(r)?;
+        let e1 = read_state_words(r)?;
+        raw_trans.push(RawSynTrans {
+            op_idx,
+            trapped,
+            cin,
+            c0,
+            e0,
+            c1,
+            e1,
+        });
+    }
+
+    let dat_len = read_bounded_len(r, SYN_OP_SYNS)?;
+    let mut direct_arc_trans = Vec::with_capacity(dat_len);
+    for _ in 0..dat_len {
+        let row_len = read_bounded_len(r, SYN_MAX_ARC_TRANS)?;
+        let mut row = Vec::with_capacity(row_len);
+        for _ in 0..row_len {
+            row.push((r.read_u64()?, r.read_u64()?));
+        }
+        direct_arc_trans.push(row);
+    }
+
+    let sep_len = read_bounded_len(r, SYN_MAX_SOLVED_EPS)?;
+    let mut solved_eps = Vec::with_capacity(sep_len);
+    for _ in 0..sep_len {
+        let dm_w = read_state_words_arr::<3>(r)?;
+        let dm_e = read_state_words_arr::<3>(r)?;
+        let dm_s_core = [r.read_u64()?, r.read_u64()?, r.read_u64()?];
+        let dm_s_edge = [r.read_u64()?, r.read_u64()?, r.read_u64()?];
+        let ops = [r.read_u8()?, r.read_u8()?, r.read_u8()?];
+        let op_len = r.read_u8()?;
+        if op_len > 3 {
+            return Err(PersistError::InvalidTopology);
+        }
+        solved_eps.push(SolvedSynEp {
+            dm_w,
+            dm_e,
+            dm_s_core,
+            dm_s_edge,
+            ops,
+            op_len,
+        });
+    }
+
+    let psw_len = read_bounded_len(r, SYN_STATE_BITS)?;
+    let mut poss_sw = Vec::with_capacity(psw_len);
+    for _ in 0..psw_len {
+        poss_sw.push(r.read_u64()?);
+    }
+
+    let ap_len = read_bounded_len(r, SYN_OP_SYNS)?;
+    let mut arc_perms = Vec::with_capacity(ap_len);
+    for _ in 0..ap_len {
+        arc_perms.push(read_u8_vec(r, SYN_STATE_BITS)?);
+    }
+
+    let ig_len = read_bounded_len(r, SYN_OP_SYNS)?;
+    let mut arc_is_grav = Vec::with_capacity(ig_len);
+    for _ in 0..ig_len {
+        arc_is_grav.push(r.read_bool()?);
+    }
+
+    let agc_len = read_bounded_len(r, 4)?;
+    let mut arc_grav_cols = Vec::with_capacity(agc_len);
+    for _ in 0..agc_len {
+        let col_len = read_bounded_len(r, 4)?;
+        let mut col = Vec::with_capacity(col_len);
+        for _ in 0..col_len {
+            col.push([r.read_u8()?, r.read_u8()?, r.read_u8()?]);
+        }
+        arc_grav_cols.push(col);
+    }
+
+    let exec_chain = read_u8_vec(r, SYN_STATE_BITS)?;
+    let exec_p0 = r.read_u8()?;
+    let em_len = read_bounded_len(r, SYN_OP_SYNS)?;
+    let mut exec_models = Vec::with_capacity(em_len);
+    for _ in 0..em_len {
+        exec_models.push(ExecAffPiece {
+            a_neg: r.read_u8()? as i8,
+            b_neg: r.read_u8()? as i8,
+            c_neg: r.read_u8()? as i8,
+            a_pos: r.read_u8()? as i8,
+            b_pos: r.read_u8()? as i8,
+            c_pos: r.read_u8()? as i8,
+        });
+    }
+    let exec_model_valid = r.read_bool()?;
+    let seen_ep_cnt = r.read_u16()?;
+    let null_trials = r.read_u16()?;
+    let exec_trials = r.read_u16()?;
+    let null_rew_sum = r.read_f32()?;
+    let exec_rew_sum = r.read_f32()?;
+    let unearned_null_hits = r.read_u8()?;
+    let synth_op_rr = r.read_u16()?;
+    let synth_sb_op_cursor = r.read_u16()?;
+    let exec_sb_bouts = r.read_u16()?;
+    let exec_sb_sh1 = read_u8_vec(r, SYN_OP_SYNS)?;
+    let exec_sb_exp = read_u8_vec(r, SYN_OP_SYNS)?;
+    let exec_sb_plan_valid = r.read_bool()?;
+
+    let obs_cue_mask = read_cue_words(r)?;
+    let life_confirmed_ops_mask = r.read_u16()?;
+    let ls_len = read_bounded_len(r, SYN_MAX_SLOTS)?;
+    let mut life_slots = Vec::with_capacity(ls_len);
+    for _ in 0..ls_len {
+        let key_mask = read_cue_words(r)?;
+        let known_mask = read_cue_words(r)?;
+        let steps = read_u8_vec(r, SYN_MAX_STEPS)?;
+        let prefix = read_u8_vec(r, SYN_MAX_STEPS)?;
+        let pending_verify = read_u8_vec(r, SYN_MAX_STEPS)?;
+        let status = r.read_u8()?;
+        if status > 2 {
+            return Err(PersistError::InvalidTopology);
+        }
+        let exec_rew = r.read_f32()?;
+        let m1_idx = r.read_u8()?;
+        let m2_idx = r.read_u8()?;
+        let p3_idx = r.read_u8()?;
+        let tried_mask = r.read_u16()?;
+        life_slots.push(LifeTaskSlot {
+            key_mask,
+            known_mask,
+            steps,
+            prefix,
+            pending_verify,
+            status,
+            exec_rew,
+            m1_idx,
+            m2_idx,
+            p3_idx,
+            tried_mask,
+        });
+    }
+    let la_len = read_bounded_len(r, SYN_MAX_ARCHIVE)?;
+    let mut life_archive = Vec::with_capacity(la_len);
+    for _ in 0..la_len {
+        let key_mask = read_cue_words(r)?;
+        let known_mask = read_cue_words(r)?;
+        let steps = read_u8_vec(r, SYN_MAX_STEPS)?;
+        life_archive.push(LifeArchiveEntry {
+            key_mask,
+            known_mask,
+            steps,
+        });
+    }
+    let mac_len = read_bounded_len(r, SYN_MAX_MACROS)?;
+    let mut macros_2step = Vec::with_capacity(mac_len);
+    for _ in 0..mac_len {
+        macros_2step.push([r.read_u8()?, r.read_u8()?]);
+    }
+
+    let roll_cursor = r.read_u16()?;
+    let passive_ticks = r.read_u16()?;
+    let cs_len = read_bounded_len(r, SYN_MAX_SCAN_CHANNELS)?;
+    let mut ch_stats = Vec::with_capacity(cs_len);
+    for _ in 0..cs_len {
+        ch_stats.push(SynChannelStat {
+            t0_val: r.read_f32()?,
+            min_val: r.read_f32()?,
+            max_val: r.read_f32()?,
+            zero_streak: r.read_u16()?,
+            max_zero_streak: r.read_u16()?,
+            ever_neg: r.read_bool()?,
+            burst_early_high: r.read_bool()?,
+            low_mid: r.read_bool()?,
+            steady_high: r.read_bool()?,
+            cue_seen_high: r.read_bool()?,
+            cue_seen_low: r.read_bool()?,
+            probe_min: r.read_f32()?,
+            probe_max: r.read_f32()?,
+            max_step_dx: r.read_f32()?,
+            prev_val: r.read_f32()?,
+            moved_mid_bout: r.read_bool()?,
+            reset_active: r.read_bool()?,
+        });
+    }
+    let pr_len = read_bounded_len(r, 32)?;
+    let mut probes = Vec::with_capacity(pr_len);
+    for _ in 0..pr_len {
+        probes.push(SynProbeRec {
+            act: r.read_u16()?,
+            resp: read_f32_vec(r, SYN_MAX_SCAN_CHANNELS)?,
+            pass1_done: r.read_bool()?,
+            pass2_done: r.read_bool()?,
+        });
+    }
+    let probe_step = r.read_u16()?;
+    let oos_idx = r.read_u8()?;
+    let oos_cos_sum = r.read_f32()?;
+    let cur_probe_base = read_f32_vec(r, SYN_MAX_SCAN_CHANNELS)?;
+    let cur_probe_pos = read_f32_vec(r, SYN_MAX_SCAN_CHANNELS)?;
+    let last_probe_act = r.read_u16()?;
+    let last_probe_dir = r.read_u8()? as i8;
+    if last_probe_dir != -1 && last_probe_dir != 1 {
+        return Err(PersistError::InvalidTopology);
+    }
+
+    let op_probe_active = r.read_bool()?;
+    let op_probe_pair = r.read_u8()?;
+    let op_probe_wait = r.read_u8()?;
+    let op_probe_retries = r.read_u8()?;
+    let op_probe_before = read_f32_vec(r, SYN_MAX_CAND96)?;
+    let sb_period_est = r.read_u16()?;
+    let sb_since_reset = r.read_u16()?;
+    let sb_reset_ticks = read_u16_vec(r, 16)?;
+    let sb_quiet_ticks = r.read_u16()?;
+    let sb_tick = r.read_u16()?;
+    let sb_start_vals = read_f32_vec(r, SYN_MAX_CAND96)?;
+    let sb_op_wait = r.read_u8()?;
+    let sb_pending_op = r.read_u8()?;
+    let sb_pre_c = read_state_words(r)?;
+    let sb_pre_e = read_state_words(r)?;
+    let sb_in_c = read_state_words(r)?;
+    let sb_bout_count = r.read_u16()?;
+    let sb_step_idx = r.read_u8()?;
+    let sb_active_plan = [r.read_u8()?, r.read_u8()?, r.read_u8()?, r.read_u8()?];
+
+    let in_demo = r.read_bool()?;
+    let demo_tick = r.read_u16()?;
+    let test_tick = r.read_u16()?;
+    let demo_x_cand = read_state_words_arr::<3>(r)?;
+    let demo_x_edge_cand = read_state_words_arr::<3>(r)?;
+    let demo_s_core = [r.read_u64()?, r.read_u64()?, r.read_u64()?];
+    let demo_s_edge = [r.read_u64()?, r.read_u64()?, r.read_u64()?];
+    let is_null_hold_ep = r.read_bool()?;
+    let ep_null_got_influx = r.read_bool()?;
+    let ep_planned = [r.read_u8()?, r.read_u8()?, r.read_u8()?];
+    let ep_plan_len = r.read_u8()?;
+    let ep_plan_pc = r.read_u8()?;
+    if ep_plan_len > 3 || ep_plan_pc > 3 {
+        return Err(PersistError::InvalidTopology);
+    }
+    let ep_halted = r.read_bool()?;
+    let ep_solved_flag = r.read_bool()?;
+    let ep_test_wait = r.read_u8()?;
+    let ep_pending_op = r.read_u8()?;
+    let ep_pre_c = read_state_words(r)?;
+    let ep_pre_e = read_state_words(r)?;
+    let ep_in_c = read_state_words(r)?;
+    let ep_ep_rew = r.read_f32()?;
+    let ep_pending_finalize = r.read_bool()?;
+
+    let life_in_cue = r.read_bool()?;
+    let life_cue_tick = r.read_u16()?;
+    let life_act_tick = r.read_u16()?;
+    let life_cur_key = read_cue_words(r)?;
+    let life_cur_known = read_cue_words(r)?;
+    let life_cur_slot_idx = r.read_u16()?;
+    let life_bout_halted = r.read_bool()?;
+    let life_waiting_res = r.read_bool()?;
+    let life_wait_syn = r.read_u8()?;
+    let life_wait_from_prefix = r.read_bool()?;
+    let life_wait_prefix_idx = r.read_u8()?;
+    let life_wait_macro_mode = r.read_u8()?;
+    let life_bout_rew = r.read_f32()?;
+    let life_step_pos = r.read_u8()?;
+    let life_prefix_idx = r.read_u8()?;
+    let life_macro_step_idx = r.read_u8()?;
+    let life_macro_plan = [r.read_u8()?, r.read_u8()?, r.read_u8()?, r.read_u8()?];
+    let life_macro_plan_len = r.read_u8()?;
+    if life_macro_plan_len > 4 || usize::from(life_macro_step_idx) > SYN_MAX_STEPS {
+        return Err(PersistError::InvalidTopology);
+    }
+    let life_bout_unconf = r.read_bool()?;
+    let life_bout_last_conf = r.read_u8()?;
+    let life_bout_last_conf_valid = r.read_bool()?;
+    let life_pending_null_check = r.read_bool()?;
+    let life_is_null_bout = r.read_bool()?;
+    let life_null_rew_accum = r.read_f32()?;
+    let life_prev_had_step = r.read_bool()?;
+    let calib_settle = r.read_u8()?;
+    let h0_len = read_bounded_len(r, SYN_MAX_CAND96)?;
+    let mut cand96_h0 = Vec::with_capacity(h0_len);
+    for _ in 0..h0_len {
+        cand96_h0.push(r.read_u64()?);
+    }
+    let h1_len = read_bounded_len(r, SYN_MAX_CAND96)?;
+    let mut cand96_h1 = Vec::with_capacity(h1_len);
+    for _ in 0..h1_len {
+        cand96_h1.push(r.read_u64()?);
+    }
+    let cand96_twin = read_u8_vec(r, SYN_STATE_BITS)?;
+
+    Ok(SynthesisCortex {
+        regime,
+        calib_done,
+        num_actuators_bound,
+        par_chs,
+        wire_pairs,
+        syn_agency_ema,
+        verified_self_copy_chs,
+        yoked_contaminated,
+        spec_chs,
+        cand96_chs,
+        work_map_idx,
+        cand96_h0,
+        cand96_h1,
+        cand96_twin,
+        is_exec_domain,
+        op_syns,
+        syn_probed_mask,
+        raw_trans,
+        direct_arc_trans,
+        solved_eps,
+        poss_sw,
+        arc_perms,
+        arc_is_grav,
+        arc_grav_cols,
+        exec_chain,
+        exec_p0,
+        exec_models,
+        exec_model_valid,
+        seen_ep_cnt,
+        null_trials,
+        exec_trials,
+        null_rew_sum,
+        exec_rew_sum,
+        unearned_null_hits,
+        synth_op_rr,
+        synth_sb_op_cursor,
+        exec_sb_bouts,
+        exec_sb_sh1,
+        exec_sb_exp,
+        exec_sb_plan_valid,
+        obs_cue_mask,
+        life_confirmed_ops_mask,
+        life_slots,
+        life_archive,
+        macros_2step,
+        roll_cursor,
+        passive_ticks,
+        ch_stats,
+        probes,
+        probe_step,
+        calib_settle,
+        oos_idx,
+        oos_cos_sum,
+        cur_probe_base,
+        cur_probe_pos,
+        last_probe_act,
+        last_probe_dir,
+        op_probe_active,
+        op_probe_pair,
+        op_probe_wait,
+        op_probe_retries,
+        op_probe_before,
+        sb_period_est,
+        sb_since_reset,
+        sb_reset_ticks,
+        sb_quiet_ticks,
+        sb_tick,
+        sb_start_vals,
+        sb_op_wait,
+        sb_pending_op,
+        sb_pre_c,
+        sb_pre_e,
+        sb_in_c,
+        sb_bout_count,
+        sb_step_idx,
+        sb_active_plan,
+        in_demo,
+        demo_tick,
+        test_tick,
+        demo_x_cand,
+        demo_x_edge_cand,
+        demo_s_core,
+        demo_s_edge,
+        is_null_hold_ep,
+        ep_null_got_influx,
+        ep_planned,
+        ep_plan_len,
+        ep_plan_pc,
+        ep_halted,
+        ep_solved_flag,
+        ep_test_wait,
+        ep_pending_op,
+        ep_pre_c,
+        ep_pre_e,
+        ep_in_c,
+        ep_ep_rew,
+        ep_pending_finalize,
+        life_in_cue,
+        life_cue_tick,
+        life_act_tick,
+        life_cur_key,
+        life_cur_known,
+        life_cur_slot_idx,
+        life_bout_halted,
+        life_waiting_res,
+        life_wait_syn,
+        life_wait_from_prefix,
+        life_wait_prefix_idx,
+        life_wait_macro_mode,
+        life_bout_rew,
+        life_step_pos,
+        life_prefix_idx,
+        life_macro_step_idx,
+        life_macro_plan,
+        life_macro_plan_len,
+        life_bout_unconf,
+        life_bout_last_conf,
+        life_bout_last_conf_valid,
+        life_pending_null_check,
+        life_is_null_bout,
+        life_null_rew_accum,
+        life_prev_had_step,
+    })
+}
+
+fn decode_oper_comp_syn(
     bytes: &[u8],
-) -> Result<(OperatorBank, CompositionalCortex), PersistError> {
+) -> Result<(OperatorBank, CompositionalCortex, SynthesisCortex), PersistError> {
     let mut r = ByteReader::new(bytes);
     let op_bank = decode_operator_bank_reader(&mut r)?;
     if r.remaining() == 0 {
-        return Ok((op_bank, CompositionalCortex::default()));
+        return Ok((
+            op_bank,
+            CompositionalCortex::default(),
+            SynthesisCortex::default(),
+        ));
     }
     let ext_magic = r.read_u32()?;
     if ext_magic != COMP_EXT_MAGIC {
         return Err(PersistError::BadMagicOrVersion);
     }
     let comp = decode_compositional_cortex(&mut r)?;
-    Ok((op_bank, comp))
+    if r.remaining() == 0 {
+        return Ok((op_bank, comp, SynthesisCortex::default()));
+    }
+    let syn_magic = r.read_u32()?;
+    if syn_magic != SYN5_EXT_MAGIC {
+        return Err(PersistError::BadMagicOrVersion);
+    }
+    let syn = decode_synthesis_cortex(&mut r)?;
+    if r.remaining() != 0 {
+        return Err(PersistError::InvalidTopology);
+    }
+    Ok((op_bank, comp, syn))
 }
 
 const HEADER_OVERHEAD_MARGIN: usize = 256 * 1024;
@@ -2466,10 +3412,12 @@ fn encode_organism_with_mode(
             + scot_w.buf.len()
             + 72,
     );
-    let mut oper_w = ByteWriter::with_capacity(512);
+    let mut oper_w = ByteWriter::with_capacity(1024);
     encode_operator_bank(&org.operators, &mut oper_w)?;
     oper_w.write_u32(COMP_EXT_MAGIC);
     encode_compositional_cortex(&org.compositional, &mut oper_w)?;
+    oper_w.write_u32(SYN5_EXT_MAGIC);
+    encode_synthesis_cortex(&org.synthesis, &mut oper_w)?;
 
     append_slab(&mut slabs_buf, TAG_BODY, &body_w.buf)?;
     append_slab(&mut slabs_buf, TAG_CELL, &cell_w.buf)?;
@@ -4679,10 +5627,14 @@ fn shadow_decode_organism_with_pages(
         motor_env_var,
     };
 
-    let (operators, compositional) = if version >= 9 {
-        decode_oper_and_comp(payloads[6])?
+    let (operators, compositional, synthesis) = if version >= 9 {
+        decode_oper_comp_syn(payloads[6])?
     } else {
-        (OperatorBank::default(), CompositionalCortex::default())
+        (
+            OperatorBank::default(),
+            CompositionalCortex::default(),
+            SynthesisCortex::default(),
+        )
     };
 
     let decoded = Alpha11Organism {
@@ -4701,6 +5653,7 @@ fn shadow_decode_organism_with_pages(
         committed_motor_pulses,
         operators,
         compositional,
+        synthesis,
         subthreshold_rehearsals,
         mitosis_births,
         contradiction_splits,

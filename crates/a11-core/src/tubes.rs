@@ -33,7 +33,7 @@ const STRIATAL_BIRTH_SALT: u64 = 0x5781_A7A1_0FC0_5EED;
 
 /// Binary magic header on every paged cortical column `.slab` file (`A11CSLAB` LE).
 pub const COL_SLAB_MAGIC: u64 = 0x4131_3143_534C_4142;
-pub const CORTICAL_SLAB_VERSION: u32 = 10;
+pub const CORTICAL_SLAB_VERSION: u32 = 11;
 
 pub const QUARANTINE_CAP: usize = 96;
 pub const WM_RULE_SLOTS: usize = 2;

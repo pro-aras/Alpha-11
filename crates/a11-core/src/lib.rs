@@ -9,6 +9,7 @@ pub mod operators;
 pub mod persistence;
 pub mod pores;
 pub mod rng;
+pub mod synthesis;
 pub mod tubes;
 
 use std::path::Path;
@@ -26,6 +27,7 @@ use crate::persistence::{
 };
 use crate::pores::PoreMembrane;
 use crate::rng::{ParamHasher, Rng64, sanitize, sanitize_clamp};
+use crate::synthesis::SynthesisCortex;
 use crate::tubes::{EfferenceEntry, EfferenceRing, StriatalOfc, Tube, TubeGraph, TubeKind};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,6 +72,7 @@ pub struct Alpha11Organism {
     pub(crate) committed_motor_pulses: u64,
     pub(crate) operators: OperatorBank,
     pub(crate) compositional: CompositionalCortex,
+    pub(crate) synthesis: SynthesisCortex,
     pub(crate) subthreshold_rehearsals: u64,
     pub(crate) mitosis_births: u64,
     pub(crate) contradiction_splits: u64,
@@ -109,6 +112,7 @@ impl Alpha11Organism {
             committed_motor_pulses: 0,
             operators: OperatorBank::default(),
             compositional: CompositionalCortex::default(),
+            synthesis: SynthesisCortex::default(),
             subthreshold_rehearsals: 0,
             mitosis_births: 0,
             contradiction_splits: 0,
@@ -137,6 +141,7 @@ impl Alpha11Organism {
             + self.ring.logical_bytes()
             + self.operators.logical_bytes()
             + self.compositional.logical_bytes()
+            + self.synthesis.logical_bytes()
             + 96
     }
 
@@ -282,6 +287,29 @@ impl Alpha11Organism {
     }
 }
 
+fn apply_self_copy_quarantine(
+    tubes: &mut TubeGraph,
+    membrane: &mut PoreMembrane,
+    agency_ema: f32,
+    self_copy_chs: &[u16],
+) {
+    if agency_ema > tubes.mean_interventional_agency {
+        tubes.mean_interventional_agency = agency_ema;
+    }
+    for &sc_ch in self_copy_chs {
+        let ch32 = u32::from(sc_ch);
+        tubes.striatal.quarantine_channel(ch32);
+        for (idx, sp) in membrane.sensor_pores.iter_mut().enumerate() {
+            if sp.alive && sp.channel == ch32 {
+                sp.alive = false;
+                sp.conductance = 0.0;
+                membrane.sensor_free_list.push(idx as u32);
+                membrane.alive_sensor_count = membrane.alive_sensor_count.saturating_sub(1);
+            }
+        }
+    }
+}
+
 impl OrganismEngine for Alpha11Organism {
     fn step(&mut self, view: FieldView<'_>) -> Result<FieldPulse, PersistError> {
         if self.poisoned {
@@ -395,7 +423,25 @@ impl OrganismEngine for Alpha11Organism {
 
         let q_len_vm =
             (self.tubes.striatal.quarantine_len as usize).min(crate::tubes::QUARANTINE_CAP);
-        if let Some(comp_out) = self.compositional.step_compositional(
+        if let Some(syn_out) = self.synthesis.step_synthesis(
+            view.ambient_in,
+            view.metabolic_influx,
+            view.tissue_stress,
+            view.num_actuators,
+            self.mode,
+            self.seed,
+        ) {
+            if self.mode == ControlMode::Natural {
+                apply_self_copy_quarantine(
+                    &mut self.tubes,
+                    &mut self.membrane,
+                    self.synthesis.syn_agency_ema,
+                    &self.synthesis.verified_self_copy_chs,
+                );
+            }
+            self.tubes.striatal.sync_emitted_action(&syn_out);
+            striatal_pulse = Some(syn_out);
+        } else if let Some(comp_out) = self.compositional.step_compositional(
             view.ambient_in,
             view.metabolic_influx,
             view.tissue_stress,
@@ -405,22 +451,12 @@ impl OrganismEngine for Alpha11Organism {
             self.seed,
         ) {
             if self.mode == ControlMode::Natural {
-                if self.compositional.comp_agency_ema > self.tubes.mean_interventional_agency {
-                    self.tubes.mean_interventional_agency = self.compositional.comp_agency_ema;
-                }
-                for &sc_ch in &self.compositional.verified_self_copy_chs {
-                    let ch32 = u32::from(sc_ch);
-                    self.tubes.striatal.quarantine_channel(ch32);
-                    for (idx, sp) in self.membrane.sensor_pores.iter_mut().enumerate() {
-                        if sp.alive && sp.channel == ch32 {
-                            sp.alive = false;
-                            sp.conductance = 0.0;
-                            self.membrane.sensor_free_list.push(idx as u32);
-                            self.membrane.alive_sensor_count =
-                                self.membrane.alive_sensor_count.saturating_sub(1);
-                        }
-                    }
-                }
+                apply_self_copy_quarantine(
+                    &mut self.tubes,
+                    &mut self.membrane,
+                    self.compositional.comp_agency_ema,
+                    &self.compositional.verified_self_copy_chs,
+                );
             }
             self.tubes.striatal.sync_emitted_action(&comp_out);
             striatal_pulse = Some(comp_out);
@@ -712,6 +748,7 @@ impl OrganismEngine for Alpha11Organism {
         self.membrane.zero_learned_conductances();
         self.operators.zero_learned();
         self.compositional.zero_learned();
+        self.synthesis.zero_learned();
     }
 
     fn learned_parameter_hash(&self) -> u64 {
@@ -722,6 +759,7 @@ impl OrganismEngine for Alpha11Organism {
         self.membrane.hash_learned(&mut hasher);
         self.operators.hash_learned(&mut hasher);
         self.compositional.hash_learned(&mut hasher);
+        self.synthesis.hash_learned(&mut hasher);
         hasher.finish()
     }
 
@@ -770,7 +808,8 @@ impl OrganismEngine for Alpha11Organism {
             mean_interventional_agency: self
                 .tubes
                 .mean_interventional_agency
-                .max(self.compositional.comp_agency_ema),
+                .max(self.compositional.comp_agency_ema)
+                .max(self.synthesis.syn_agency_ema),
             mean_prediction_error: self.cells.mean_prediction_error(),
             committed_motor_pulses: self.committed_motor_pulses,
             subthreshold_rehearsals: self.subthreshold_rehearsals,
@@ -1502,6 +1541,52 @@ mod tests {
         full
     }
 
+    fn downgrade_v11_checkpoint_to_v10(v11: &[u8]) -> Vec<u8> {
+        use crate::persistence::{SYN5_EXT_MAGIC, TAG_OPER};
+        let rd = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        let payload_end = v11.len() - 4;
+        let mut slabs: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut pos = 24usize;
+        let magic_le = SYN5_EXT_MAGIC.to_le_bytes();
+        while pos < payload_end {
+            let tag = rd(v11, pos);
+            let len = rd(v11, pos + 4) as usize;
+            let src = &v11[pos + 8..pos + 8 + len];
+            if tag == TAG_OPER {
+                let mut found_cut = None;
+                for i in (4..=src.len().saturating_sub(4)).rev() {
+                    if src[i..i + 4] == magic_le {
+                        found_cut = Some(i);
+                        break;
+                    }
+                }
+                let cut = found_cut.expect("SYN5_EXT_MAGIC in TAG_OPER");
+                slabs.push((tag, src[..cut].to_vec()));
+            } else {
+                slabs.push((tag, src.to_vec()));
+            }
+            pos += 8 + len + 4;
+        }
+        assert_eq!(slabs.len(), 7);
+        let mut slabs_buf = Vec::new();
+        for (tag, p) in &slabs {
+            let start = slabs_buf.len();
+            slabs_buf.extend_from_slice(&tag.to_le_bytes());
+            slabs_buf.extend_from_slice(&(p.len() as u32).to_le_bytes());
+            slabs_buf.extend_from_slice(p);
+            let scrc = crc32c(&slabs_buf[start..]);
+            slabs_buf.extend_from_slice(&scrc.to_le_bytes());
+        }
+        let mut full = v11[..8].to_vec();
+        full.extend_from_slice(&10u32.to_le_bytes());
+        full.extend_from_slice(&7u32.to_le_bytes());
+        full.extend_from_slice(&(slabs_buf.len() as u64).to_le_bytes());
+        full.extend_from_slice(&slabs_buf);
+        let fcrc = crc32c(&full);
+        full.extend_from_slice(&fcrc.to_le_bytes());
+        full
+    }
+
     #[test]
     fn v3_checkpoint_upgrades_to_v4_and_keeps_stepping() {
         let cfg = OrganismConfig::default();
@@ -1527,8 +1612,11 @@ mod tests {
         for t in 0..150u64 {
             let _ = drive(&mut org, t, &mut ambient);
         }
-        let v10 = org.encode_checkpoint().expect("encode v10");
+        let v11 = org.encode_checkpoint().expect("encode v11");
+        assert_eq!(u32::from_le_bytes([v11[8], v11[9], v11[10], v11[11]]), 11);
+        let v10 = downgrade_v11_checkpoint_to_v10(&v11);
         assert_eq!(u32::from_le_bytes([v10[8], v10[9], v10[10], v10[11]]), 10);
+        assert!(v10.len() < v11.len());
         let v9 = downgrade_v10_checkpoint_to_v9(&v10);
         assert_eq!(u32::from_le_bytes([v9[8], v9[9], v9[10], v9[11]]), 9);
         assert!(v9.len() < v10.len());
@@ -1550,6 +1638,10 @@ mod tests {
         let v3 = downgrade_v4_checkpoint_to_v3(&v4);
         assert_eq!(u32::from_le_bytes([v3[8], v3[9], v3[10], v3[11]]), 3);
         assert!(v3.len() < v4.len());
+
+        let mut upgraded_v10 = Alpha11Organism::new(1, cfg);
+        upgraded_v10.restore_checkpoint(&v10).expect("v10 restore");
+        assert!(!upgraded_v10.is_poisoned());
 
         let mut upgraded_v9 = Alpha11Organism::new(1, cfg);
         upgraded_v9.restore_checkpoint(&v9).expect("v9 restore");
@@ -1585,7 +1677,7 @@ mod tests {
         assert_eq!(a.tube_count, b.tube_count);
 
         let re = upgraded.encode_checkpoint().expect("re-encode");
-        assert_eq!(u32::from_le_bytes([re[8], re[9], re[10], re[11]]), 10);
+        assert_eq!(u32::from_le_bytes([re[8], re[9], re[10], re[11]]), 11);
         let mut corrupt = v3.clone();
         let mid = corrupt.len() / 2;
         corrupt[mid] ^= 0x01;
@@ -1735,7 +1827,7 @@ mod tests {
     }
 
     #[test]
-    fn v10_compositional_roundtrip_and_frozen_invariance() {
+    fn v11_synthesis_roundtrip_and_frozen_invariance() {
         let cfg = OrganismConfig::default();
         let mut org = Alpha11Organism::new(9091, cfg);
         let mut ambient = vec![0.0_f32; 192];
@@ -1757,18 +1849,25 @@ mod tests {
         }
         let hash_before = org.learned_parameter_hash();
         let bytes_before = org.used_state_bytes();
-        let v10 = org.encode_checkpoint().expect("encode v10");
-        assert_eq!(u32::from_le_bytes([v10[8], v10[9], v10[10], v10[11]]), 10);
+        let v11 = org.encode_checkpoint().expect("encode v11");
+        assert_eq!(u32::from_le_bytes([v11[8], v11[9], v11[10], v11[11]]), 11);
 
         let mut restored = Alpha11Organism::new(1, cfg);
-        restored.restore_checkpoint(&v10).expect("restore v10");
+        restored.restore_checkpoint(&v11).expect("restore v11");
         assert_eq!(restored.learned_parameter_hash(), hash_before);
         assert_eq!(restored.used_state_bytes(), bytes_before);
         assert_eq!(restored.compositional, org.compositional);
+        assert_eq!(restored.synthesis, org.synthesis);
+
+        let v10 = downgrade_v11_checkpoint_to_v10(&v11);
+        let mut upgraded_10 = Alpha11Organism::new(1, cfg);
+        upgraded_10.restore_checkpoint(&v10).expect("upgrade v10->v11");
+        assert_eq!(upgraded_10.tick, org.tick);
+        assert_eq!(upgraded_10.compositional, org.compositional);
 
         let v9 = downgrade_v10_checkpoint_to_v9(&v10);
         let mut upgraded = Alpha11Organism::new(1, cfg);
-        upgraded.restore_checkpoint(&v9).expect("upgrade v9->v10");
+        upgraded.restore_checkpoint(&v9).expect("upgrade v9->v11");
         assert_eq!(upgraded.tick, org.tick);
 
         restored.set_control_mode(ControlMode::FrozenPlasticity);
